@@ -220,12 +220,17 @@ removes. Same residual as `slot clear` below, and it closes the same way.
 The reservation itself is all-or-nothing: a write that errors, a write that
 reports fewer bytes than the document, or a failing `fsync` each remove the file
 they just created and refuse, so guard never spawns behind a half-written slot.
-What no code can cover is a kill between the exclusive create and the write,
-which leaves a zero-length file. **A slot whose document cannot be parsed** —
-zero-length from that window, or otherwise truncated or corrupted — is refused
-by `slot clear` as `unreadable`, because there is no pid in it to prove anything
-about. That is the single case an operator handles by hand: confirm that no
-guard of that run is alive, then remove the file.
+That cleanup unlinks only when the path still names the file the exclusive open
+returned (`fstat` against `lstat`, by `dev` and `ino`); anything else is left
+alone and named in the refusal. What no code can cover is a kill between the
+exclusive create and the write, which leaves a zero-length file.
+
+**Manual recovery is for every slot `slot clear` cannot prove dead**, not only
+that one. That means a document it cannot parse (zero-length from the window
+above, or otherwise truncated or corrupted), a pid that is not a positive safe
+integer, and a probe that answers anything other than `ESRCH` — the `unreadable`,
+`invalid-pid` and `unprovable`/`held` statuses in the table below. In each case,
+confirm that no guard of that run is alive, then remove the file yourself.
 
 **Guard never takes a slot over**, so a guard that was killed outright leaves a
 slot that refuses every later guard of that run, whatever state the recorded

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2931,6 +2932,82 @@ test("a reservation whose write is short or unflushed refuses and leaves no file
     "a complete document, or none at all",
   );
   reserved.release();
+
+  // The cleanup removes a *name*, so it first proves the name still points at
+  // the file this reservation opened: `fstat` on the descriptor against
+  // `lstat` on the path. Here the file is replaced between the failed write
+  // and the cleanup, which is what an operator's removal plus another guard's
+  // reservation looks like from inside.
+  const replacement = {
+    schema: GUARD_SLOT_SCHEMA,
+    repository: REPOSITORY,
+    number: PR,
+    runId,
+    pid: process.pid,
+    nonce: "the-guard-that-reserved-the-path-next",
+    reservedAt: "2026-09-09T11:00:00.000Z",
+  };
+  const stolen = storeWith({
+    writeSlot: () => {
+      rmSync(slotPath, { force: true });
+      writeFileSync(slotPath, `${JSON.stringify(replacement)}\n`);
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), {
+        code: "ENOSPC",
+      });
+    },
+  }).reserveGuardSlot(PR, runId);
+  assert.equal(stolen.reserved, false);
+  assert.match(stolen.message, /no longer the one this reservation created/u);
+  assert.deepEqual(
+    stolen.warnings.map((warning) => warning.stage),
+    ["release-guard-slot"],
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(slotPath, "utf8")),
+    replacement,
+    "the next guard's slot survives this one's cleanup",
+  );
+  rmSync(slotPath, { force: true });
+});
+
+test("a slot that cannot be opened to release it is reported, not assumed gone", (t) => {
+  // Every `openSync` failure counted as "already gone", so a slot left behind
+  // by a permission denial was reported as released and the next guard of that
+  // run met it with no record of why. Only `ENOENT` is gone.
+  if (process.getuid?.() === 0) {
+    t.skip("root can open anything, so this cannot be provoked");
+    return;
+  }
+  const context = harness();
+  const runId = RUN_ID;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+
+  const reserved = store.reserveGuardSlot(PR, runId);
+  assert.equal(reserved.reserved, true);
+  chmodSync(slotPath, 0o000);
+  try {
+    const denied = reserved.release();
+    assert.equal(denied.removed, false);
+    assert.equal(denied.warning.stage, "release-guard-slot");
+    assert.equal(denied.warning.path, slotPath);
+    assert.match(denied.warning.message, /could not be opened to release it/u);
+    assert.match(denied.warning.message, /EACCES/u);
+    assert.equal(existsSync(slotPath), true, "and the slot is still there");
+  } finally {
+    chmodSync(slotPath, 0o600);
+  }
+
+  // Readable again, and the same release removes it.
+  assert.deepEqual(reserved.release(), { removed: true, warning: null });
+  assert.equal(existsSync(slotPath), false);
+  // A slot that really is gone is silent: `ENOENT` is the one open failure
+  // that means what the old code assumed every failure meant.
+  assert.deepEqual(reserved.release(), { removed: false, warning: null });
 });
 
 test("a slot a refusal could not give back is named in that refusal", async () => {
@@ -3143,15 +3220,22 @@ test("nothing in the guard path renames or unlinks a slot it did not create", ()
       `the reservation must not call ${mutation}`,
     );
   }
-  // Exactly two removals, and both of a file this reservation created: the
-  // release, behind the nonce comparison, and the cleanup of an empty slot
-  // whose write failed after the exclusive open made the file ours.
-  const removals = reservation.split("rmSync").length - 1;
+  // Exactly two removals, and each one guarded by an identity check on the
+  // file it is about to unlink: the release compares the nonce it wrote, and
+  // the failed-write cleanup compares the descriptor it holds with the path.
+  const removals = reservation.split("rmSync(").length - 1;
   assert.equal(removals, 2, "the reservation removes only its own file");
   assert.ok(
     reservation.indexOf("held?.nonce !== nonce") <
-      reservation.indexOf("rmSync"),
+      reservation.indexOf("rmSync("),
     "the release compares the nonce it wrote first",
+  );
+  assert.ok(
+    reservation.includes("fstatSync(descriptor)") &&
+      reservation.includes("lstatSync(path)") &&
+      reservation.lastIndexOf("fstatSync(descriptor)") <
+        reservation.lastIndexOf("rmSync("),
+    "and the cleanup proves the path is still the file it opened",
   );
   // The create is exclusive, and it is what the reservation rests on.
   assert.ok(reservation.includes('openSync(path, "wx", 0o600)'));

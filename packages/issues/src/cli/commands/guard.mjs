@@ -67,9 +67,11 @@ function reserveGuardSlots(runtime, pairs, runId) {
     const slot = store.reserveGuardSlot(pair.number, runId);
     if (!slot.reserved) {
       // A slot an earlier pair could not give back — a foreign nonce, a failed
-      // unlink — blocks the next guard of this run, so the refusal that
-      // discards it must say so. It used to be dropped on the floor here.
-      const leftover = releaseAll();
+      // unlink, an open that was denied — blocks the next guard of this run,
+      // so the refusal that discards it must say so. It used to be dropped on
+      // the floor here. The refused reservation's own warnings join them: a
+      // half-written file it could not remove is in the way just the same.
+      const leftover = [...(slot.warnings ?? []), ...releaseAll()];
       throw new ClaimConfigError(slot.message, {
         details: {
           runId,

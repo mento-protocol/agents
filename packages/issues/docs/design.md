@@ -1102,7 +1102,10 @@ A holder removes its own slot when the child exits, on every exit path, and only
 its own: `release` opens the file, reads the nonce back through that descriptor,
 and unlinks only when it is this reservation's. A slot carrying another nonce,
 or none that can be read, is left where it is and reported as a warning on
-guard's report line. A spawn that fails reaches the same release. After the
+guard's report line — and so is one that cannot be opened at all, because only
+`ENOENT` means "already gone"; treating a permission denial as one reported a
+slot as released while it sat there blocking the next guard of that run. A spawn
+that fails reaches the same release. After the
 exclusive open, three things can still fail a reservation — a write that errors,
 a write that reports **fewer bytes than the payload**, and an `fsync` that
 errors, which is where a delayed write-back failure surfaces and nowhere else —
@@ -1110,7 +1113,12 @@ and each removes the file it just created rather than leaving a truncated or
 empty one behind. A short write is a failure, not a slower success: the payload
 is a few hundred bytes of a regular file, so anything less means a limit was
 hit, and a ten-byte `RLIMIT_FSIZE` once let guard spawn behind a slot holding
-ten bytes.
+ten bytes. That cleanup unlinks a **name**, so it first proves the name still
+points at the file the exclusive open returned — `fstat` on the descriptor
+against `lstat` on the path, by `dev` and `ino` — and leaves anything else
+alone, naming it in the refusal. Without that check, an operator's removal plus
+another guard's reservation in the same instant would have had the cleanup
+delete the replacement.
 
 Two windows are left, both narrow, both documented because closing either would
 need a rename or a second file — the constructs that made every earlier design
@@ -1118,18 +1126,22 @@ unsound:
 
 - **A kill between the open and the write.** `openSync(path, "wx")` and the
   `writeSync` that follows it are separate syscalls, so a guard killed between
-  them leaves a zero-length file. More generally, **a slot whose document
-  cannot be parsed** — zero-length after a kill in that window, or otherwise
-  truncated or corrupted — carries no pid, so `slot clear` correctly refuses it
-  as `unreadable`: there is nothing there to prove dead. Recovery is manual —
-  confirm that no guard of that run is alive, then remove the file by hand —
-  and it is the one case where an operator removes a slot themselves.
-- **`release` is a read and then an unlink, not one operation.** "Removes only
-  its own slot" holds while no `slot clear` runs beside it. A clear that removes
-  the holder's slot between that read and that unlink lets a successor create a
-  slot which the departing holder then unlinks. It is the same residual as
-  `slot clear` itself, and it closes the same way: one guard per run at a time,
-  and clear a slot only after confirming that no guard of that run is alive.
+  them leaves a zero-length file. It is one instance of the general rule:
+  **manual recovery is for every slot `slot clear` cannot prove dead** — a
+  document it cannot parse (zero-length from that window, or otherwise
+  truncated or corrupted), a pid that is not a positive safe integer, or a
+  probe that answers anything other than `ESRCH`. In each case: confirm that no
+  guard of that run is alive, then remove the file by hand. Those are the cases
+  where an operator removes a slot themselves.
+- **Both identity checks narrow their window; neither closes it.** `release` is
+  a read and then an unlink, and the failed-write cleanup is a `stat` and then
+  an unlink — there is no compare-and-unlink, exactly as there is no
+  compare-and-rename. "Removes only its own slot" therefore holds while no
+  `slot clear` runs beside it: a clear that removes the holder's file between
+  the check and the unlink lets a successor create a slot the departing holder
+  then unlinks. It is the same residual as `slot clear` itself, and it closes
+  the same way: one guard per run at a time, and clear a slot only after
+  confirming that no guard of that run is alive.
 
 **Guard takes no slot over, by any means: no liveness reclaim, no age, no
 lock.** Three designs tried, each unsound, and the reason is structural rather

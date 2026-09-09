@@ -20,7 +20,9 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -343,7 +345,18 @@ export function createStateStore(input) {
      * A holder removes its own slot on exit, and only its own: `release` opens
      * the file, reads the nonce through that descriptor and unlinks only when
      * it is this reservation's. A slot carrying another nonce is left where it
-     * is, with a warning.
+     * is, with a warning, and so is one that cannot even be opened — only
+     * `ENOENT` counts as "already gone".
+     *
+     * The cleanup after a failed write follows the same discipline by
+     * `dev`/`ino`: `fstat` on the open descriptor against `lstat` on the path,
+     * so a file that replaced this one between the failure and the cleanup is
+     * left alone rather than deleted. Both checks **narrow** their window and
+     * neither closes it — there is no compare-and-unlink, exactly as there is
+     * no compare-and-rename — so a concurrent `slot clear`, or a manual
+     * removal, can still land in between. That is the same documented residual
+     * the whole design rests on: one guard per run at a time, and clear a slot
+     * only after confirming no guard of that run is alive.
      *
      * The slot is host-local defence in depth against one run accidentally
      * starting two guards. The reference's compare-and-swap and the exact-head
@@ -372,13 +385,29 @@ export function createStateStore(input) {
       };
       const firstLine = (error) =>
         String(error?.message ?? error).split("\n")[0];
+      const slotWarning = (message) => ({
+        stage: "release-guard-slot",
+        path,
+        message,
+      });
       const release = () => {
         let descriptor = null;
         try {
           descriptor = openSync(path, "r");
-        } catch {
-          // Already gone. Nothing to remove and nothing to warn about.
-          return { removed: false, warning: null };
+        } catch (error) {
+          // `ENOENT` alone is "already gone", and only it. Every other open
+          // failure — a permission denial above all — leaves the slot exactly
+          // where it is, and reporting that as a silent success sent the next
+          // guard of this run into a refusal with no record of why.
+          if (error?.code === "ENOENT") {
+            return { removed: false, warning: null };
+          }
+          return {
+            removed: false,
+            warning: slotWarning(
+              `The guard slot ${path} could not be opened to release it (${firstLine(error)}), so it was left in place`,
+            ),
+          };
         }
         let held = null;
         try {
@@ -395,32 +424,27 @@ export function createStateStore(input) {
         if (held?.nonce !== nonce) {
           return {
             removed: false,
-            warning: {
-              stage: "release-guard-slot",
-              path,
-              message: `The guard slot ${path} carries ${held?.nonce ? "another reservation's nonce" : "no readable nonce"} and was left in place`,
-            },
+            warning: slotWarning(
+              `The guard slot ${path} carries ${held?.nonce ? "another reservation's nonce" : "no readable nonce"} and was left in place`,
+            ),
           };
         }
         try {
           rmSync(path, { force: true });
           return { removed: true, warning: null };
         } catch (error) {
-          return {
-            removed: false,
-            warning: {
-              stage: "release-guard-slot",
-              path,
-              message: firstLine(error),
-            },
-          };
+          return { removed: false, warning: slotWarning(firstLine(error)) };
         }
       };
-      const refuse = (message, holder = null) => ({
+      const refuse = (message, holder = null, warnings = []) => ({
         path,
         reserved: false,
         holder,
         message,
+        // Anything this refusal could not put right and the caller must know
+        // about — a file it created and could not remove, above all. `guard`
+        // carries them into `error.details.slotWarnings`.
+        warnings,
         release,
       });
 
@@ -466,17 +490,52 @@ export function createStateStore(input) {
           flushSlot(descriptor);
           return { path, reserved: true, holder: null, message: null, release };
         } catch (error) {
-          // The exclusive open made this file this reservation's a moment ago,
-          // so removing it removes its own; leaving a truncated or empty slot
-          // would wedge the run behind a file no `slot clear` can prove
-          // anything about.
+          // Remove the half-written slot — but only if the file at the path is
+          // still the one this open created. `rmSync` acts on a *name*, and
+          // between the failure and the cleanup an operator can have removed
+          // that file and another guard reserved the same name; deleting then
+          // would delete the replacement. `fstat` on the descriptor names the
+          // file this reservation holds open, `lstat` names whatever the path
+          // points at now, and `dev`/`ino` decide. It narrows the window and
+          // cannot close it — there is no compare-and-unlink, which is the same
+          // residual `slot clear` carries — so anything but a match is left
+          // alone and reported.
+          const warnings = [];
+          let owned = false;
           try {
-            rmSync(path, { force: true });
-          } catch {
-            // Reported by the refusal below either way.
+            const held = fstatSync(descriptor);
+            const current = lstatSync(path);
+            owned = held.dev === current.dev && held.ino === current.ino;
+          } catch (statError) {
+            warnings.push(
+              slotWarning(
+                `The guard slot ${path} could not be identified after a failed write (${firstLine(statError)}), so it was left in place`,
+              ),
+            );
           }
+          if (owned) {
+            try {
+              rmSync(path, { force: true });
+            } catch (removeError) {
+              warnings.push(
+                slotWarning(
+                  `The half-written guard slot ${path} could not be removed: ${firstLine(removeError)}`,
+                ),
+              );
+            }
+          } else if (warnings.length === 0) {
+            warnings.push(
+              slotWarning(
+                `The file at ${path} is no longer the one this reservation created, so the failed write left it untouched`,
+              ),
+            );
+          }
+          const trailer =
+            warnings.length > 0 ? ` (${warnings[0].message})` : "";
           return refuse(
-            `The guard slot ${path} could not be written: ${firstLine(error)}`,
+            `The guard slot ${path} could not be written: ${firstLine(error)}${trailer}`,
+            null,
+            warnings,
           );
         } finally {
           try {
