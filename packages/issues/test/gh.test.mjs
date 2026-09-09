@@ -48,7 +48,29 @@ const AUTHOR = {
   email: "claims@users.noreply.github.com",
 };
 
-/** A `child_process` stand-in with recorded signals and no real process. */
+/**
+ * How long a fake child may hold the event loop open before it gives up.
+ *
+ * A backstop, not a budget: every fake child below is closed, errored or
+ * SIGKILLed within milliseconds. A future one that is not stalls for this long
+ * and then fails the way it would have failed without the handle at all,
+ * instead of hanging the run.
+ */
+const FAKE_CHILD_MAX_LIFETIME_MS = 10_000;
+
+/**
+ * A `child_process` stand-in with recorded signals and no real process.
+ *
+ * It holds the event loop open while it is "running", the way a real
+ * `ChildProcess` handle does. `runGh` depends on that: it `unref()`s its
+ * timeout and kill-grace timers on purpose, so a real hung `gh` is what keeps
+ * the loop alive long enough for them to fire. A fake child that references
+ * nothing lets the loop drain first, the unref'd timeout never fires, and
+ * node:test cancels the still-pending test with "Promise resolution is still
+ * pending but the event loop has already resolved". Node 22 does exactly that;
+ * Node 24 happens to order it the other way, which is why this only failed on
+ * CI.
+ */
 function createFakeChild() {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -57,8 +79,28 @@ function createFakeChild() {
   child.stderr.setEncoding = () => {};
   child.killSignals = [];
   const waiters = new Map();
+
+  let lifetimeTimer = setTimeout(() => {
+    lifetimeTimer = null;
+  }, FAKE_CHILD_MAX_LIFETIME_MS);
+  /** Drop the handle, as a real child does once it is gone. */
+  const releaseEventLoop = () => {
+    if (!lifetimeTimer) return;
+    clearTimeout(lifetimeTimer);
+    lifetimeTimer = null;
+  };
+  child.releaseEventLoop = releaseEventLoop;
+  // A real child releases its handle when it exits or fails to start.
+  child.on("close", releaseEventLoop);
+  child.on("exit", releaseEventLoop);
+  child.on("error", releaseEventLoop);
+
   child.kill = (signal = "SIGTERM") => {
     child.killSignals.push(signal);
+    // A real child outlives `SIGTERM` until it chooses to exit, and no fake
+    // child re-emits `close` afterwards. The `SIGKILL` escalation is what ends
+    // it here, which keeps the kill-grace timer observable.
+    if (signal === "SIGKILL") releaseEventLoop();
     for (const resolve of waiters.get(signal) ?? []) resolve();
     waiters.delete(signal);
     return true;
@@ -422,9 +464,9 @@ test("a stream over the cap kills the child and a hung gh is terminated at timeo
 
   const hungChild = hanging.calls[0].child;
   assert.deepEqual(hungChild.killSignals, ["SIGTERM"]);
-  const keepAlive = setInterval(() => {}, 1000);
+  // The child itself holds the loop open until the SIGKILL escalation lands,
+  // so the unref'd kill-grace timer fires without a keep-alive here.
   await hungChild.whenKilled("SIGKILL");
-  clearInterval(keepAlive);
   assert.deepEqual(hungChild.killSignals, ["SIGTERM", "SIGKILL"]);
 
   // An AbortSignal terminates the same way and is equally unknown. A signal
