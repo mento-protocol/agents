@@ -7,6 +7,7 @@ import {
   leaseState,
   parseClaimPayload,
   serializeClaimPayload,
+  takeoverEligibility,
 } from "../src/claims/payload.mjs";
 import { prClaimProfile } from "../src/claims/profile.mjs";
 
@@ -258,6 +259,68 @@ test("payload parse rejects invalid JSON, wrong kind, wrong version, bad state, 
   assert.equal(view.expired, false, "a LOCK with no lease block never expires");
   assert.equal(view.takeoverEligible, false);
   assert.equal(view.takeoverReason, "no-expiry");
+});
+
+test("a lease block with an absent or unparsable startedAt is refused, never left untakeable", () => {
+  const parse = (raw) =>
+    parseClaimPayload(raw, { scope, profile, oid: "abc123", refName });
+  const leaseOptions = {
+    graceMs: 300_000,
+    maxTtlMs: 21_600_000,
+    skewToleranceMs: 300_000,
+  };
+  const afterEverything = Date.parse("2030-01-01T00:00:00.000Z");
+
+  const absent = lockPayload();
+  delete absent.startedAt;
+  for (const [label, raw] of [
+    ["an absent startedAt", JSON.stringify(absent)],
+    [
+      "an unparsable startedAt",
+      JSON.stringify(lockPayload({ startedAt: "2026-09-09 09:58" })),
+    ],
+    [
+      "a non-UTC startedAt",
+      JSON.stringify(
+        lockPayload({ startedAt: "2026-09-09T09:58:12.004+02:00" }),
+      ),
+    ],
+  ]) {
+    assert.throws(
+      () => parse(raw),
+      (error) => {
+        assert.match(
+          error.message,
+          /startedAt is not a strict ISO-8601 UTC instant/,
+          label,
+        );
+        assert.equal(error.refInvalid, true, label);
+        return true;
+      },
+      label,
+    );
+  }
+
+  // Refusing on parse keeps the two consequences below out of the read path.
+  // They are pinned here against a hand-built payload, because
+  // `takeoverEligibility` is exported and accepts any payload.
+  const view = leaseState(absent, afterEverything, leaseOptions);
+  assert.equal(view.leased, true, "the ten lease fields are all present");
+  assert.equal(
+    view.takeoverEligible,
+    false,
+    "a NaN ceiling leaves the claim takeable by nobody, at every instant",
+  );
+  const verdict = takeoverEligibility(absent, {
+    nowMs: afterEverything,
+    ...leaseOptions,
+  });
+  assert.equal(
+    verdict.eligibleAt,
+    null,
+    "a claim verdict, not a RangeError from new Date(NaN)",
+  );
+  assert.equal(verdict.eligible, false);
 });
 
 test("a payload's own graceSeconds is clamped before it can inflate the takeover ceiling", () => {

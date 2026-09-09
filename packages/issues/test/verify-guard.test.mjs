@@ -734,6 +734,12 @@ test("guard leads the child's process group and kills the whole tree", async () 
   // runs a pre-push hook that spawns `trunk check --all`, so the write guard
   // is meant to stop keeps running after `git` dies. The child here starts a
   // grandchild and prints its pid, exactly that shape.
+  //
+  // A timer keeps the grandchild alive, not `stdin.resume()`. It is spawned
+  // with `stdio: "ignore"`, so its stdin is `/dev/null` and ends at once;
+  // resuming that stream holds nothing open and the grandchild exits by
+  // itself. The liveness assertion below would then race a process that was
+  // already leaving, and the kill assertion could pass for the wrong reason.
   const { ctx, server, clock, lease } = await heldLease();
   const scheduler = manualScheduler();
   const spawned = realSpawn();
@@ -745,7 +751,7 @@ test("guard leads the child's process group and kills the whole tree", async () 
       process.execPath,
       "-e",
       "const {spawn} = require('node:child_process');" +
-        "const grandchild = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {stdio: 'ignore'});" +
+        "const grandchild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {stdio: 'ignore'});" +
         "process.stdout.write(String(grandchild.pid));" +
         "process.stdin.resume();",
     ],
@@ -970,6 +976,220 @@ test("guard kills the child and exits 13 when the lease it proved runs out unren
     "the child stopped before any peer could take the claim over",
   );
   assert.equal(stderr.lines.at(-1).exitCode, 13);
+});
+
+test("an overlapping renew tick is skipped, so a slow transport never kills a held claim", async () => {
+  // `defaultScheduleRenews` fires `void tick()` on an interval and tracks no
+  // completion. A tick slower than the interval therefore used to overlap the
+  // next one, and both held the same lease object: the first rotated the head
+  // and the token, and the second submitted its compare-and-swap against the
+  // token the first had just replaced. That failed as CLAIM_NOT_HELD or
+  // CLAIM_SUPERSEDED, both of which guard reads as a lost claim, so it killed
+  // a child whose claim this run still held and returned 13.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+
+  let releaseGate;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  let reachedGate;
+  const atGate = new Promise((resolve) => {
+    reachedGate = resolve;
+  });
+  let swaps = 0;
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    overrides: server.withOperations({
+      async compareAndSwapRef(...args) {
+        swaps += 1;
+        if (swaps === 1) {
+          reachedGate();
+          await gate;
+        }
+        return server.operations.compareAndSwapRef(...args);
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  clock.advance(11 * MINUTE);
+  const first = scheduler.tick();
+  await atGate;
+
+  // The interval fires again while the first tick is still inside its
+  // compare-and-swap.
+  await scheduler.tick();
+  assert.equal(
+    swaps,
+    1,
+    "the overlapping tick attempted no second compare-and-swap",
+  );
+
+  releaseGate();
+  await first;
+  spawned.children[0].stdin.end();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 0, "the child was never killed");
+  assert.equal(result.report.killedBy, null);
+  assert.equal(result.report.renews.length, 1, "exactly one renew landed");
+  assert.equal(result.report.claims[0].held, true);
+});
+
+test("a renew tick parked on a dead transport does not outlive the lease it proved", async () => {
+  // The pre-network deadline check inside the tick requires `entry.unverified`,
+  // which only becomes true after a request rejects. A request that never
+  // answers therefore left the child publishing indefinitely: the tick was
+  // suspended inside it, so no code in the tick could notice that the lease it
+  // last proved had run out. A probe advanced the clock past expiry plus grace
+  // with a renew pending and guard still returned 0. The deadline timer below
+  // is independent of the renew tick, and of the scheduler a caller injects.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  const expiresAtMs = Date.parse(lease.payload.expiresAt);
+
+  const hung = new Promise(() => {});
+  let hangReads = false;
+  let reachedHang;
+  const atHang = new Promise((resolve) => {
+    reachedHang = resolve;
+  });
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    killGraceMs: 50,
+    overrides: server.withOperations({
+      async readClaimRef(...args) {
+        if (!hangReads) return server.operations.readClaimRef(...args);
+        reachedHang();
+        await hung;
+        /* c8 ignore next -- the hung read never returns. */
+        return null;
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  hangReads = true;
+  void scheduler.tick();
+  await atHang;
+
+  // Past `expiresAt - minRemainingMs`, the same line the mandatory verdict
+  // applied before the spawn, while the renew is still waiting.
+  clock.advance(25 * MINUTE);
+
+  const result = await guarded;
+
+  assert.equal(result.exitCode, 13);
+  assert.equal(result.report.killedBy, "lease-expired");
+  assert.equal(result.report.claims[0].held, false);
+  assert.equal(result.report.claims[0].reason, "lease-expired");
+  assert.ok(
+    clock.now() < expiresAtMs + 5 * MINUTE,
+    "the child stopped before any peer could take the claim over",
+  );
+});
+
+test("every family member's lease deadline is re-checked immediately before the spawn", async () => {
+  // Members are verified one round trip at a time and the child spawns only
+  // after the last one answers, so a slow read — or simply a long family —
+  // leaves the earlier verdicts older than they claim. A probe reported
+  // `held: true` with thirty minutes remaining for a lease that had in fact
+  // run out six minutes earlier.
+  const { ctx, server, clock } = createTestContext();
+  const first = await acquireClaim(ctx, PR, {});
+  const second = await acquireClaim(ctx, 880, {});
+  const spawned = recordingSpawn();
+  const stderr = sink();
+
+  const result = await guardChild(
+    ctx,
+    [
+      { number: PR, token: first.token },
+      { number: 880, token: second.token },
+    ],
+    {
+      runId: first.owner.runId,
+      purpose: "push",
+      argv: [...LONG_LIVED_ARGV],
+      spawn: spawned.spawn,
+      scheduleRenews: () => () => {},
+      reportSink: stderr.write,
+      detached: false,
+      // Verifying 880 takes long enough that PR 872's own proof runs out.
+      overrides: server.withOperations({
+        async readClaimRef(context, refName, scope) {
+          const state = await server.operations.readClaimRef(
+            context,
+            refName,
+            scope,
+          );
+          if (refName === claimRefName(ctx, 880)) clock.advance(25 * MINUTE);
+          return state;
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(spawned.calls, [], "no child is started");
+  assert.equal(result.exitCode, 15, "renew-required, not a spawn");
+  assert.equal(result.report.claims[0].number, PR);
+  assert.equal(result.report.claims[0].held, false);
+  assert.equal(result.report.claims[0].reason, "lease-expired");
+  assert.ok(
+    result.report.warnings.some(
+      (warning) => warning.code === "CLAIM_LEASE_EXPIRED",
+    ),
+    "the report says which member's proof went stale and when",
+  );
+});
+
+test("verifyClaim measures the remaining lease from after the read, not before it", async () => {
+  // `remainingMs` is the budget a caller spends the lease against. Capturing
+  // the instant before the round trip credits the caller with the time the
+  // read itself consumed.
+  const { ctx, server, clock } = createTestContext();
+  const lease = await acquireClaim(ctx, PR, {});
+  const slow = server.withOperations({
+    async readClaimRef(...args) {
+      const state = await server.operations.readClaimRef(...args);
+      clock.advance(10 * MINUTE);
+      return state;
+    },
+  });
+
+  const report = await verifyClaim(
+    ctx,
+    PR,
+    { token: lease.token, runId: lease.owner.runId },
+    slow,
+  );
+
+  assert.equal(report.held, true);
+  assert.equal(
+    report.remainingMs,
+    20 * MINUTE,
+    "thirty minutes of lease, ten of them spent inside the read",
+  );
+  assert.equal(report.checkedAt, new Date(clock.now()).toISOString());
 });
 
 test("a renew failure guard cannot classify leaves the claim unverified, not held", async () => {

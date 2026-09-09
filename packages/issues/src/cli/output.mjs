@@ -169,7 +169,7 @@ export function claimBlock(lease) {
  * makes a token rotation by renew safe to act on.
  *
  * @param {object} input `{ configPath, number, token, runId, candidate,
- *   operationId, supersedes, numberFlag }`.
+ *   operationId, parentLock, supersedes, numberFlag }`.
  * @returns {object|null}
  */
 export function buildNextCommands(input) {
@@ -180,6 +180,7 @@ export function buildNextCommands(input) {
     runId = null,
     candidate = null,
     operationId = null,
+    parentLock = null,
     supersedes = null,
     action = null,
     numberFlag = "pr",
@@ -206,7 +207,15 @@ export function buildNextCommands(input) {
     // printed recovery would answer exit 13 — "treat work in flight as
     // forfeit" — about a commit this run had actually landed.
     const runIdFlag = runId === null ? "" : ` --run-id ${runId}`;
-    next.adopt = `mento-issues claims adopt${config} ${target} --candidate ${candidate} --operation-id ${operationId}${runIdFlag}${action ? ` --action ${action}` : ""}`;
+    // A release candidate needs the LOCK it closes for the same reason.
+    // `adoptRelease` compares the observed UNLOCK's `parentLock` to it, so a
+    // line without it proves nothing about a release that actually landed and
+    // answers exit 13 about it.
+    const parentFlag =
+      action === "release" && parentLock !== null
+        ? ` --parent-lock ${parentLock}`
+        : "";
+    next.adopt = `mento-issues claims adopt${config} ${target} --candidate ${candidate} --operation-id ${operationId}${runIdFlag}${parentFlag}${action ? ` --action ${action}` : ""}`;
   }
   if (supersedes !== null) {
     next.takeover = `mento-issues claims takeover${config} ${target} --supersedes ${supersedes}`;

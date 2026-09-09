@@ -541,7 +541,15 @@ async function performTakeover({
 }) {
   const operationId = `takeover-${ctx.randomUUID()}`;
   const inherited = pickMetadata(ctx.profile, current.payload);
-  assertMetadataKeys(ctx.profile, metadata);
+  // The same stripped envelope `acquireClaim` validates. `acquireClaim`
+  // forwards the caller's raw metadata here, and this function reads
+  // `metadata.agent` itself, so validating the raw bag would refuse the very
+  // keys the envelope owns: `acquireClaim(ctx, number, { agent })` would
+  // succeed against an UNLOCK and fail with `Unknown metadata key agent` the
+  // moment the same call had to take over an expired LOCK. The issue-board
+  // profile has the same problem with `metadata.operation`, which its own
+  // `operationFor` requires.
+  assertMetadataKeys(ctx.profile, stripEnvelopeKeys(ctx.profile, metadata));
   const payload = buildClaimPayload({
     profile: ctx.profile,
     scope,

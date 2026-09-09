@@ -18,6 +18,7 @@ import { constants as osConstants } from "node:os";
 
 import {
   DEFAULT_MIN_REMAINING_MS,
+  GUARD_DEADLINE_CHECK_INTERVAL_MS,
   GUARD_HEARTBEAT_KILL_GRACE_MS,
 } from "./constants.mjs";
 import { guardRenewIntervalMs } from "./context.mjs";
@@ -217,7 +218,6 @@ function isoOrNull(milliseconds) {
 export async function verifyClaim(ctx, number, input = {}, overrides = {}) {
   const { token, runId, now, minRemainingMs = 0, purpose = null } = input;
   assertFenceIdentity(token, runId);
-  const nowMs = now ?? ctx.clock.now();
   const refName = claimRefName(ctx, number);
 
   let state = null;
@@ -228,6 +228,14 @@ export async function verifyClaim(ctx, number, input = {}, overrides = {}) {
     if (error?.claimCode !== "CLAIM_REF_INVALID") throw error;
     invalid = error;
   }
+
+  // The instant the read answered, not the instant it was asked. `remainingMs`
+  // is the budget a caller spends the lease against, and dating it from before
+  // the round trip credits the caller with time the read itself consumed: a
+  // read that takes six minutes reports six minutes of lease that is already
+  // gone. An explicitly supplied `now` still wins, because a caller asking
+  // about a stated instant is asking about that instant.
+  const nowMs = now ?? ctx.clock.now();
 
   const base = {
     number,
@@ -835,6 +843,45 @@ export async function guardChild(ctx, claims, options = {}) {
     entries.push(entry);
   }
 
+  /**
+   * Has the last proven lease reached the instant a holder must stop writing?
+   *
+   * The line is `expiresAt - minRemainingMs`, the same standard the mandatory
+   * verdict applied before the spawn (PLAN §2.6). It needs no network, which is
+   * the point: a transport that stopped answering cannot move it.
+   *
+   * @param {object} entry one guarded claim.
+   * @returns {boolean}
+   */
+  const pastLeaseDeadline = (entry) => {
+    if (!Number.isFinite(entry.deadlineMs)) return false;
+    return ctx.clock.now() >= entry.deadlineMs - minRemainingMs;
+  };
+
+  // Every member is verified with its own round trip, and the child spawns only
+  // after the last one answers. A slow read, or simply a long family, therefore
+  // leaves the earlier members' proofs older than the verdict claims: a probe
+  // reported `held: true` with thirty minutes remaining for a lease that had in
+  // fact run out six minutes earlier. The deadline is local arithmetic, so it
+  // is re-checked here against every member, immediately before the spawn.
+  if (mandatory) {
+    for (const entry of entries) {
+      if (!entry.report.held || !pastLeaseDeadline(entry)) continue;
+      entry.report = {
+        ...entry.report,
+        held: false,
+        reason: "lease-expired",
+        exitCode: VERIFY_REASON_EXIT_CODES["lease-expired"],
+      };
+      warnings.push({
+        number: entry.number,
+        claimCode: "CLAIM_RENEW_REQUIRED",
+        code: "CLAIM_LEASE_EXPIRED",
+        message: `The proven lease for ${entry.number} expired at ${isoOrNull(entry.deadlineMs)} while the remaining members were verified`,
+      });
+    }
+  }
+
   const blocked = mandatory
     ? entries.find((entry) => !entry.report.held)
     : null;
@@ -995,21 +1042,6 @@ export async function guardChild(ctx, claims, options = {}) {
     killTimer.unref?.();
   }
 
-  /**
-   * Has the last proven lease reached the instant a holder must stop writing?
-   *
-   * The line is `expiresAt - minRemainingMs`, the same standard the mandatory
-   * verdict applied before the spawn (PLAN §2.6). It needs no network, which is
-   * the point: a transport that stopped answering cannot move it.
-   *
-   * @param {object} entry one guarded claim.
-   * @returns {boolean}
-   */
-  const pastLeaseDeadline = (entry) => {
-    if (!Number.isFinite(entry.deadlineMs)) return false;
-    return ctx.clock.now() >= entry.deadlineMs - minRemainingMs;
-  };
-
   /** Kill the child because the proof ran out, not because a peer took it. */
   const expireEntry = (entry) => {
     entry.report = {
@@ -1028,7 +1060,58 @@ export async function guardChild(ctx, claims, options = {}) {
     killChild("lease-expired");
   };
 
+  /**
+   * Stop the child when a proven lease has run out. Local arithmetic only.
+   *
+   * This is the enforcement the renew tick cannot be trusted with. A tick that
+   * is waiting on a transport which never answers holds no evidence and runs
+   * no code, so nothing inside it can notice that the lease it last proved has
+   * expired. The watchdog below runs this on its own timer for exactly that
+   * case, and the tick runs it too so a fast tick still stops promptly.
+   *
+   * @returns {boolean} whether the child was stopped.
+   */
+  const enforceLeaseDeadlines = () => {
+    if (!mandatory || killedBy != null || finished) return false;
+    for (const entry of entries) {
+      if (!entry.report.held) continue;
+      if (!pastLeaseDeadline(entry)) continue;
+      expireEntry(entry);
+      return true;
+    }
+    return false;
+  };
+
+  // One tick at a time. `defaultScheduleRenews` fires `void tick()` on an
+  // interval and tracks no completion, so a tick slower than the interval used
+  // to overlap the next one. Both then held the same `entry.lease`: the first
+  // rotated the head and the token, and the second submitted its
+  // compare-and-swap against the token the first had just replaced. That
+  // failed as `CLAIM_NOT_HELD` or `CLAIM_SUPERSEDED`, and both codes are in
+  // `CLAIM_LOST_CLAIM_CODES`, so guard killed a child whose claim this run
+  // still held and returned 13. `guardRenewIntervalMs` can floor the interval
+  // at `MIN_GUARD_RENEW_INTERVAL_MS`, so a slow transport reached that state
+  // with no peer involved at all.
+  let tickInFlight = false;
+
   const renewTick = async () => {
+    // A skipped tick still enforces the deadline. That check needs no network,
+    // so it must not wait behind the round trip that is holding up the tick in
+    // flight.
+    if (tickInFlight) {
+      enforceLeaseDeadlines();
+      return;
+    }
+    tickInFlight = true;
+    try {
+      await renewEntries();
+    } finally {
+      tickInFlight = false;
+    }
+  };
+
+  /** One pass over every guarded claim; never run concurrently with itself. */
+  async function renewEntries() {
     for (const entry of entries) {
       if (killedBy != null || finished) return;
       if (!entry.report.held) continue;
@@ -1098,7 +1181,7 @@ export async function guardChild(ctx, claims, options = {}) {
         return;
       }
     }
-  };
+  }
 
   const exited = new Promise((resolve) => {
     child.once("error", (error) => {
@@ -1110,7 +1193,23 @@ export async function guardChild(ctx, claims, options = {}) {
     );
   });
 
-  cancelRenews = scheduleRenews(renewIntervalMs, renewTick);
+  const cancelTicks = scheduleRenews(renewIntervalMs, renewTick);
+  // The deadline gets its own timer, and deliberately not the injectable one.
+  // `scheduleRenews` is a caller's to replace, and the renew tick it drives
+  // can be parked inside a transport call that never returns; neither may
+  // decide how long a child keeps publishing. This timer runs the local check
+  // on a schedule nothing outside this function can move.
+  const deadlineTimer = mandatory
+    ? setInterval(
+        enforceLeaseDeadlines,
+        Math.min(renewIntervalMs, GUARD_DEADLINE_CHECK_INTERVAL_MS),
+      )
+    : null;
+  deadlineTimer?.unref?.();
+  cancelRenews = () => {
+    cancelTicks();
+    if (deadlineTimer) clearInterval(deadlineTimer);
+  };
 
   const result = await exited;
   finished = true;

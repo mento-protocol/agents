@@ -68,6 +68,13 @@ export async function runVerify(runtime) {
 
   const exitCode = advisory ? 0 : report.exitCode;
   const status = advisory ? "ok" : VERIFY_REASON_STATUSES[report.reason];
+  // `token-stale` is the one negative verdict whose head is this run's own: the
+  // reason is only reached when the holder's run id matches, so the head is
+  // where this run's last renew left the claim. Printing the supplied token
+  // back would hand the caller a renew, a guard and a release that each exit
+  // 14; the verified head is the token those commands need.
+  const currentToken =
+    report.reason === "token-stale" ? (report.current?.oid ?? token) : token;
   return {
     status,
     exitCode,
@@ -97,7 +104,7 @@ export async function runVerify(runtime) {
         configPath: runtime.configPath,
         number,
         numberFlag: ctx.profile.numberKey,
-        token,
+        token: currentToken,
         runId,
         supersedes:
           report.reason === "token-superseded" ? report.current?.oid : null,

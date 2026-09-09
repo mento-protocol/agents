@@ -199,11 +199,13 @@ test("release finding an unparseable head is stale with recovery text", async ()
       assert.equal(error.claimCode, "CLAIM_STALE");
       assert.equal(error.code, "CLAIM_STALE");
       assert.match(error.message, /is not a valid mutex state/);
-      // `--run-id` is part of the printed line: `adopt` cannot prove a
-      // candidate is ours without it.
+      // `--run-id` and `--parent-lock` are both part of the printed line:
+      // `adopt` proves a release candidate is ours by this run id and by the
+      // LOCK the UNLOCK closes, and without either it answers exit 13 for a
+      // release that landed.
       assert.match(
         error.message,
-        /mento-issues claims adopt --pr 872 --candidate <oid> --operation-id lock-uuid-1 --run-id claude-code-mac-20260909T095812Z-7c1a9e4213b0 --action release/,
+        /mento-issues claims adopt --pr 872 --candidate <oid> --operation-id lock-uuid-1 --run-id claude-code-mac-20260909T095812Z-7c1a9e4213b0 --parent-lock claim-commit-2 --action release/,
       );
       assert.match(
         error.message,

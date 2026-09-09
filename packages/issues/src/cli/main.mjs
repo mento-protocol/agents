@@ -27,7 +27,6 @@ import {
   assertMutationAllowed,
   createClaimContext,
 } from "../claims/context.mjs";
-import { validateClaimId } from "../claims/payload.mjs";
 import { defaultOperations } from "../claims/ref.mjs";
 import { assertObjectId, parseCommandLine } from "./args.mjs";
 import { assertPackageIdentity, loadClaimConfig } from "./config.mjs";
@@ -36,6 +35,7 @@ import {
   defaultViewerLoginReader,
   resolveCliIdentity,
   resolveLogin,
+  resolveRunId,
 } from "./identity.mjs";
 import {
   buildErrorBlock,
@@ -87,7 +87,12 @@ const HANDLERS = Object.freeze({
 });
 
 /** Flags whose value must be a 40-character lowercase object id. */
-const OBJECT_ID_FLAGS = Object.freeze(["token", "supersedes", "candidate"]);
+const OBJECT_ID_FLAGS = Object.freeze([
+  "token",
+  "supersedes",
+  "candidate",
+  "parent-lock",
+]);
 
 function assertObjectIdFlags(flags) {
   for (const name of OBJECT_ID_FLAGS) {
@@ -99,21 +104,6 @@ function assertObjectIdFlags(flags) {
   }
   if (Array.isArray(flags.tokens)) {
     for (const entry of flags.tokens) assertObjectId(entry, "tokens");
-  }
-}
-
-function assertRunIdFlag(flags) {
-  if (flags["run-id"] === undefined) return;
-  try {
-    validateClaimId(flags["run-id"]);
-  } catch (error) {
-    throw new ClaimUsageError(
-      `--run-id is not a valid run id: ${error.message}`,
-      {
-        details: { runId: flags["run-id"] },
-        cause: error,
-      },
-    );
   }
 }
 
@@ -170,11 +160,33 @@ function buildClock(flags, env, injected) {
   return { now: () => parsed };
 }
 
-function assertGatedFlags(gated, config) {
+/**
+ * Refuse a gated flag that no loaded config authorises.
+ *
+ * Every command's grammar carries the gated flags, and `--config` is global, so
+ * a command that requires no config may still be given one. Without a config
+ * there is nothing that can set `allowOverrides`, so the flag is refused rather
+ * than accepted and ignored: a run that passed `--ttl-minutes 5` and silently
+ * got the built-in lease would believe a claim it never held.
+ *
+ * @param {string[]} gated the gated flags this command line supplied.
+ * @param {object|null} config the loaded config, if any.
+ * @param {string|null} configPath the `--config` path, if one was given.
+ * @returns {void}
+ */
+function assertGatedFlags(gated, config, configPath) {
   if (gated.length === 0) return;
+  const names = gated.map((name) => `--${name}`).join(", ");
+  const verb = gated.length === 1 ? "is" : "are";
+  if (configPath === null) {
+    throw new ClaimConfigError(
+      `No --config was given, so ${names} ${verb} refused; only a config that sets allowOverrides authorises a gated flag`,
+      { details: { gated, config: null, allowOverrides: null } },
+    );
+  }
   if (config?.claims?.allowOverrides === true) return;
   throw new ClaimConfigError(
-    `The loaded config does not set allowOverrides, so ${gated.map((name) => `--${name}`).join(", ")} ${gated.length === 1 ? "is" : "are"} refused`,
+    `The loaded config does not set allowOverrides, so ${names} ${verb} refused`,
     {
       details: {
         gated,
@@ -224,7 +236,8 @@ async function createRuntime(parsed, options) {
   const warnings = [];
 
   assertObjectIdFlags(flags);
-  assertRunIdFlag(flags);
+  // Both sources, one check: the resolved value is what reaches the payload.
+  resolveRunId({ flags, env, spec });
   if (spec.requiresConfig && flags.config === undefined) {
     throw new ClaimUsageError(`${key} requires --config <path>`, {
       details: { command: key, flag: "config" },
@@ -260,8 +273,8 @@ async function createRuntime(parsed, options) {
     warnings.push(
       ...assertPackageIdentity(runtime.config, options.packageIdentity),
     );
-    assertGatedFlags(parsed.gated, runtime.config);
   }
+  assertGatedFlags(parsed.gated, runtime.config, runtime.configPath);
   assertClockNotSupplied(parsed, runtime.config);
   runtime.clock = buildClock(flags, env, options.clock);
   if (!spec.requiresConfig) return runtime;
@@ -347,6 +360,12 @@ function failureStream(parsed, stdout, stderr) {
  * is written after the failure and before the document, so a crashed run leaves
  * either nothing or a complete candidate.
  *
+ * A failed write is reported and nothing is promised. The recovery metadata is
+ * a pair — the state entry and the commands that read it — so printing a
+ * `statePath` for a file that does not exist would send the operator to a
+ * record no `adopt` can find. The warning says why, and the error block still
+ * carries the candidate and the operator text.
+ *
  * @param {object|null} runtime the CLI runtime, if it was built.
  * @param {unknown} error the thrown value.
  * @returns {{statePath: string|null, next: object|null}}
@@ -355,14 +374,16 @@ function recordUnknownOutcome(runtime, error) {
   const candidate = error?.details?.candidate ?? null;
   if (
     !runtime?.stateStore ||
-    runtime.failureNumber == null ||
     error?.claimCode !== "CLAIM_UNKNOWN_OUTCOME" ||
     typeof candidate?.oid !== "string"
   ) {
     return { statePath: null, next: null };
   }
+  // A family records the member that failed, not the first one it claimed.
+  const number = error.details?.failedAt ?? runtime.failureNumber;
+  if (number == null) return { statePath: null, next: null };
   const lease = error.details?.lease ?? {};
-  const written = runtime.stateStore.writeEntry(runtime.failureNumber, {
+  const written = runtime.stateStore.writeEntry(number, {
     refName: lease.refName ?? runtime.failureRef ?? null,
     token: lease.token ?? null,
     runId: lease.owner?.runId ?? null,
@@ -378,11 +399,15 @@ function recordUnknownOutcome(runtime, error) {
     operationId: candidate.operationId ?? null,
     candidate,
   });
+  if (written.written !== true) {
+    if (written.warning) runtime.warnings.push(written.warning);
+    return { statePath: null, next: null };
+  }
   return {
     statePath: written.path,
     next: buildNextCommands({
       configPath: runtime.configPath,
-      number: runtime.failureNumber,
+      number,
       numberFlag: runtime.ctx?.profile?.numberKey ?? "pr",
       candidate: candidate.oid,
       operationId: candidate.operationId ?? null,
@@ -391,6 +416,10 @@ function recordUnknownOutcome(runtime, error) {
       // exit 13 for a claim this run holds.
       runId: lease.owner?.runId ?? null,
       action: candidate.action ?? null,
+      // The LOCK a candidate UNLOCK closes. `adoptRelease` compares it to the
+      // observed UNLOCK's `parentLock`, so a release line without it proves
+      // nothing and answers exit 13 for a release that landed.
+      parentLock: candidate.parentOid ?? null,
     }),
   };
 }

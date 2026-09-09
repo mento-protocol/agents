@@ -8,11 +8,17 @@
  * AMENDMENTS §D: one generated run id covers the whole family, and family
  * liveness is `guard` with repeated `--pr/--token` pairs. There is no
  * `family heartbeat` (AMENDMENTS §E).
+ *
+ * Both commands plan under `--dry-run` and return before the first write. A
+ * write path entered under a dry run fails somewhere in the middle instead of
+ * describing itself, which is the rule `../dry-run.mjs` states.
  */
 
 import { ClaimUsageError, hydrateClaimLease } from "../../claims/verify.mjs";
 import { claimFamily, releaseFamily } from "../../claims/family.mjs";
+import { classifyObservedHead } from "../../claims/transitions.mjs";
 import { projectClaimLabel } from "../../claims/label.mjs";
+import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome, collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { buildNextCommands, claimBlock } from "../output.mjs";
@@ -98,25 +104,81 @@ export async function runFamilyRelease(runtime) {
   }
   markFailureContext(runtime, numbers[0]);
 
+  if (ctx.options.dryRun === true) {
+    const plans = [];
+    for (const [index, number] of numbers.entries()) {
+      plans.push(
+        await planTransition(ctx, number, {
+          action: "release",
+          token: tokens[index],
+          runId,
+          outcome,
+        }),
+      );
+    }
+    return { status: "ok", body: { plan: plans } };
+  }
+
+  // Each member is classified from one read before its lease is required, for
+  // the two reasons the single release has. A member this run already released
+  // is `already-released`, not a failure, so repeating a family release is
+  // idempotent exactly as repeating a single one is. And a member whose lease
+  // cannot be rebuilt is collected rather than thrown: one hydration failure
+  // used to abort the whole command, so every other member — including the ones
+  // this run demonstrably holds — kept its LOCK until the lease expired.
+  //
+  // Nothing is released without its own proof. `already-released` requires an
+  // UNLOCK head closing that member's exact token, and
+  // `hydrateClaimLease` still requires the head to be that token under this run
+  // id, so a failure can only ever subtract from what is released.
   const leases = new Map();
   const order = [];
+  const done = [];
+  const failures = [];
   for (const [index, number] of numbers.entries()) {
-    const lease = await hydrateClaimLease(ctx, number, {
-      token: tokens[index],
-      runId,
-    });
-    leases.set(number, lease);
-    order.push(number);
+    const token = tokens[index];
+    const scope = ctx.profile.canonicalScope(ctx.options, number);
+    try {
+      const head = await readClaim(ctx, number);
+      const verdict = classifyObservedHead(head, {
+        profile: ctx.profile,
+        scope,
+        refName: ctx.profile.refName(scope),
+        action: "release",
+        parentOid: token,
+        owner: { ...ctx.owner, runId },
+      });
+      // The strict UNLOCK form only, exactly as the single release accepts it.
+      if (head?.state === "UNLOCK" && verdict.status === "already-released") {
+        done.push(number);
+        continue;
+      }
+      const lease = await hydrateClaimLease(ctx, number, {
+        token,
+        runId,
+        current: head,
+      });
+      leases.set(number, lease);
+      order.push(number);
+    } catch (error) {
+      failures.push({ number, error });
+    }
   }
   const released = await releaseFamily({ order, leases }, { outcome });
+  failures.push(...released.failures);
+
+  // Reported in the caller's own order, so the document reads the same whether
+  // a member was released now or had been released already.
+  const closed = new Set([...released.released, ...done]);
+  const releasedNumbers = numbers.filter((number) => closed.has(number));
 
   const warnings = [];
-  for (const number of released.released) {
+  for (const number of releasedNumbers) {
     const label = await projectClaimLabel(ctx, number, { present: false });
     warnings.push(...label.warnings);
     runtime.stateStore?.clearEntry(number);
   }
-  for (const failure of released.failures) {
+  for (const failure of failures) {
     warnings.push({
       stage: "release",
       number: failure.number,
@@ -125,16 +187,16 @@ export async function runFamilyRelease(runtime) {
     });
   }
 
-  const failed = released.failures.length > 0;
+  const failed = failures.length > 0;
   return {
     status: failed ? "stale" : "released",
     exitCode: failed ? 16 : 0,
     warnings,
-    error: failed ? released.failures[0].error : null,
+    error: failed ? failures[0].error : null,
     body: {
       outcome,
-      released: released.released,
-      failures: released.failures.map((failure) => failure.number),
+      released: releasedNumbers,
+      failures: failures.map((failure) => failure.number),
       next: buildNextCommands({
         configPath: runtime.configPath,
         number: numbers[0],

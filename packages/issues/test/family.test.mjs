@@ -15,6 +15,7 @@ import { claimRefName, readClaim } from "../src/claims/ref.mjs";
 import { guardChild } from "../src/claims/verify.mjs";
 import {
   buildTestLock,
+  buildTestUnlock,
   createTestContext,
   seedRef,
 } from "./helpers/claims.mjs";
@@ -144,6 +145,104 @@ test("a rollback release failure sets partialClaim and puts the release error on
       return true;
     },
   );
+});
+
+test("a member whose lock compare-and-swap ends unknown is a partial family that asks for adopt", async () => {
+  const { ctx, server } = createTestContext();
+  const lostRef = claimRefName(ctx, 881);
+  for (const number of MEMBERS) {
+    seedRef(server, claimRefName(ctx, number), buildTestUnlock(ctx, number));
+  }
+
+  // 881's compare-and-swap lands and its acknowledgement is lost, then every
+  // reconciliation read of that ref fails. 872 and 880 roll back cleanly, so
+  // the only unaccounted state is the LOCK the family never recorded.
+  let lost = false;
+  const operations = server.withOperations({
+    async compareAndSwapRef(...args) {
+      await server.operations.compareAndSwapRef(...args);
+      if (args[2] === lostRef) {
+        lost = true;
+        throw new Error("response lost");
+      }
+    },
+    async readClaimRef(context, refName, scope) {
+      if (lost && refName === lostRef) throw new Error("fake read failure");
+      return server.operations.readClaimRef(context, refName, scope);
+    },
+  });
+
+  const error = await claimFamily(ctx, MEMBERS, {}, { overrides: operations })
+    .then(() => null)
+    .catch((thrown) => thrown);
+
+  assert.ok(error, "the family aborts");
+  assert.equal(
+    error.claimCode,
+    "CLAIM_UNKNOWN_OUTCOME",
+    "not an ordinary family abort: a LOCK this run may hold is still on a ref",
+  );
+  assert.equal(exitCodeForError(error), 12, "do not retry; run adopt");
+  assert.equal(error.partialClaim, true);
+  assert.equal(isRecoverableClaimRaceError(error), false);
+  assert.equal(error.details.failedAt, 881);
+  assert.equal(error.details.candidate.action, "acquire");
+  assert.equal(
+    error.details.candidate.oid,
+    server.getRefOid(lostRef),
+    "the candidate names the LOCK that actually landed",
+  );
+  assert.equal(
+    error.details.lease.owner.runId,
+    server.commits.get(server.getRefOid(lostRef)).payload.ownerRunId,
+    "the carried lease names the owner adopt must prove the LOCK against",
+  );
+  assert.match(
+    error.message,
+    /mento-issues claims adopt --pr 881 --candidate <oid> --operation-id lock-/,
+    "the failed member's recovery line survives the family framing",
+  );
+  assert.deepEqual(error.details.released, [880, 872]);
+  assert.deepEqual(error.details.releaseFailures, []);
+
+  assert.equal(
+    server.commits.get(server.getRefOid(lostRef)).payload.state,
+    "LOCK",
+    "881 is LOCKed, which is exactly what exit 10 would have hidden",
+  );
+});
+
+test("an unknown initialize outcome is not a partial family claim", async () => {
+  // The bootstrap candidate is an UNLOCK, so a lost acknowledgement there
+  // leaves no LOCK and no unresolved ownership: the family is an ordinary
+  // abort the caller may skip.
+  const { ctx, server } = createTestContext();
+  const firstRef = claimRefName(ctx, 872);
+  let lost = false;
+  const operations = server.withOperations({
+    async compareAndSwapRef(...args) {
+      await server.operations.compareAndSwapRef(...args);
+      if (args[2] === firstRef) {
+        lost = true;
+        throw new Error("response lost");
+      }
+    },
+    async readClaimRef(context, refName, scope) {
+      if (lost && refName === firstRef) throw new Error("fake read failure");
+      return server.operations.readClaimRef(context, refName, scope);
+    },
+  });
+
+  const error = await claimFamily(ctx, MEMBERS, {}, { overrides: operations })
+    .then(() => null)
+    .catch((thrown) => thrown);
+
+  assert.ok(error);
+  assert.equal(error.details.failure.claimCode, "CLAIM_UNKNOWN_OUTCOME");
+  assert.equal(error.claimCode, "CLAIM_FAMILY_ABORTED");
+  assert.equal(error.partialClaim, false);
+  assert.equal(exitCodeForError(error), 10);
+  assert.equal(error.details.candidate, null);
 });
 
 test("familyHeartbeat renews every due member", async () => {

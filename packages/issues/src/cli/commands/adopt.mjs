@@ -1,6 +1,7 @@
 /**
  * `claims adopt --pr <n>
- *   (--candidate <oid> --operation-id <id> --run-id <id> | --from-state)`
+ *   (--candidate <oid> --operation-id <id> --run-id <id> | --from-state)
+ *   [--action <a>] [--parent-lock <oid>]`
  *
  * The self-service recovery for exit 12 (PLAN §2.10). It reads the ref once,
  * never writes, and reports the candidate as landed only when the head is that
@@ -12,6 +13,12 @@
  * resolve one — from the flag, from `--from-state`, or from this host's state
  * entry — is a usage refusal rather than a "superseded" verdict on a claim
  * nobody proved was lost.
+ *
+ * A release adoption proves the same thing about an UNLOCK, and its second half
+ * is the LOCK that UNLOCK closes: `adoptRelease` requires the observed
+ * `parentLock` to equal it. It comes from `--parent-lock`, from the
+ * `--from-state` candidate record, or from this host's state entry, and its
+ * absence is the same usage refusal for the same reason.
  */
 
 import { ClaimUsageError } from "../../claims/verify.mjs";
@@ -35,7 +42,11 @@ function resolveCandidate(runtime, number) {
         { details: { number } },
       );
     }
-    return { ...entry.candidate, runId: entry.runId ?? null };
+    return {
+      ...entry.candidate,
+      parentOid: flags["parent-lock"] ?? entry.candidate.parentOid ?? null,
+      runId: entry.runId ?? null,
+    };
   }
   if (flags.candidate === undefined || flags["operation-id"] === undefined) {
     throw new ClaimUsageError(
@@ -47,7 +58,7 @@ function resolveCandidate(runtime, number) {
     oid: flags.candidate,
     operationId: flags["operation-id"],
     action: null,
-    parentOid: null,
+    parentOid: flags["parent-lock"] ?? null,
     runId: null,
   };
 }
@@ -87,9 +98,21 @@ export async function runAdopt(runtime) {
   }
 
   if (action === "release") {
+    // Same precedence as the run id, and the same refusal: the flag, then the
+    // candidate record, then this host's state entry. Without the parent LOCK
+    // `adoptRelease` compares the observed `parentLock` to null, which no
+    // UNLOCK matches, so a release that landed comes back as exit 13.
+    const parentOid =
+      candidate.parentOid ?? recorded?.candidate?.parentOid ?? null;
+    if (parentOid === null) {
+      throw new ClaimUsageError(
+        "adopt cannot prove a release candidate is ours without the LOCK it closes: pass --parent-lock <oid>, or --from-state on the host that created it",
+        { details: { number, action, parentLock: null } },
+      );
+    }
     const adopted = await adoptRelease(ctx, number, {
-      candidate,
-      lease: { owner, token: candidate.parentOid ?? null },
+      candidate: { ...candidate, parentOid },
+      lease: { owner, token: parentOid },
     });
     return {
       status: "ok",

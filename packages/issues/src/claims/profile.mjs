@@ -61,10 +61,31 @@ function isGithubUrlOrNull(value) {
  * @param {number} [overrides.payloadVersion] payload `version`.
  * @param {{ name: string, email: string }} [overrides.author] commit identity.
  * @returns {Readonly<object>} a frozen profile.
+ * @throws {Error} when `refTemplate` does not contain `{pr}` exactly once.
  */
 export function prClaimProfile(overrides = {}) {
   const namespace = overrides.namespace ?? "refs/mento-claims/v1/pr";
   const refTemplate = overrides.refTemplate ?? `${namespace}/{pr}`;
+  // The template is checked here, at construction, because both of its failure
+  // modes are silent and late. A template with no `{pr}` renders one ref name
+  // for every pull request, so every claim contends with every other claim on
+  // the same reference. A template with two makes `claimNumberPattern` return
+  // null, and `listClaims` then refuses the whole namespace with a message
+  // about a profile that renders no number. Neither failure names the
+  // configuration that caused it.
+  //
+  // `loadClaimConfig` applies the same rule to `claims.scopeTemplate`, so the
+  // CLI never reaches this. The factory is exported, so a library consumer
+  // does, and the invariant belongs to the profile rather than to one of its
+  // callers.
+  if (
+    typeof refTemplate !== "string" ||
+    refTemplate.split("{pr}").length !== 2
+  ) {
+    throw new Error(
+      `The pull-request ref template must contain {pr} exactly once, got: ${JSON.stringify(refTemplate ?? null)}`,
+    );
+  }
   return Object.freeze({
     id: "pr",
     kind: overrides.kind ?? "mento-claim",

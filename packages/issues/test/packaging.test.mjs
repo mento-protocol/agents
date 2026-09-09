@@ -1,18 +1,48 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after, before } from "node:test";
 
 import { runCli } from "../src/cli/main.mjs";
 import { CONFIG_SCHEMAS } from "../src/cli/config.mjs";
 import { createFakeClock } from "../src/testing/fake-clock.mjs";
 import { createFakeRefServer } from "../src/testing/fake-ref-server.mjs";
+import { isExactSemanticVersion } from "../src/shared/exact-version.mjs";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SOURCE_ROOT = join(PACKAGE_ROOT, "src");
 const TESTING_ROOT = join(SOURCE_ROOT, "testing");
+
+/**
+ * Every child process this file starts, and it must stay empty.
+ *
+ * The suite is offline because each command is handed injected operations, and
+ * a missed injection used to be invisible: `runGh` binds `spawn` at import
+ * time, so the fallthrough spawned a real `gh`, and `resolveLogin` turns a
+ * failed login read into a warning rather than a failure. Three real `gh`
+ * executions therefore passed as green. Patching the builtin's export and
+ * re-syncing the ESM binding turns any such call into a recorded, thrown
+ * failure instead.
+ */
+const spawnedCommands = [];
+const realSpawn = childProcess.spawn;
+
+before(() => {
+  childProcess.spawn = (command, args) => {
+    spawnedCommands.push([command, ...(args ?? [])].join(" "));
+    throw new Error(`the offline suite must not spawn ${command}`);
+  };
+  syncBuiltinESMExports();
+});
+
+after(() => {
+  childProcess.spawn = realSpawn;
+  syncBuiltinESMExports();
+});
 
 /** Every `.mjs` file under a directory. */
 function sourceFiles(directory) {
@@ -104,6 +134,43 @@ test("the published tarball carries its own LICENSE and the README points at it"
   assert.doesNotMatch(readme, /\[LICENSE\]\(\.\.\/\.\.\/LICENSE\)/u);
 });
 
+test("the exact-version grammar rejects a leading zero in any component", () => {
+  // AMENDMENTS §A pins the package by exact version and removes
+  // `minimumVersion`, so this grammar is the whole check a policy's pin gets.
+  // `\d+` per component accepted `01.2.3`, which semver forbids and npm never
+  // publishes, so such a pin would name a release that cannot exist.
+  const manifest = JSON.parse(
+    readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"),
+  );
+  assert.equal(
+    isExactSemanticVersion(manifest.version),
+    true,
+    "this package's own version must be an exact pin",
+  );
+
+  for (const version of ["0.0.0", "0.1.0", "1.2.3", "10.20.30"]) {
+    assert.equal(isExactSemanticVersion(version), true, version);
+  }
+  for (const version of [
+    "01.2.3",
+    "1.02.3",
+    "1.2.03",
+    "00.0.0",
+    "1.2",
+    "1.2.3.4",
+    "1.2.3-rc.1",
+    "1.2.3+build.1",
+    "v1.2.3",
+    " 1.2.3",
+    "1.2.3 ",
+    "",
+    123,
+    null,
+  ]) {
+    assert.equal(isExactSemanticVersion(version), false, String(version));
+  }
+});
+
 test("the fake server rejects any read of a non-head oid while every claims operation still passes", async () => {
   const clock = createFakeClock("2026-09-09T09:58:12.004Z");
   const base = createFakeRefServer({ clock });
@@ -161,13 +228,21 @@ test("the fake server rejects any read of a non-head oid while every claims oper
   );
 
   const documents = [];
+  // The one production transport a claims command still reaches for: every
+  // mutating command records the authenticated login. Injected, so the suite
+  // states its offline-ness instead of depending on the read failing.
+  const loginReads = [];
+  const readViewerLogin = async () => {
+    loginReads.push(true);
+    return "octo-claimer";
+  };
   const run = async (argv) => {
     const chunks = [];
     const exitCode = await runCli([...argv, "--config", configPath], {
       stdout: { write: (chunk) => chunks.push(chunk) },
       stderr: { write: () => {} },
       env: { CLAUDECODE: "1" },
-      operations: { claims: server.operations },
+      operations: { claims: server.operations, gh: { readViewerLogin } },
       stateRoot: join(directory, "state"),
       clock,
       platform: "linux",
@@ -179,6 +254,11 @@ test("the fake server rejects any read of a non-head oid while every claims oper
 
   const acquired = await run(["claims", "claim", "--pr", "872"]);
   assert.equal(acquired.exitCode, 0);
+  assert.equal(
+    acquired.document.claim.login,
+    "octo-claimer",
+    "the injected login is what the payload records",
+  );
   const runId = acquired.document.claim.runId;
   const firstToken = acquired.document.claim.token;
 
@@ -259,10 +339,21 @@ test("the fake server rejects any read of a non-head oid while every claims oper
   for (const document of documents) {
     assert.equal(document.schema, "mento-issues-result:v1");
     assert.equal(document.repository, "mento-protocol/frontend-monorepo");
+    assert.deepEqual(
+      document.warnings.filter((warning) => warning.stage === "read-login"),
+      [],
+      "a degraded login read is a warning, so it must not be how this suite stays offline",
+    );
   }
   assert.equal(
     base.casLedger.filter((entry) => entry.applied).length,
     4,
     "bootstrap, acquire, renew and release each applied exactly once",
   );
+  assert.equal(
+    loginReads.length,
+    3,
+    "claim, renew and release each read the login; verify does not mutate",
+  );
+  assert.deepEqual(spawnedCommands, [], "the suite spawned a child process");
 });

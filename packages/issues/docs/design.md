@@ -348,14 +348,18 @@ Release UNLOCK — lease fields are **not** echoed:
 2. Wrong `kind`, wrong `version`, `state ∉ {LOCK, UNLOCK}`, or a scope the
    profile does not recognise as the same identity — `is not a valid mutex
 state for this <subject>`.
-3. On a LOCK, the lease block is all-or-none. When present, `expiresAt`,
-   `claimedAt` and `renewAfter` are strict ISO-8601 UTC
+3. On a LOCK, the lease block is all-or-none. When present, `startedAt`,
+   `expiresAt`, `claimedAt` and `renewAfter` are strict ISO-8601 UTC
    (`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$` plus a `Date.parse`
    round-trip); `ttlSeconds`, `graceSeconds` and `renewCount` are safe
    integers; `ownerRunId` passes `validateClaimId`; `ownerHost` and
    `ownerRuntime` pass `isSafeSingleLineText(…, 120)`; `ownerLogin` passes the
    login grammar. **A malformed `expiresAt` is a conflict, never "treat as
-   expired".**
+   expired".** `startedAt` is validated with the block but not counted in it:
+   every LOCK carries one, so it is not an all-or-none member, but
+   `leaseState` reads it for the policy ceiling and for the clock-skew guard,
+   and an absent or unparsable value would leave `eligibleAtMs` NaN and the
+   reference takeable by nobody.
 4. Metadata keys, when present, match their shapes.
 5. A LOCK with no lease block is the v1 never-expire LOCK described above.
 
@@ -529,6 +533,14 @@ the landed candidate comes back as exit 13 for a claim the run still holds —
 the single most destructive verdict in the table, produced by the one command
 that exists to prevent it.
 
+A **release** adoption carries two more, for the same reason. `adoptRelease`
+matches the observed UNLOCK on its `operationId` and on its `parentLock`, so
+the line names the candidate UNLOCK's own `unlock-<uuid>` — not the LOCK's
+`lock-<uuid>`, which matches no UNLOCK — and `--parent-lock <token>`, the LOCK
+the UNLOCK closes. `adopt --action release` refuses without a parent (exit 2)
+rather than compare against `null` and answer exit 13 for a release that
+landed.
+
 Nothing is ever deleted. An orphaned commit from a losing or ambiguous attempt
 is left in place as an audit artifact, exactly as ADR 0082 specifies.
 
@@ -575,7 +587,11 @@ its statement.
    matters more here than on `renew`: two guards under one run id would each
    verify held and each spawn a publishing child.
 2. Verify with the configured `minRemainingMs`. On a negative verdict for a
-   mandatory gate, exit with the mapped code **without spawning**.
+   mandatory gate, exit with the mapped code **without spawning**. Members are
+   verified one round trip at a time, so every member's local deadline is
+   re-checked once more immediately before the spawn: a slow read, or simply a
+   long family, otherwise leaves the earlier verdicts older than the leases
+   they certify.
 3. By default (`--no-renew` opts out), a `renew-required` or `lease-expired`
    verdict triggers one `renew --if-due` and one re-verify before that decision
    is taken.
@@ -588,7 +604,11 @@ its statement.
    child lives and writes the rotated token back to the state file. The tick is
    not `renewMinutes`: the claim can be taken from us `minRemainingMs + graceMs`
    after the verdict, which a configuration may make shorter than one renew
-   period.
+   period. One tick runs at a time: a tick slower than the interval would
+   otherwise overlap the next, both would renew the same lease, and the
+   second's compare-and-swap would fail against the token the first had just
+   rotated — a lost-claim code for a claim this run still holds. An overlapping
+   tick is skipped and enforces the local deadline before returning.
 6. If a mid-flight renew reports the claim superseded or not held, signal the
    child's **process group** with `SIGTERM`, then `SIGKILL` after five seconds,
    and exit 13 with `killedBy: "claim-lost"` — rather than let a push complete
@@ -609,7 +629,9 @@ its statement.
    `lease-expired` as the `killedBy`, and exits 13. The check needs no network,
    which is the point: without it a transport that simply stopped answering
    kept the fence open past expiry while the report reprinted the spawn-time
-   `held: true`.
+   `held: true`. It runs on a timer of its own, separate from the renew tick
+   and from the scheduler a caller may inject, because a renew parked inside a
+   call that never answers runs no code that could notice the expiry.
 8. If guard itself is signalled (`SIGINT`, `SIGTERM`, `SIGHUP`), forward the
    signal to that group and exit **3**, `killedBy: "guard-<signal>"`.
    `detached` takes the child out of the terminal's foreground group, so
@@ -658,10 +680,22 @@ no wait-for-free loop, so there is no hold-and-wait either.
 
 On any failure the acquired members are released in reverse with
 `outcome: "family-rollback"`, and `ClaimFamilyAbortedError` is thrown carrying
-`{ order, failedAt, failure, released, releaseFailures }` and
-`partialClaim: releaseFailures.length > 0`. That flag is what makes an ordinary
-contended family recoverable (exit 10) and a family whose rollback release
-failed an operator matter (exit 16).
+`{ order, failedAt, failure, candidate, lease, released, releaseFailures }`.
+`partialClaim` is true when a rollback release failed, and also when the failed
+member's own lock compare-and-swap ended unknown. That flag is what makes an
+ordinary contended family recoverable (exit 10) and a family whose rollback
+release failed an operator matter (exit 16).
+
+A member is recorded only after its `acquireClaim` returns, so an unknown
+outcome from a lock compare-and-swap can leave a LOCK the rollback never sees.
+That case is thrown as `ClaimFamilyAbortedError` with
+`claimCode: "CLAIM_UNKNOWN_OUTCOME"`, so it exits 12 and asks for `adopt`,
+carrying the failed member's `candidate`, `lease` and its whole recovery text.
+Exit 10 would tell the caller to skip a family whose LOCK this run may still
+hold. The bootstrap transition is excluded: its candidate is an UNLOCK, so an
+unknown outcome there establishes no LOCK and the family is an ordinary abort.
+A failed rollback release outranks both — that LOCK is proven rather than
+possible, and only an operator compare-and-swap clears it.
 
 `claimFamily` uses **one generated run id** for every member. It gets there
 without weakening the "no supplied run id" rule: it pins the two inputs
@@ -709,7 +743,7 @@ ClaimError
 ├── ClaimUnknownOutcomeError    profile.errorCodes.unknown 12
 ├── ClaimStaleError             profile.errorCodes.stale  16
 │   └── ClaimRefInvalidError    CLAIM_REF_INVALID         16
-└── ClaimFamilyAbortedError     CLAIM_FAMILY_ABORTED      10 or 16
+└── ClaimFamilyAbortedError     CLAIM_FAMILY_ABORTED      10, 12 or 16
 ```
 
 Every error carries **both** `err.code` — profile-mapped, so monitoring's
@@ -755,6 +789,22 @@ Added here: a wall-clock timeout (`SIGTERM` at `timeoutMs`, `SIGKILL` at
 four more environment pins (`GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`,
 `GH_PAGER=cat`, `NO_COLOR`); and `redactSecrets` plus 4 KiB truncation before
 any stderr reaches an error message or a JSON document.
+
+Redaction covers the argv as well as the output. A credential handed to `gh`
+inside an argument — an `Authorization: token …` header, say — used to reach
+the error message, `error.args` and the dry-run notice verbatim. Every
+diagnostic argv is redacted before it is quoted, so one choke point covers
+every message, hint and notice, and each error carries a redacted `safeArgv`
+alongside the raw argv the child was given. Live stderr is redacted before it
+reaches `stderrSink`, holding back a trailing run of token characters so a
+secret split across two chunks is rejoined rather than printed in halves.
+
+The token rules stay narrow — GitHub's own `gh[pousr]_` and `github_pat_`
+prefixes — because a rule wide enough for a classic 40-hex token would erase
+every commit oid this package prints. An `Authorization` value is therefore
+redacted by **position** rather than by shape, keeping only the scheme word,
+which is what covers a GitHub App JWT or a `Basic` credential handed to the
+exported `runGh`.
 
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,
@@ -873,26 +923,26 @@ the fence and disables the renew timer in one move, which is the same lie
 `requireFencedWrite` already refuses for `--dry-run`. Reads, advisory gates and
 dry-run planning keep the flag.
 
-| Command                                                                   | Required flags                                                                       | Writes                             |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------- |
-| `claims read --pr <n>`                                                    | —                                                                                    | none                               |
-| `claims list [--stale] [--prs …]`                                         | —                                                                                    | none                               |
-| `claims claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover]`                                           | commit, reference, label           |
-| `claims renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                            | commit, reference                  |
-| `claims takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>]`                                                           | commit, reference, label           |
-| `claims release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                 | commit, reference, label           |
-| `claims verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                    | none                               |
-| `claims guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                        | renew commits while the child runs |
-| `claims adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …]` | none                               |
-| `claims family claim --prs 872,880,881`                                   | —                                                                                    | commits, references                |
-| `claims family release --prs … --tokens …`                                | `[--outcome <slug>]`                                                                 | commits, references                |
-| `claims label ensure` / `claims label reconcile --pr <n> [--apply]`       | —                                                                                    | labels only                        |
-| `claims doctor`                                                           | —                                                                                    | none                               |
-| `markers build --input <job.json> [--out <body.txt>]`                     | —                                                                                    | file only                          |
-| `markers verify --input <check.json>`                                     | —                                                                                    | none                               |
-| `markers summary --input <job.json> [--out <block.txt>]`                  | —                                                                                    | file only                          |
-| `markers vectors --out <path> [--check]`                                  | —                                                                                    | file only                          |
-| `config show` / `config validate`                                         | —                                                                                    | none                               |
+| Command                                                                   | Required flags                                                                                             | Writes                             |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `claims read --pr <n>`                                                    | —                                                                                                          | none                               |
+| `claims list [--stale] [--prs …]`                                         | —                                                                                                          | none                               |
+| `claims claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover]`                                                                 | commit, reference, label           |
+| `claims renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                  |
+| `claims takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>]`                                                                                 | commit, reference, label           |
+| `claims release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label           |
+| `claims verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                               |
+| `claims guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs |
+| `claims adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                               |
+| `claims family claim --prs 872,880,881`                                   | —                                                                                                          | commits, references                |
+| `claims family release --prs … --tokens …`                                | `[--outcome <slug>]`                                                                                       | commits, references                |
+| `claims label ensure` / `claims label reconcile --pr <n> [--apply]`       | —                                                                                                          | labels only                        |
+| `claims doctor`                                                           | —                                                                                                          | none                               |
+| `markers build --input <job.json> [--out <body.txt>]`                     | —                                                                                                          | file only                          |
+| `markers verify --input <check.json>`                                     | —                                                                                                          | none                               |
+| `markers summary --input <job.json> [--out <block.txt>]`                  | —                                                                                                          | file only                          |
+| `markers vectors --out <path> [--check]`                                  | —                                                                                                          | file only                          |
+| `config show` / `config validate`                                         | —                                                                                                          | none                               |
 
 `--set` accepts only the profile's `metadataKeys`; an unknown key is exit 2.
 
@@ -1018,6 +1068,19 @@ The state file lives at
 candidate record. It is **never** an authority and **never** a `--token`
 source. `claim` and `renew` exit 3 when it names the same run id under a
 different live pid — defence in depth behind the un-suppliable run id.
+
+`guard` adds a **slot file** beside that entry,
+`<numberKey>-<n>.guard-<first 16 hex of sha256(runId)>.json`, schema
+`mento-issues-guard-slot:v1`, created with the `wx` flag so the create itself
+is the reservation. That is a check the state entry cannot make: two guards
+starting together both read the previous, dead pid, both pass
+`assertNoLiveDuplicateRunId`, both overwrite the entry, and both spawn a
+publishing child. The slot is held for the child's lifetime and released on
+every exit path; a slot whose recorded pid is dead is reclaimed under an
+exclusive reclaim lock rather than wedging the host. It fails closed — a slot
+that cannot be created is not evidence that nobody is publishing. Like the
+state entry it is host-local defence in depth, and the reference remains the
+mutual-exclusion authority.
 
 | Exit | `status`                                                                              | Agent action                                             |
 | ---- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |

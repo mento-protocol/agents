@@ -523,11 +523,23 @@ function readSummaryMarkerSchema(document) {
   return named;
 }
 
+/**
+ * Read the claims block of a policy document.
+ *
+ * A v4 policy carries it at `coordination.claims` and nowhere else. The
+ * top-level `claims` block belongs to the package's own document, so accepting
+ * it here let a policy that still declared the retired repository-wide lock —
+ * and no claims block of its own — pass the retired-coordination refusal on the
+ * strength of a block that schema does not define.
+ *
+ * @param {object} document the parsed policy document.
+ * @returns {unknown} the raw claims block.
+ */
 function readPolicyClaims(document) {
   const coordination = document.coordination;
   const nested = isPlainObject(coordination) ? coordination.claims : undefined;
   const top = document.claims;
-  if (nested === undefined && top === undefined) {
+  if (nested === undefined) {
     const retired =
       isPlainObject(coordination) &&
       (coordination.lockPath !== undefined ||
@@ -549,15 +561,13 @@ function readPolicyClaims(document) {
       { details: { schema: document.schema } },
     );
   }
-  if (nested !== undefined && top !== undefined) {
-    if (JSON.stringify(nested) !== JSON.stringify(top)) {
-      throw configError(
-        "The policy carries both claims and coordination.claims and they differ",
-        { details: { schema: document.schema } },
-      );
-    }
+  if (top !== undefined && JSON.stringify(nested) !== JSON.stringify(top)) {
+    throw configError(
+      "The policy carries both claims and coordination.claims and they differ",
+      { details: { schema: document.schema } },
+    );
   }
-  return nested ?? top;
+  return nested;
 }
 
 /**

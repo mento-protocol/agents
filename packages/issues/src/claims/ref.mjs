@@ -273,7 +273,20 @@ function claimNumberPattern(profile) {
   return new RegExp(`^${escape(parts[0])}(\\d+)${escape(parts[1])}$`, "u");
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
+/**
+ * Run `worker` over `items` with at most `concurrency` in flight.
+ *
+ * Results are stored by input position, so the returned array is in the input's
+ * order however the workers interleave. `listClaims` reads the claim refs with
+ * it, and `claims list` reads each pull request's state with it, under the same
+ * configured limit.
+ *
+ * @param {Array<unknown>} items the inputs.
+ * @param {number} concurrency the largest number in flight.
+ * @param {(item: unknown) => Promise<unknown>} worker the per-item call.
+ * @returns {Promise<unknown[]>} the results, in the input's order.
+ */
+export async function mapWithConcurrency(items, concurrency, worker) {
   const results = new Array(items.length);
   let next = 0;
   const runners = new Array(Math.max(1, Math.min(concurrency, items.length)))

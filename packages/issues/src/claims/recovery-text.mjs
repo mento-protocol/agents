@@ -15,17 +15,38 @@ function quote(value) {
   return JSON.stringify(value ?? null);
 }
 
-function adoptCommand(lease, action) {
+/**
+ * The `adopt` line an operator runs to learn whether a candidate landed.
+ *
+ * @param {object} lease the lease the candidate came from.
+ * @param {string} [action] the adopted transition.
+ * @param {string} [operationId] the candidate's own operation id; defaults to
+ *   the lease payload's, which is the right one for every LOCK candidate.
+ * @returns {string}
+ */
+function adoptCommand(lease, action, operationId) {
   const number = lease.scope[lease.profile.numberKey];
   const flag = lease.profile.numberKey === "pr" ? "--pr" : "--issue";
   const actionFlag = action ? ` --action ${action}` : "";
+  // A release adoption also proves the candidate closes THIS run's LOCK:
+  // `adoptRelease` compares the observed UNLOCK's `parentLock` to the parent
+  // the invocation names, and `adopt --action release` refuses without one.
+  // The parent is this lease's own token.
+  const parentLockFlag =
+    action === "release" ? ` --parent-lock ${lease.token}` : "";
   // The run id belongs in the printed line. `adopt` proves the candidate is
   // ours by comparing the head's owner run id to the invocation's, so a line
   // without it judges the landed LOCK against `runId: null`, which no LOCK
   // matches, and answers exit 13 for a claim this run holds.
   const runId = lease.owner?.runId ?? null;
   const runIdFlag = runId === null ? "" : ` --run-id ${runId}`;
-  return `mento-issues claims adopt ${flag} ${number} --candidate <oid> --operation-id ${lease.payload.operationId}${runIdFlag}${actionFlag}`;
+  // `adoptRelease` compares the observed head's `operationId` to the
+  // candidate's, so a release line must name the UNLOCK's `unlock-<uuid>`.
+  // `lease.payload` is still the LOCK during a failed release, and its
+  // `lock-<uuid>` matches no UNLOCK: the operator's command would skip the
+  // `not-applied` branch and answer a classified error for a landed release.
+  const id = operationId ?? lease.payload.operationId;
+  return `mento-issues claims adopt ${flag} ${number} --candidate <oid> --operation-id ${id}${runIdFlag}${parentLockFlag}${actionFlag}`;
 }
 
 /**
@@ -85,7 +106,7 @@ export function releaseFailureRecoveryText(lease, unknown) {
       : "No candidate UNLOCK was created.",
     `Its parent is LOCK ${lease.token}.`,
     "Do not retry the lifecycle command or create another UNLOCK from an assumed ref state.",
-    `Run \`${adoptCommand(lease, "release")}\` to learn whether the candidate landed.`,
+    `Run \`${adoptCommand(lease, "release", candidate?.payload?.operationId)}\` to learn whether the candidate landed.`,
     "Do not delete or force-update the claim ref.",
   ].join(" ");
 }

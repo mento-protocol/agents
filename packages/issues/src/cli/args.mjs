@@ -147,6 +147,11 @@ export const COMMAND_SPECS = Object.freeze({
       pr: { type: "integer" },
       candidate: { type: "string" },
       "operation-id": { type: "string" },
+      // The LOCK a candidate UNLOCK closes. `adoptRelease` proves a landed
+      // release by comparing it to the observed UNLOCK's `parentLock`, so
+      // `--action release` needs it from somewhere: this flag, or the
+      // `--from-state` candidate record.
+      "parent-lock": { type: "string" },
       "from-state": { type: "boolean" },
       action: { type: "string" },
     },

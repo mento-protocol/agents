@@ -21,6 +21,7 @@ import { hostname as osHostname } from "node:os";
 import { ClaimConfigError } from "../claims/errors.mjs";
 import { ClaimUsageError } from "../claims/verify.mjs";
 import { detectRuntime, shortHostLabel } from "../claims/context.mjs";
+import { validateClaimId } from "../claims/payload.mjs";
 
 /** The environment variables identity reads. */
 export const IDENTITY_ENVIRONMENT_KEYS = Object.freeze({
@@ -29,6 +30,40 @@ export const IDENTITY_ENVIRONMENT_KEYS = Object.freeze({
   runtime: "MENTO_CLAIM_RUNTIME",
   login: "MENTO_CLAIM_LOGIN",
 });
+
+/**
+ * Resolve the run id this invocation owns, from either source, and check it.
+ *
+ * The check used to run on the flag alone, so a malformed `MENTO_CLAIM_RUN_ID`
+ * reached `ctx.owner.runId` unchecked and was written into a payload every
+ * later reader trusts. Resolution and validation are one step here, and the
+ * refusal names the source that supplied the value.
+ *
+ * A command that generates its own run id resolves none: `resolveCliIdentity`
+ * refuses both sources for it (C-1), and that refusal names the rule.
+ *
+ * @param {object} input `{ flags, env, spec }`.
+ * @returns {string|null} the validated run id, or `null` when there is none.
+ * @throws {ClaimUsageError} when the resolved value is not a run id.
+ */
+export function resolveRunId(input) {
+  const { flags, env, spec } = input;
+  if (spec?.generatesRunId === true) return null;
+  const fromFlag = flags["run-id"];
+  const source =
+    fromFlag === undefined ? IDENTITY_ENVIRONMENT_KEYS.runId : "--run-id";
+  const runId = fromFlag ?? env[IDENTITY_ENVIRONMENT_KEYS.runId] ?? null;
+  if (runId === null) return null;
+  try {
+    validateClaimId(runId);
+  } catch (error) {
+    throw new ClaimUsageError(
+      `${source} is not a valid run id: ${error.message}`,
+      { details: { runId, source }, cause: error },
+    );
+  }
+  return runId;
+}
 
 /**
  * Resolve the identity fields a context is built from.
@@ -64,9 +99,7 @@ export function resolveCliIdentity(input) {
     }
   }
 
-  const runId = generatesRunId
-    ? null
-    : (flags["run-id"] ?? env[IDENTITY_ENVIRONMENT_KEYS.runId] ?? null);
+  const runId = resolveRunId({ flags, env, spec });
   const host =
     flags.host ??
     env[IDENTITY_ENVIRONMENT_KEYS.host] ??

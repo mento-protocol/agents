@@ -22,6 +22,7 @@ import {
   addIssueLabels,
   assertCanonicalGithubCliEnvironment,
   createCommit,
+  formatGh,
   ghGraphql,
   isUnknownOutcomeError,
   listRefCommits,
@@ -29,6 +30,7 @@ import {
   readRefCommit,
   readServerDateMs,
   readViewerLogin,
+  redactSecrets,
   removeIssueLabel,
   resetViewerLoginMemo,
   runGh,
@@ -36,6 +38,7 @@ import {
 } from "../src/gh/index.mjs";
 import { callOptions } from "../src/gh/rest.mjs";
 import { readPullRequestState, readTokenScopes } from "../src/cli/github.mjs";
+import { splitRepo } from "../src/shared/split-repo.mjs";
 
 const REF_NAME = "refs/mento-claims/v1/pr/872";
 const COMMIT_OID = "a6fe65deb282c4fbc0663c9f576d6ff10677c65a";
@@ -854,4 +857,146 @@ test("the CLI reads forward the caller's env, signal and timeout", async () => {
     signal: controller.signal,
     env: options.env,
   });
+});
+
+test("a token in argv or in live stderr reaches no message, error property, notice or sink", async () => {
+  // Redaction used to cover stderr only. The argv rendered beside it was raw,
+  // so a credential passed as `-H "Authorization: token …"` reached the
+  // message, the frozen `args` array and the dry-run notice verbatim, and the
+  // live tap received raw chunks.
+  const token = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const argv = ["api", "-H", `Authorization: token ${token}`, "user"];
+
+  // The stderr token is split across two chunks, which is exactly where a
+  // per-chunk redaction leaks one.
+  const head = token.slice(0, 12);
+  const spawn = createFakeSpawn((child) => {
+    child.stderr.emit("data", `gh: Bad credentials (HTTP 401)\nheader ${head}`);
+    child.stderr.emit("data", `${token.slice(12)}\nlast line\n`);
+    child.emit("close", 1, null);
+  });
+
+  const sink = [];
+  const error = await runGh(argv, {
+    env: { PATH: "/usr/bin" },
+    spawn,
+    stderrSink: (chunk) => sink.push(chunk),
+  }).then(
+    () => assert.fail("a 401 must reject"),
+    (failure) => failure,
+  );
+
+  // The child still receives the real argv; only the diagnostics are redacted.
+  assert.deepEqual(spawn.calls[0].args, argv);
+
+  const surfaces = {
+    message: error.message,
+    args: JSON.stringify(error.args),
+    properties: JSON.stringify(error, Object.getOwnPropertyNames(error)),
+    sink: sink.join(""),
+  };
+  for (const [name, text] of Object.entries(surfaces)) {
+    assert.equal(text.includes(token), false, `${name} carries the token`);
+    assert.equal(text.includes(head), false, `${name} carries its prefix`);
+    assert.match(text, /\[redacted-github-token\]/u, name);
+  }
+  // The tap keeps every non-secret byte and rejoins the split token.
+  assert.equal(
+    surfaces.sink,
+    "gh: Bad credentials (HTTP 401)\nheader [redacted-github-token]\nlast line\n",
+  );
+  assert.deepEqual(error.args, [
+    "api",
+    "-H",
+    "Authorization: token [redacted-github-token]",
+    "user",
+  ]);
+
+  // The dry-run notice formats the same argv and is redacted the same way.
+  const notices = [];
+  await runGh(
+    [
+      "api",
+      "--method",
+      "POST",
+      "-H",
+      `Authorization: token ${token}`,
+      "repos/owner/name/git/commits",
+    ],
+    {
+      dryRun: true,
+      mutates: true,
+      spawn: forbiddenSpawn,
+      writeNotice: (text) => notices.push(text),
+    },
+  );
+  assert.equal(notices.join("").includes(token), false);
+  assert.match(notices.join(""), /\[redacted-github-token\]/u);
+
+  // `formatGh` is the single choke point, so a caller rendering an argv of its
+  // own gets the same treatment.
+  assert.equal(formatGh(["api", token]), 'gh api "[redacted-github-token]"');
+});
+
+test("an Authorization value is redacted by position, whatever shape the credential has", () => {
+  // The token rules match GitHub's own prefixes and nothing else, on purpose:
+  // a rule wide enough for a classic 40-hex token would also erase every
+  // commit oid this package prints. An `Authorization` value is a credential
+  // regardless of shape, so it is redacted by where it sits instead. That is
+  // what covers a GitHub App JWT and a `Basic` credential, both of which a
+  // caller can hand to the exported `runGh`.
+  const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjMifQ.c2lnbmF0dXJl";
+  const basic = "dXNlcjpwYXNzd29yZA==";
+
+  assert.equal(
+    redactSecrets(`Authorization: Bearer ${jwt}`),
+    "Authorization: Bearer [redacted-github-token]",
+    "the scheme survives; the credential does not",
+  );
+  assert.equal(
+    redactSecrets(`authorization: basic ${basic}`),
+    "authorization: basic [redacted-github-token]",
+  );
+  assert.equal(
+    redactSecrets(`Authorization:${jwt}`),
+    "Authorization:[redacted-github-token]",
+    "no space and no scheme word",
+  );
+  assert.equal(
+    formatGh(["api", "-H", `Authorization: Bearer ${jwt}`, "user"]),
+    'gh api -H "Authorization: Bearer [redacted-github-token]" user',
+  );
+
+  // A commit oid is still printed in full. Redacting one would take the
+  // package's central diagnostic with it.
+  const oid = "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22";
+  assert.equal(redactSecrets(`candidate ${oid}`), `candidate ${oid}`);
+});
+
+test("the repository splitter requires exactly two non-empty components", () => {
+  assert.deepEqual(splitRepo("owner/name"), {
+    owner: "owner",
+    name: "name",
+    nameWithOwner: "owner/name",
+  });
+
+  // `owner/name/` used to pass: the third component was the empty string, and
+  // the original guard rejected it only when it was truthy. Both halves are
+  // spliced into a `gh api` path unencoded.
+  for (const repo of [
+    "owner/name/",
+    "owner/name//",
+    "owner//name",
+    "owner/name/extra",
+    "owner",
+    "/name",
+    "/",
+    "",
+  ]) {
+    assert.throws(
+      () => splitRepo(repo),
+      /Repository must be owner\/name/u,
+      `${repo} must be refused`,
+    );
+  }
 });

@@ -56,14 +56,22 @@ export async function runRenew(runtime) {
   assertNoLiveDuplicateRunId(ctx, number, runId);
 
   const lease = await hydrateClaimLease(ctx, number, { token, runId });
+  // `renewClaim` updates the lease in place and returns it, so the expiry the
+  // warning is about has to be read before the call. And a `--if-due` renew
+  // that wrote nothing carries the previous renewal's `renewedAfterExpiry`,
+  // which would warn about a lease this call never touched.
+  const expiredAt = lease.expiresAt;
   const renewed = await renewClaim(lease, { ifDue, set });
   const state = recordLeaseState(runtime, number, renewed.lease);
   const warnings = [...state.warnings];
-  if (renewed.lease.payload.renewedAfterExpiry === true) {
+  if (
+    renewed.renewed === true &&
+    renewed.lease.payload.renewedAfterExpiry === true
+  ) {
     warnings.push({
       stage: "renew",
       number,
-      message: `The lease had already expired at ${lease.expiresAt}; it was still this run's head, so the renewal was legal, but a takeover was possible`,
+      message: `The lease had already expired at ${expiredAt}; it was still this run's head, so the renewal was legal, but a takeover was possible`,
     });
   }
 

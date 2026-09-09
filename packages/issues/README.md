@@ -82,22 +82,22 @@ uncovered exits 3 exactly as the equivalent policy would.
 
 ### `claims`
 
-| Command                                                            | Flags                                                                                | Writes                             |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------------------------------- |
-| `read --pr <n>`                                                    | —                                                                                    | none                               |
-| `list`                                                             | `[--stale] [--prs 872,880] [--concurrency <n>]`                                      | none                               |
-| `claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                              | commit, reference, label           |
-| `renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                            | commit, reference                  |
-| `takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                              | commit, reference, label           |
-| `release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                 | commit, reference, label           |
-| `verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                    | none                               |
-| `guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                        | renew commits while the child runs |
-| `adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …]` | none                               |
-| `family claim --prs 872,880,881`                                   | `[--run-id-prefix <slug>] [--set k=v]…`                                              | commits, references                |
-| `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                 | commits, references                |
-| `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                             | labels only                        |
-| `label reconcile --pr <n>`                                         | `[--apply]`                                                                          | labels only                        |
-| `doctor`                                                           | —                                                                                    | none                               |
+| Command                                                            | Flags                                                                                                      | Writes                             |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `read --pr <n>`                                                    | —                                                                                                          | none                               |
+| `list`                                                             | `[--stale] [--prs 872,880] [--concurrency <n>]`                                                            | none                               |
+| `claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                                                    | commit, reference, label           |
+| `renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                  |
+| `takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commit, reference, label           |
+| `release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label           |
+| `verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                               |
+| `guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs |
+| `adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                               |
+| `family claim --prs 872,880,881`                                   | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commits, references                |
+| `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                                       | commits, references                |
+| `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                                                   | labels only                        |
+| `label reconcile --pr <n>`                                         | `[--apply]`                                                                                                | labels only                        |
+| `doctor`                                                           | —                                                                                                          | none                               |
 
 **`claim` takes over automatically.** Against an UNLOCK it acquires; against a
 LOCK whose lease has expired past its grace it takes over in the same process
@@ -147,6 +147,18 @@ and the survivor the escalation exists for is precisely the one that ignores it
 The renew tick is **half the safety window** — `minRemainingSeconds` plus
 `graceMinutes`, capped at `renewMinutes` — because that window, not the renew
 period, is how soon the claim can be taken from us after a positive verdict.
+
+One tick runs at a time. A tick slower than the interval would otherwise
+overlap the next one, and both would renew the same lease: the first rotates
+the token, and the second's compare-and-swap then fails against a token that no
+longer exists, which guard would read as a lost claim and answer by killing a
+child whose claim this run still held. An overlapping tick is skipped, and it
+enforces the local lease deadline before it returns.
+
+The **lease deadline has its own timer**, separate from the renew tick and from
+the scheduler a caller may inject. It reads no reference and starts nothing, so
+it keeps working while a renew is parked inside a transport call that never
+answers — which is exactly the case a deadline exists for.
 
 A renew that fails for any other reason — a timeout, a 5xx, a revoked
 credential, a partition — is not a lost claim, so the child runs on, but it is

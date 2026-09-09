@@ -64,6 +64,7 @@ export function nextForLease(runtime, number, lease) {
     candidate: lease.candidate?.oid ?? null,
     operationId: lease.candidate?.operationId ?? null,
     action: lease.candidate?.action ?? null,
+    parentLock: lease.candidate?.parentOid ?? null,
   });
 }
 

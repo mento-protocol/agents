@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { COMMAND_SPECS, GATED_FLAGS } from "../src/cli/args.mjs";
 import { CONFIG_SCHEMAS, normalizeConfigDocument } from "../src/cli/config.mjs";
+import { readPullRequestState } from "../src/cli/github.mjs";
+import {
+  GUARD_RECLAIM_LOCK_MAX_AGE_MS,
+  GUARD_SLOT_SCHEMA,
+  createStateStore,
+} from "../src/cli/state-file.mjs";
 import { claimProfile } from "../src/claims/profile.mjs";
 import {
   CLAIM_CODE_STATUSES,
@@ -42,6 +54,14 @@ const MINUTE = 60_000;
 /** A 40-character lowercase object id, deterministic and unique per index. */
 function hexOid(index) {
   return index.toString(16).padStart(40, "0");
+}
+
+/** The claim state at a ref head, read from the fake server's object store. */
+function refState(server, refName) {
+  const oid = server.getRefOid(refName);
+  return oid === null
+    ? null
+    : (server.commits.get(oid)?.payload?.state ?? null);
 }
 
 /**
@@ -362,6 +382,64 @@ test("the config loader rejects a policy carrying lockPath without a claims bloc
     },
   );
 
+  // A top-level `claims` block belongs to the package's own document, so it
+  // does not satisfy a policy. Reading it here let exactly this document pass:
+  // the retired repository-wide lock, no `coordination.claims`, and a claims
+  // block the v4 schema does not define.
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        ...withLockPath,
+        claims: { ...BASE_CLAIMS },
+      }),
+    (error) => {
+      assert.equal(error.code, "CLAIM_CONFIG_RETIRED_COORDINATION");
+      return true;
+    },
+  );
+
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        schema: CONFIG_SCHEMAS.POLICY,
+        repository: REPOSITORY,
+        workflow: { revision: "trusted-agent-v2" },
+        coordination: { primitive: "github-ref-claims" },
+        claims: { ...BASE_CLAIMS },
+      }),
+    (error) => {
+      assert.match(error.message, /must carry coordination\.claims/u);
+      return true;
+    },
+  );
+
+  // The package's own document keeps reading its top-level block.
+  assert.equal(
+    normalizeConfigDocument(packageDocument()).claims.namespace,
+    BASE_CLAIMS.namespace,
+  );
+
+  // A policy may repeat the block, byte for byte, and is refused when the two
+  // disagree.
+  assert.equal(
+    normalizeConfigDocument({
+      ...policyDocument(),
+      claims: { ...BASE_CLAIMS },
+    }).claims.namespace,
+    BASE_CLAIMS.namespace,
+  );
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        ...policyDocument(),
+        claims: { ...BASE_CLAIMS, ttlMinutes: 40 },
+      }),
+    (error) => {
+      assert.match(error.message, /coordination\.claims and they differ/u);
+      return true;
+    },
+  );
+
   // A v4 document with neither marker and no claims is still refused, just not
   // as a retired coordination shape.
   assert.throws(
@@ -553,6 +631,37 @@ test("gated flags are refused without allowOverrides", async () => {
     assert.equal(result.exitCode, 3, `--${flag} must be refused`);
     assert.equal(result.document.status, "config");
     assert.match(result.document.error.message, /allowOverrides/u);
+  }
+
+  // Every command's grammar carries the gated flags, and `markers` needs no
+  // config, so the check used to run only where a config was loaded: the flags
+  // were accepted and silently ignored. Nothing can authorise them without a
+  // config, so they are refused with the same exit code instead.
+  const directoryWithoutConfig = temporaryDirectory();
+  for (const [flag, value] of [
+    ["ttl-minutes", "5"],
+    ["grace-minutes", "5"],
+    ["min-remaining-seconds", "60"],
+    ["now", "2026-09-09T10:00:00.000Z"],
+  ]) {
+    const result = await invoke(
+      [
+        "markers",
+        "vectors",
+        "--out",
+        join(directoryWithoutConfig, `vectors-${flag}.json`),
+        `--${flag}`,
+        value,
+      ],
+      { env: { CLAUDECODE: "1", MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE: "1" } },
+    );
+    assert.equal(
+      result.exitCode,
+      3,
+      `--${flag} must be refused with no config`,
+    );
+    assert.equal(result.document.status, "config");
+    assert.match(result.document.error.message, /No --config was given/u);
   }
 
   const allowed = harness({ claims: { allowOverrides: true } });
@@ -1311,6 +1420,71 @@ test("identity precedence is flag over env over detected and a missing runtime i
   }
   assert.equal(supplied.server.calls.read.length, 0);
 
+  // The run id is validated where it is resolved, so the environment is held
+  // to the same grammar as the flag. It used to be checked on the flag alone,
+  // and a malformed `MENTO_CLAIM_RUN_ID` reached the payload every later reader
+  // trusts. The refusal names the source that supplied the value.
+  const malformed = harness();
+  for (const [argv, env, pattern] of [
+    [
+      ["claims", "read", "--pr", String(PR), "--run-id", "not a run id"],
+      { CLAUDECODE: "1" },
+      /--run-id is not a valid run id/u,
+    ],
+    [
+      ["claims", "read", "--pr", String(PR)],
+      { CLAUDECODE: "1", MENTO_CLAIM_RUN_ID: "not a run id" },
+      /MENTO_CLAIM_RUN_ID is not a valid run id/u,
+    ],
+    [
+      [
+        "claims",
+        "adopt",
+        "--pr",
+        String(PR),
+        "--candidate",
+        hexOid(1),
+        "--operation-id",
+        "lock-uuid-1",
+      ],
+      { CLAUDECODE: "1", MENTO_CLAIM_RUN_ID: "-leading-dash" },
+      /MENTO_CLAIM_RUN_ID is not a valid run id/u,
+    ],
+  ]) {
+    const result = await malformed.run(argv, { env });
+    assert.equal(result.exitCode, 2, `${argv.join(" ")} must be exit 2`);
+    assert.equal(result.document.status, "usage");
+    assert.match(result.document.error.message, pattern);
+  }
+  assert.equal(malformed.server.calls.read.length, 0, "nothing was read");
+  assert.equal(malformed.server.calls.cas.length, 0, "nothing was written");
+
+  // A well-formed environment run id is still accepted, and it is the value the
+  // command proves ownership with.
+  const inherited = harness();
+  const acquired = await claimOnce(inherited);
+  const adopted = await inherited.run(
+    [
+      "claims",
+      "adopt",
+      "--pr",
+      String(PR),
+      "--candidate",
+      acquired.document.claim.token,
+      "--operation-id",
+      acquired.document.claim.operationId,
+    ],
+    {
+      env: {
+        CLAUDECODE: "1",
+        MENTO_CLAIM_RUN_ID: acquired.document.claim.runId,
+      },
+    },
+  );
+  assert.equal(adopted.exitCode, 0);
+  assert.equal(adopted.document.adopted, true);
+  assert.equal(adopted.document.claim.runId, acquired.document.claim.runId);
+
   // A runtime that cannot be detected is refused rather than guessed.
   const undetectable = harness();
   const refused = await undetectable.run(
@@ -2007,4 +2181,821 @@ test("--now is refused on guard and on a mandatory verify gate", async () => {
     { env },
   );
   assert.equal(read.exitCode, 0);
+});
+
+test("claims list reads the pull requests under --concurrency and keeps the input's order", async () => {
+  // `--concurrency` governed the claim reads and not the pull-request reads,
+  // which ran one at a time. Both halves run under it now, and the printed
+  // order is still the listing's.
+  const context = harness();
+  const numbers = [872, 880, 881, 890];
+  for (const number of numbers) {
+    const claimed = await context.run([
+      "claims",
+      "claim",
+      "--pr",
+      String(number),
+    ]);
+    assert.equal(claimed.exitCode, 0);
+  }
+
+  let inFlight = 0;
+  let peak = 0;
+  const settle = [];
+  const readPullRequestState = async (_options, number) => {
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    // Every read parks until the last one has started, so a sequential loop
+    // would deadlock and a concurrent one finishes.
+    await new Promise((resolve) => {
+      settle.push(resolve);
+      if (settle.length === numbers.length) {
+        for (const release of settle.splice(0)) release();
+      }
+    });
+    inFlight -= 1;
+    return {
+      number,
+      state: number === 890 ? "closed" : "open",
+      draft: false,
+      merged: false,
+      error: number === 881 ? "not found" : null,
+    };
+  };
+
+  const listed = await context.run(
+    [
+      "claims",
+      "list",
+      "--prs",
+      numbers.join(","),
+      "--concurrency",
+      String(numbers.length),
+    ],
+    {
+      operations: {
+        ...context.options.operations,
+        gh: { ...context.options.operations.gh, readPullRequestState },
+      },
+    },
+  );
+  assert.equal(listed.exitCode, 0);
+  assert.equal(peak, numbers.length, "every read was in flight together");
+  assert.deepEqual(
+    listed.document.claims.map((claim) => claim.number),
+    numbers,
+    "the listing keeps its ascending order",
+  );
+  assert.equal(listed.document.claims.at(-1).pullRequest.state, "closed");
+  assert.deepEqual(
+    listed.document.warnings.map((warning) => warning.number),
+    [881],
+    "a failed read is still reported against its own number",
+  );
+});
+
+test("an unknown outcome whose state write fails promises no recovery record", async () => {
+  // `writeEntry` answers `written: false` with a warning on a filesystem
+  // failure, and both used to be discarded: the document printed a `statePath`
+  // for a file that does not exist and an `adopt --from-state` line that reads
+  // it, with nothing saying the record was never written.
+  const context = harness();
+  const unwritable = join(context.directory, "state-is-a-file");
+  writeFileSync(unwritable, "not a directory\n");
+
+  let reads = 0;
+  const flaky = {
+    ...context.server.operations,
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads > 2) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+  context.server.applyThenThrow("compareAndSwapRef", "response lost", 2);
+  const unknown = await context.run(["claims", "claim", "--pr", String(PR)], {
+    operations: { ...context.options.operations, claims: flaky },
+    stateRoot: unwritable,
+  });
+
+  assert.equal(unknown.exitCode, 12);
+  assert.equal(unknown.document.status, "unknown-outcome");
+  assert.equal(unknown.document.statePath, undefined, "no path is promised");
+  assert.equal(unknown.document.next.adopt, undefined, "and no line reads it");
+  const warned = unknown.document.warnings.find(
+    (warning) => warning.stage === "write-state",
+  );
+  assert.ok(warned, "the failure the operator has to know about is reported");
+  assert.equal(
+    warned.path,
+    join(unwritable, "mento-protocol__frontend-monorepo", "pr-872.json"),
+  );
+  // The candidate itself is still in the error block, so the operator can
+  // still run `adopt` by hand.
+  assert.equal(typeof unknown.document.error.recovery.candidate.oid, "string");
+});
+
+test("a pull request number that is not positive never reaches a REST path", async () => {
+  // The number is spliced into `repos/<owner>/<name>/pulls/<n>` unencoded, so
+  // it is checked first, and the failure is reported in the ordinary result
+  // shape: a claim listing must still print the claims it did read.
+  let calls = 0;
+  const json = async () => {
+    calls += 1;
+    return { state: "open", draft: false, merged: false };
+  };
+  for (const number of [0, -1, 1.5, Number.NaN, "1/../../secrets"]) {
+    const result = await readPullRequestState({ repo: REPOSITORY }, number, {
+      json,
+    });
+    assert.equal(result.state, null, `${number} must not be read`);
+    assert.match(result.error, /must be a positive integer/u);
+  }
+  assert.equal(calls, 0, "no gh call was made");
+
+  const read = await readPullRequestState({ repo: REPOSITORY }, PR, { json });
+  assert.equal(read.state, "open");
+  assert.equal(read.error, null);
+  assert.equal(calls, 1);
+
+  // The CLI refuses the same number earlier still, before any listing runs.
+  const context = harness();
+  const listed = await context.run(["claims", "list", "--prs", "0"]);
+  assert.equal(listed.exitCode, 2);
+  assert.match(listed.document.error.message, /must be a positive integer/u);
+});
+
+test("family release plans under --dry-run and releases the members it can prove", async () => {
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const runId = claimed.document.family.runId;
+  const tokens = claimed.document.family.members.map((member) => member.token);
+  const releaseArgv = (list) => [
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    "872,880",
+    "--tokens",
+    list.join(","),
+    "--run-id",
+    runId,
+  ];
+
+  // A dry run plans and returns before `hydrateClaimLease`, which enters a
+  // write path: under `--dry-run` `createCommit` yields a null oid, so the
+  // command would fail somewhere in the middle instead of describing itself.
+  const commitsBefore = context.server.calls.commit.length;
+  const casBefore = context.server.calls.cas.length;
+  const planned = await context.run([...releaseArgv(tokens), "--dry-run"]);
+  assert.equal(planned.exitCode, 0);
+  assert.equal(planned.document.status, "ok");
+  assert.equal(planned.document.dryRun, true);
+  assert.equal(planned.document.plan.length, 2);
+  assert.deepEqual(
+    planned.document.plan.map((plan) => plan.action),
+    ["release", "release"],
+  );
+  assert.equal(
+    planned.document.plan[0].would,
+    "write an UNLOCK with outcome completed",
+  );
+  assert.equal(context.server.calls.commit.length, commitsBefore, "no commit");
+  assert.equal(context.server.calls.cas.length, casBefore, "no CAS");
+
+  // One member this run cannot prove no longer aborts the release of every
+  // other member: 880 is released and 872 is reported.
+  const released = await context.run(releaseArgv([hexOid(99), tokens[1]]));
+  assert.equal(released.exitCode, 16);
+  assert.equal(released.document.status, "stale");
+  assert.deepEqual(released.document.released, [880]);
+  assert.deepEqual(released.document.failures, [872]);
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/880"),
+    "UNLOCK",
+  );
+  assert.equal(refState(context.server, "refs/mento-claims/v1/pr/872"), "LOCK");
+  const warned = released.document.warnings.find(
+    (warning) => warning.number === 872,
+  );
+  assert.ok(warned, "the member it could not release is reported");
+});
+
+test("repeating a family release is idempotent, member by member", async () => {
+  // `release` answers exit 0 `already-released` for a release that landed, so
+  // `family release` must too. Collecting hydration failures made every member
+  // of a repeated family release a failure and the command exit 16 — "stop and
+  // report to the operator" — for the one case that is benign.
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  const runId = claimed.document.family.runId;
+  const tokens = claimed.document.family.members.map((member) => member.token);
+  const releaseArgv = [
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    "872,880",
+    "--tokens",
+    tokens.join(","),
+    "--run-id",
+    runId,
+  ];
+
+  const first = await context.run(releaseArgv);
+  assert.equal(first.exitCode, 0);
+  assert.deepEqual(first.document.released, [872, 880]);
+  const commits = context.server.calls.commit.length;
+  const cas = context.server.calls.cas.length;
+
+  const again = await context.run(releaseArgv);
+  assert.equal(again.exitCode, 0);
+  assert.equal(again.document.status, "released");
+  assert.deepEqual(again.document.released, [872, 880]);
+  assert.deepEqual(again.document.failures, []);
+  assert.equal(context.server.calls.commit.length, commits, "no commit");
+  assert.equal(context.server.calls.cas.length, cas, "no compare-and-swap");
+
+  // A mixed family releases the member it still holds and reports both.
+  const reclaimed = await context.run(["claims", "claim", "--pr", "880"]);
+  const mixed = await context.run([
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    "872,880",
+    "--tokens",
+    [tokens[0], reclaimed.document.claim.token].join(","),
+    "--run-id",
+    reclaimed.document.claim.runId,
+  ]);
+  assert.equal(mixed.exitCode, 0);
+  assert.deepEqual(mixed.document.released, [872, 880]);
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/880"),
+    "UNLOCK",
+  );
+});
+
+test("renew warns with the expiry it is warning about and only when it renewed", async () => {
+  // `renewClaim` updates the lease in place and returns it, so the warning
+  // reported the NEW expiry — the one the renewal just bought — as the instant
+  // the lease had expired at.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const expiredAt = claimed.document.claim.expiresAt;
+  context.clock.advance(31 * MINUTE);
+
+  const renewed = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(renewed.exitCode, 0);
+  assert.equal(renewed.document.claim.expiresAt > expiredAt, true);
+  const warning = renewed.document.warnings.find(
+    (entry) => entry.stage === "renew",
+  );
+  assert.ok(warning, "a late renewal is warned about");
+  assert.match(warning.message, new RegExp(`expired at ${expiredAt}`, "u"));
+
+  // `--if-due` before `renewAfter` writes nothing, and the payload it reads
+  // back still carries the earlier renewal's `renewedAfterExpiry`. A call that
+  // renewed nothing must not warn about it.
+  const notDue = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    renewed.document.claim.token,
+    "--run-id",
+    runId,
+    "--if-due",
+  ]);
+  assert.equal(notDue.exitCode, 0);
+  assert.equal(notDue.document.status, "not-due");
+  assert.equal(notDue.document.renewed, false);
+  assert.deepEqual(
+    notDue.document.warnings.filter((entry) => entry.stage === "renew"),
+    [],
+  );
+});
+
+test("two guards under one run id contend for one host-local slot and only one spawns", async () => {
+  // `assertNoLiveDuplicateRunId` reads the state entry and guard writes it
+  // afterwards, so two guards starting together both read the same record —
+  // the claim's, naming a process that has already exited — both pass, and both
+  // spawn a publishing child. The slot is created with `wx`, so exactly one of
+  // them creates it. It is defence in depth: the ref is the mutual-exclusion
+  // authority.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const guardArgv = [
+    "claims",
+    "guard",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "push",
+    "--",
+    "node",
+    "--version",
+  ];
+
+  // A child that runs until the test lets it exit, so the second guard starts
+  // while the first still holds the slot.
+  const calls = [];
+  let letChildExit;
+  const childMayExit = new Promise((resolve) => {
+    letChildExit = resolve;
+  });
+  let announceSpawn;
+  const childSpawned = new Promise((resolve) => {
+    announceSpawn = resolve;
+  });
+  const blockingSpawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.pid = null;
+    child.kill = () => true;
+    childMayExit.then(() => child.emit("exit", 0, null));
+    announceSpawn();
+    return child;
+  };
+
+  const first = context.run(guardArgv, { spawn: blockingSpawn });
+  await childSpawned;
+  const duplicate = recordingSpawn(0);
+  const second = await context.run(guardArgv, { spawn: duplicate.spawn });
+  letChildExit();
+  const firstResult = await first;
+
+  assert.equal(firstResult.exitCode, 0);
+  assert.equal(calls.length, 1, "the first guard ran its child");
+  assert.equal(duplicate.calls.length, 0, "the second guard never spawned");
+  assert.equal(second.exitCode, 3);
+  assert.match(
+    second.stderrDocuments.at(-1).error.message,
+    /already holds the guard slot/u,
+  );
+
+  // The slot lasts exactly as long as the child: once the first guard is done,
+  // the next one runs.
+  const after = recordingSpawn(0);
+  const later = await context.run(guardArgv, { spawn: after.spawn });
+  assert.equal(later.exitCode, 0);
+  assert.equal(after.calls.length, 1);
+
+  // And it is released on every path out of the command, not only the happy
+  // one: a guard that never got a child leaves no slot behind. The forwarded
+  // SIGINT, SIGTERM and SIGHUP handlers reach the same `finally`, because they
+  // kill the child tree and let guard finish rather than exiting the process.
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const failed = await context.run(guardArgv, {
+    spawn: () => {
+      throw new Error("spawn failed");
+    },
+  });
+  assert.equal(failed.exitCode, 2);
+  assert.equal(
+    existsSync(store.guardSlotPathFor(PR, runId)),
+    false,
+    "the slot is released when the command fails",
+  );
+});
+
+test("a guard slot left by a dead process is reclaimed, and one that cannot be taken refuses the spawn", async () => {
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const guardArgv = [
+    "claims",
+    "guard",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "push",
+    "--",
+    "node",
+    "--version",
+  ];
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+
+  // A guard killed outright leaves its slot behind. It must not wedge the host
+  // until an operator deletes a file, so a slot whose process is gone is
+  // reclaimed.
+  writeFileSync(
+    slotPath,
+    `${JSON.stringify({
+      schema: GUARD_SLOT_SCHEMA,
+      repository: REPOSITORY,
+      number: PR,
+      runId,
+      pid: process.pid + 1,
+      reservedAt: "2026-09-09T09:00:00.000Z",
+    })}\n`,
+  );
+  const reclaiming = recordingSpawn(0);
+  const reclaimed = await context.run(guardArgv, {
+    spawn: reclaiming.spawn,
+    isProcessAlive: () => false,
+  });
+  assert.equal(reclaimed.exitCode, 0);
+  assert.equal(reclaiming.calls.length, 1, "the stale slot was reclaimed");
+
+  // The same slot under a live process refuses, and so does a slot this store
+  // cannot read: neither is evidence that nobody is publishing under it.
+  for (const [body, alive] of [
+    [
+      JSON.stringify({ schema: GUARD_SLOT_SCHEMA, pid: process.pid + 1 }),
+      () => true,
+    ],
+    ["{ not json", () => false],
+  ]) {
+    writeFileSync(slotPath, `${body}\n`);
+    const refusedSpawn = recordingSpawn(0);
+    const refused = await context.run(guardArgv, {
+      spawn: refusedSpawn.spawn,
+      isProcessAlive: alive,
+    });
+    assert.equal(refused.exitCode, 3);
+    assert.equal(refusedSpawn.calls.length, 0, "no child under a held slot");
+    assert.match(refused.stderrDocuments.at(-1).error.message, /guard slot/u);
+  }
+});
+
+test("two guards reclaiming one stale slot interleave through the reclaim lock", async () => {
+  // The interleaving this pins is the one a `rmSync` plus `create` reclaim
+  // admits: B and C both read the same dead holder, B removes and creates, and
+  // C's removal then deletes B's FRESH slot instead of the stale one it read,
+  // so both create and both spawn. `isProcessAlive` is the seam the test
+  // interleaves on: C runs B's whole reservation inside its own liveness check,
+  // which is exactly the instant C has read the stale holder and not yet acted.
+  const context = harness();
+  const runId = RUN_ID;
+  const stalePid = process.pid + 1;
+  const storeFor = (isProcessAlive) =>
+    createStateStore({
+      repository: REPOSITORY,
+      root: context.options.stateRoot,
+      clock: context.clock,
+      isProcessAlive,
+    });
+  const seedStaleSlot = (store) => {
+    const slotPath = store.guardSlotPathFor(PR, runId);
+    mkdirSync(dirname(slotPath), { recursive: true });
+    writeFileSync(
+      slotPath,
+      `${JSON.stringify({
+        schema: GUARD_SLOT_SCHEMA,
+        repository: REPOSITORY,
+        number: PR,
+        runId,
+        pid: stalePid,
+        reservedAt: "2026-09-09T09:00:00.000Z",
+      })}\n`,
+    );
+    return slotPath;
+  };
+
+  // The stale pid is dead; every other pid is this live process.
+  const liveness = (candidate) => candidate !== stalePid;
+  const guardB = storeFor(liveness);
+  const slotPath = seedStaleSlot(guardB);
+  let reservedByB = null;
+  const guardC = storeFor((candidate) => {
+    if (reservedByB === null) reservedByB = guardB.reserveGuardSlot(PR, runId);
+    return liveness(candidate);
+  });
+
+  const reservedByC = guardC.reserveGuardSlot(PR, runId);
+  assert.equal(reservedByB.reserved, true, "B reclaimed the stale slot");
+  assert.equal(reservedByC.reserved, false, "C did not reclaim it as well");
+  assert.match(
+    reservedByC.message,
+    new RegExp(slotPath.replaceAll(".", "\\."), "u"),
+  );
+  const held = JSON.parse(readFileSync(slotPath, "utf8"));
+  assert.equal(held.pid, process.pid, "B's slot survived C's attempt");
+  assert.equal(
+    existsSync(`${slotPath}.reclaim`),
+    false,
+    "the reclaim lock is released whether the reclaim won or lost",
+  );
+
+  // A reclaim in flight refuses a second guard outright rather than letting it
+  // race the removal.
+  const inFlight = storeFor(liveness);
+  seedStaleSlot(inFlight);
+  writeFileSync(
+    `${slotPath}.reclaim`,
+    `${JSON.stringify({
+      schema: GUARD_SLOT_SCHEMA,
+      pid: stalePid,
+      reservedAt: new Date(context.clock.now()).toISOString(),
+    })}\n`,
+  );
+  const blocked = inFlight.reserveGuardSlot(PR, runId);
+  assert.equal(blocked.reserved, false);
+  assert.match(blocked.message, /Another guard is reclaiming/u);
+
+  // And a reclaim lock a guard died holding is taken over by age, so the host
+  // is never wedged by a file nobody owns.
+  context.clock.advance(GUARD_RECLAIM_LOCK_MAX_AGE_MS);
+  const abandoned = inFlight.reserveGuardSlot(PR, runId);
+  assert.equal(abandoned.reserved, true);
+  assert.equal(JSON.parse(readFileSync(slotPath, "utf8")).pid, process.pid);
+});
+
+test("releasing a claim twice is idempotent", async () => {
+  // The second release used to exit 14: `hydrateClaimLease` refuses the UNLOCK
+  // head — the first release's own result — before `releaseClaim` can answer
+  // `already-released`. Every ownership check still runs first, and the second
+  // call writes nothing.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const argv = [
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ];
+
+  const first = await context.run(argv);
+  assert.equal(first.exitCode, 0);
+  assert.equal(first.document.status, "released");
+  const commits = context.server.calls.commit.length;
+  const cas = context.server.calls.cas.length;
+
+  const again = await context.run(argv);
+  assert.equal(again.exitCode, 0);
+  assert.equal(again.document.status, "already-released");
+  assert.equal(again.document.released, false);
+  assert.equal(again.document.unlock.oid, first.document.unlock.oid);
+  assert.equal(context.server.calls.commit.length, commits, "no commit");
+  assert.equal(context.server.calls.cas.length, cas, "no compare-and-swap");
+
+  // The token and run-id checks are unchanged: another run's token still gets
+  // nothing, and a foreign run id on the real token is still refused.
+  const foreignToken = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(99),
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(foreignToken.exitCode, 14);
+
+  const held = await claimOnce(context);
+  const foreignRun = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    held.document.claim.token,
+    "--run-id",
+    RUN_ID,
+  ]);
+  assert.equal(foreignRun.exitCode, 14);
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "LOCK",
+    "possession of the printed token alone never releases another run's claim",
+  );
+});
+
+test("a token-stale verdict prints the head this run's own renew moved to", async () => {
+  // After this run renews L0 to L1, `--token L0` is `token-stale`, and the
+  // printed `next.renew` carried L0 back: the recovery command the caller was
+  // told to run would answer exit 14 for a claim it holds.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const stale = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  context.clock.advance(11 * MINUTE);
+  const renewed = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    stale,
+    "--run-id",
+    runId,
+  ]);
+  const current = renewed.document.claim.token;
+  assert.notEqual(current, stale);
+
+  const verified = await context.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    stale,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(verified.exitCode, 14);
+  assert.equal(verified.document.verify.reason, "token-stale");
+  assert.equal(verified.document.current.oid, current);
+  for (const command of Object.values(verified.document.next)) {
+    assert.equal(command.includes(stale), false, command);
+  }
+  assert.match(
+    verified.document.next.renew,
+    new RegExp(`--token ${current}`, "u"),
+  );
+
+  // And the printed line runs.
+  const recovered = await invoke(
+    verified.document.next.renew.split(/\s+/u).slice(1),
+    context.options,
+  );
+  assert.equal(recovered.exitCode, 0, verified.document.next.renew);
+
+  // A head owned by another run is `token-superseded` and keeps printing the
+  // caller's own token, because none of it is theirs to renew.
+  const other = harness();
+  const mine = await claimOnce(other);
+  other.clock.advance(36 * MINUTE);
+  const taken = await other.run([
+    "claims",
+    "takeover",
+    "--pr",
+    String(PR),
+    "--supersedes",
+    mine.document.claim.token,
+  ]);
+  assert.equal(taken.exitCode, 0);
+  const superseded = await other.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    mine.document.claim.token,
+    "--run-id",
+    mine.document.claim.runId,
+  ]);
+  assert.equal(superseded.document.verify.reason, "token-superseded");
+  assert.match(
+    superseded.document.next.renew,
+    new RegExp(`--token ${mine.document.claim.token}`, "u"),
+  );
+});
+
+test("a landed release is adopted with the LOCK it closes and refused without it", async () => {
+  // `adoptRelease` proves a candidate UNLOCK is ours by comparing the observed
+  // `parentLock` to the candidate's parent. The CLI passed `parentOid: null`,
+  // so the manual recovery command answered exit 13 — "treat work in flight as
+  // forfeit" — for a release that had actually landed.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const released = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(released.exitCode, 0);
+  const unlock = released.document.unlock.oid;
+  const operationId = context.server.commits.get(unlock).payload.operationId;
+  const adoptArgv = (extra) => [
+    "claims",
+    "adopt",
+    "--pr",
+    String(PR),
+    "--candidate",
+    unlock,
+    "--operation-id",
+    operationId,
+    "--run-id",
+    runId,
+    ...extra,
+    "--action",
+    "release",
+  ];
+
+  const adopted = await context.run(adoptArgv(["--parent-lock", token]));
+  assert.equal(adopted.exitCode, 0);
+  assert.equal(adopted.document.adopted, true);
+  assert.equal(adopted.document.reason, "landed");
+  assert.equal(adopted.document.unlock.oid, unlock);
+
+  // Without it the command refuses — fix the command — instead of answering
+  // exit 13 about a release nobody proved was lost.
+  const refused = await context.run(adoptArgv([]));
+  assert.equal(refused.exitCode, 2);
+  assert.equal(refused.document.status, "usage");
+  assert.match(refused.document.error.message, /--parent-lock/u);
+
+  // A parent that is not the LOCK this UNLOCK closes proves nothing, so the
+  // proof itself is unchanged.
+  const wrongParent = await context.run(
+    adoptArgv(["--parent-lock", hexOid(99)]),
+  );
+  assert.equal(wrongParent.exitCode, 13);
+});
+
+test("the printed recovery for an unknown release outcome carries the parent LOCK and runs", async () => {
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+
+  // The release's compare-and-swap applies and then loses its answer, and every
+  // reconcile read fails: an unknown outcome with a candidate UNLOCK.
+  // Three reads reach the compare-and-swap: the head this command classifies,
+  // the one `hydrateClaimLease` adopts through, and the release's own owner
+  // check. Every reconcile read after the lost answer fails.
+  let reads = 0;
+  const flaky = {
+    ...context.server.operations,
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads > 3) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+  context.server.applyThenThrow("compareAndSwapRef", "response lost", 1);
+  const unknown = await context.run(
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ],
+    { operations: { ...context.options.operations, claims: flaky } },
+  );
+  assert.equal(unknown.exitCode, 12);
+  const printed = unknown.document.next.adopt;
+  assert.match(printed, new RegExp(`--parent-lock ${token}`, "u"));
+  assert.match(printed, /--action release/u);
+
+  const adopted = await invoke(printed.split(/\s+/u).slice(1), context.options);
+  assert.equal(adopted.exitCode, 0, printed);
+  assert.equal(adopted.document.adopted, true);
+  assert.equal(adopted.document.reason, "landed");
 });

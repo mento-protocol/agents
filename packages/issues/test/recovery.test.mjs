@@ -354,6 +354,50 @@ test("adoptRelease returns the landed UNLOCK without a second commit", async () 
   );
 });
 
+test("the release recovery text prints the candidate UNLOCK's operation id, not the LOCK's", async () => {
+  const { server, ctx } = createTestContext();
+  const lease = await acquireClaim(ctx, PR, {});
+  const lockOperationId = lease.payload.operationId;
+  lease.operations = readsFailingFrom(server, 2);
+  server.applyThenThrow("compareAndSwapRef", "response lost");
+
+  const unknown = await releaseClaim(lease, { outcome: "completed" }).catch(
+    (thrown) => thrown,
+  );
+
+  const unlockOperationId = unknown.details.candidate.operationId;
+  assert.match(lockOperationId, /^lock-/);
+  assert.match(unlockOperationId, /^unlock-/);
+  assert.match(
+    unknown.message,
+    new RegExp(
+      `claims adopt --pr ${PR} --candidate <oid> --operation-id ${unlockOperationId} `,
+    ),
+  );
+  assert.match(
+    unknown.message,
+    new RegExp(`--parent-lock ${lease.token} --action release`),
+    "adoptRelease also matches the observed UNLOCK's parentLock",
+  );
+  assert.doesNotMatch(
+    unknown.message,
+    new RegExp(`--operation-id ${lockOperationId}`),
+    "the LOCK's id matches no UNLOCK, so adopt would refuse a landed release",
+  );
+
+  // The printed line is what an operator runs, so it must satisfy the proof
+  // `adoptRelease` applies.
+  const adopted = await adoptRelease(ctx, PR, {
+    candidate: {
+      oid: unknown.details.candidate.oid,
+      operationId: unlockOperationId,
+      parentOid: lease.token,
+    },
+    lease,
+  });
+  assert.equal(adopted.reason, "landed");
+});
+
 test("a gh timeout inside CAS enters the reconcile path and a definitive 422 does not", async () => {
   // AMENDMENTS §N: a losing updateRefs returns a generic GraphQL error, so no
   // branch may read a failure's text. Both halves below throw a message that

@@ -74,6 +74,33 @@ function familyContext(ctx) {
 }
 
 /**
+ * The two transitions inside `acquireClaim` that write a LOCK.
+ *
+ * `acquireClaim` also initializes an absent ref, and that transition's
+ * candidate is an UNLOCK: an unknown outcome there leaves no LOCK, so it is
+ * not unresolved ownership.
+ */
+const LOCK_TRANSITION_ACTIONS = new Set(["acquire", "takeover"]);
+
+/**
+ * Did this acquire failure leave a LOCK nobody can account for?
+ *
+ * An unknown outcome from a lock compare-and-swap means the candidate may have
+ * landed. `claimFamily` records a member only after `acquireClaim` returns, so
+ * that member is absent from `leases` and the rollback never releases it. The
+ * family must say so: the run may hold a LOCK it cannot name.
+ *
+ * @param {unknown} acquireError the failure `acquireClaim` threw.
+ * @returns {boolean}
+ */
+function unresolvedLockOwnership(acquireError) {
+  return (
+    acquireError?.claimCode === "CLAIM_UNKNOWN_OUTCOME" &&
+    LOCK_TRANSITION_ACTIONS.has(acquireError?.details?.action)
+  );
+}
+
+/**
  * Release every member of a family, newest first by default.
  *
  * Never throws: a release failure is collected, because the caller is usually
@@ -128,9 +155,29 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
         outcome: rollbackOutcome,
         reverse: true,
       });
+      const rollbackFailed = rollback.failures.length > 0;
+      const unresolved = unresolvedLockOwnership(acquireError);
+      const summary = `Family claim aborted at ${ctx.profile.subject(ctx.profile.canonicalScope(ctx.options, number))}: ${String(acquireError?.message ?? acquireError).split("\n")[0]}`;
       const aborted = new ClaimFamilyAbortedError(
-        `Family claim aborted at ${ctx.profile.subject(ctx.profile.canonicalScope(ctx.options, number))}: ${String(acquireError?.message ?? acquireError).split("\n")[0]}`,
+        // The failed member's own recovery text is kept whole when its LOCK
+        // may have landed. It names the candidate and the `adopt` line, and
+        // the first-line summary above drops both.
+        unresolved
+          ? `${summary}\n${String(acquireError?.message ?? acquireError)}`
+          : summary,
         {
+          // An unresolved LOCK is not an ordinary family abort. Exit 10 tells
+          // the caller to skip the family this run, which is wrong while a
+          // LOCK this run may hold is still on a ref. Exit 12 is the honest
+          // verdict: do not retry, run `adopt`. A failed rollback release
+          // still outranks it — that LOCK is proven, not merely possible, and
+          // only an operator compare-and-swap clears it (exit 16).
+          claimCode:
+            unresolved && !rollbackFailed ? "CLAIM_UNKNOWN_OUTCOME" : undefined,
+          code:
+            unresolved && !rollbackFailed
+              ? ctx.profile.errorCodes.unknown
+              : undefined,
           details: {
             order,
             failedAt: number,
@@ -139,6 +186,13 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
               claimCode: acquireError?.claimCode ?? null,
               reason: acquireError?.reason ?? null,
             },
+            // The failed member's candidate and lease, so `adopt` — and the
+            // CLI's own unknown-outcome record — can prove whether the LOCK
+            // landed. Without them the only surviving evidence is a message.
+            candidate: unresolved
+              ? (acquireError?.details?.candidate ?? null)
+              : null,
+            lease: unresolved ? (acquireError?.details?.lease ?? null) : null,
             released: rollback.released,
             releaseFailures: rollback.failures.map((entry) => ({
               number: entry.number,
@@ -155,7 +209,10 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
           cause: rollback.failures[0]?.error ?? acquireError,
         },
       );
-      aborted.partialClaim = rollback.failures.length > 0;
+      // A member whose lock compare-and-swap ended unknown may hold a LOCK the
+      // rollback never saw, so the family is partial even when every release
+      // this run could make succeeded.
+      aborted.partialClaim = rollbackFailed || unresolved;
       aborted.acquireError = acquireError;
       throw aborted;
     }

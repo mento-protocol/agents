@@ -23,6 +23,13 @@
  *   - typed errors (see `./errors.mjs`).
  *   - `redactSecrets` plus 4 KiB truncation before any stderr reaches a
  *     message, a hint or a JSON result.
+ *   - `redactSecrets` on the ARGV too, on every surface that renders or
+ *     carries it: a message, a dry-run notice and the `args` array an error
+ *     exposes. Monitoring redacts none of these, so a token passed inside an
+ *     argv element — `-H "Authorization: token ghp_…"` — reached all three
+ *     verbatim.
+ *   - `redactSecrets` on the live `stderrSink`, which received raw chunks
+ *     while the error message beside it was redacted.
  *
  * Cut: monitoring's stdin `input` path. This package never posts a body.
  */
@@ -42,7 +49,7 @@ import {
   CLOUD_SESSION_GATEWAY_BODY,
   githubContentsScopeHint,
 } from "./hints.mjs";
-import { safeStderr } from "./redact.mjs";
+import { redactSecrets, safeStderr } from "./redact.mjs";
 
 export const GH_OUTPUT_MAX_BYTES = 20 * 1024 * 1024;
 export const GH_DEFAULT_TIMEOUT_MS = 60_000;
@@ -55,22 +62,43 @@ const MISSING_SCOPE_PATTERN = /requires one of the following scopes/i;
  * Shell-safe rendering of one argv entry, for messages and logs only. Nothing
  * this produces is ever executed.
  *
+ * Token shapes are redacted before the entry is quoted, so an argv element
+ * carrying a credential cannot reach a message or a log line. Redaction runs
+ * first for the same reason it precedes truncation: quoting a token first can
+ * split it out of the pattern's reach.
+ *
  * @param {string} value
  * @returns {string}
  */
 export function quoteArg(value) {
-  if (/^[A-Za-z0-9_./:=@#-]+$/.test(value)) return value;
-  return JSON.stringify(value);
+  const safe = redactSecrets(value);
+  if (/^[A-Za-z0-9_./:=@#-]+$/.test(safe)) return safe;
+  return JSON.stringify(safe);
 }
 
 /**
- * Render a `gh` argv for a message or a log line.
+ * Render a `gh` argv for a message or a log line. Redacted, through
+ * `quoteArg`.
  *
  * @param {Array<string|number>} args
  * @returns {string}
  */
 export function formatGh(args) {
   return `gh ${args.map((arg) => quoteArg(String(arg))).join(" ")}`;
+}
+
+/**
+ * The argv an error may carry: every entry redacted.
+ *
+ * `GhError` freezes this array onto `error.args`, where a caller logs it or
+ * serializes it into a JSON result, so it is a diagnostic surface exactly like
+ * the message. The spawned child still receives the raw argv.
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+function redactArgv(argv) {
+  return argv.map((arg) => redactSecrets(arg));
 }
 
 /**
@@ -124,6 +152,52 @@ function writeToStderr(text) {
   process.stderr.write(text);
 }
 
+/** The characters a GitHub token is made of, so a run of them may still be one. */
+const SECRET_TAIL_PATTERN = /[A-Za-z0-9_]*$/u;
+
+/** Longest tail held back while the rest of a possible token is awaited. */
+const STDERR_SINK_HOLD_BACK_MAX_CHARS = 512;
+
+/**
+ * Redact a live stderr tap without losing a token split across two chunks.
+ *
+ * `redactSecrets` matches a whole token, so redacting each chunk on its own
+ * would miss one that straddles a chunk boundary. This filter forwards only the
+ * redacted text up to the last character that cannot continue a token, and
+ * holds the trailing run of token characters back until the next chunk or the
+ * flush. The hold-back is capped at `STDERR_SINK_HOLD_BACK_MAX_CHARS`, so a
+ * stream with no separator forwards its tail instead of growing without bound;
+ * a single token longer than that cap is the one case this cannot rejoin, and
+ * no GitHub token shape comes close to it.
+ *
+ * @param {(chunk: string) => void} sink the caller's tap.
+ * @returns {{write: (chunk: string) => void, flush: () => void}}
+ */
+function createStderrSinkFilter(sink) {
+  let pending = "";
+  const forward = (text) => {
+    if (text.length === 0) return;
+    try {
+      sink(text);
+    } catch {
+      // A failing log sink never changes the command's outcome.
+    }
+  };
+  return {
+    write(chunk) {
+      pending += chunk;
+      const tail = SECRET_TAIL_PATTERN.exec(pending)[0];
+      const held = tail.length > STDERR_SINK_HOLD_BACK_MAX_CHARS ? "" : tail;
+      forward(redactSecrets(pending.slice(0, pending.length - held.length)));
+      pending = held;
+    },
+    flush() {
+      forward(redactSecrets(pending));
+      pending = "";
+    },
+  };
+}
+
 /**
  * Run `gh` with bounded output, a wall-clock timeout and typed failures.
  *
@@ -136,7 +210,8 @@ function writeToStderr(text) {
  * @param {number} [options.maxBytes] per-stream output cap.
  * @param {NodeJS.ProcessEnv} [options.env] environment to pin and pass on.
  * @param {AbortSignal|null} [options.signal]
- * @param {((chunk: string) => void)|null} [options.stderrSink] live stderr tap.
+ * @param {((chunk: string) => void)|null} [options.stderrSink] live stderr tap;
+ *   it receives redacted text, one chunk behind a possible token.
  * @param {Function} [options.spawn] injected `child_process.spawn`, for tests.
  * @param {(text: string) => void} [options.writeNotice] dry-run notice sink.
  * @returns {Promise<string>} stdout on success.
@@ -157,6 +232,8 @@ export function runGh(
   } = {},
 ) {
   const argv = normalizeArgs(args);
+  // The child is spawned with `argv`; every diagnostic carries `safeArgv`.
+  const safeArgv = redactArgv(argv);
   const pinnedEnvironment = pinnedGithubCliEnvironment(env);
 
   if (dryRun && mutates) {
@@ -168,7 +245,7 @@ export function runGh(
     if (signal?.aborted) {
       reject(
         new GhAbortError(`${formatGh(argv)} was aborted before it started`, {
-          args: argv,
+          args: safeArgv,
           mutates,
         }),
       );
@@ -180,6 +257,7 @@ export function runGh(
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    const stderrFilter = stderrSink ? createStderrSinkFilter(stderrSink) : null;
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -208,6 +286,7 @@ export function runGh(
       settled = true;
       clearTimeoutTimer();
       clearAbortListener();
+      stderrFilter?.flush();
       resolve(value);
     }
 
@@ -216,6 +295,7 @@ export function runGh(
       settled = true;
       clearTimeoutTimer();
       clearAbortListener();
+      stderrFilter?.flush();
       reject(error);
     }
 
@@ -243,7 +323,7 @@ export function runGh(
         terminate(
           new GhTimeoutError(
             `${formatGh(argv)} exceeded its ${timeoutMs} ms budget and was terminated; the server-side outcome is unknown`,
-            { args: argv, timeoutMs, mutates },
+            { args: safeArgv, timeoutMs, mutates },
           ),
         );
       }, timeoutMs);
@@ -255,7 +335,7 @@ export function runGh(
         terminate(
           new GhAbortError(
             `${formatGh(argv)} was aborted and terminated; the server-side outcome is unknown`,
-            { args: argv, mutates },
+            { args: safeArgv, mutates },
           ),
         );
       };
@@ -271,7 +351,7 @@ export function runGh(
         terminate(
           new GhOutputLimitError(
             `${formatGh(argv)} stdout exceeded ${maxBytes} bytes`,
-            { args: argv, stream: "stdout", limitBytes: maxBytes, mutates },
+            { args: safeArgv, stream: "stdout", limitBytes: maxBytes, mutates },
           ),
         );
         return;
@@ -281,18 +361,12 @@ export function runGh(
 
     child.stderr.on("data", (chunk) => {
       stderrBytes += Buffer.byteLength(chunk);
-      if (stderrSink) {
-        try {
-          stderrSink(chunk);
-        } catch {
-          // A failing log sink never changes the command's outcome.
-        }
-      }
+      stderrFilter?.write(chunk);
       if (stderrBytes > maxBytes) {
         terminate(
           new GhOutputLimitError(
             `${formatGh(argv)} stderr exceeded ${maxBytes} bytes`,
-            { args: argv, stream: "stderr", limitBytes: maxBytes, mutates },
+            { args: safeArgv, stream: "stderr", limitBytes: maxBytes, mutates },
           ),
         );
         return;
@@ -310,11 +384,11 @@ export function runGh(
         unexecutable
           ? new GhEnvError(
               `${formatGh(argv)} could not be executed (${error.code}): is the gh CLI installed and on PATH?`,
-              { args: argv, cause: error },
+              { args: safeArgv, cause: error },
             )
           : new GhCommandError(
               `${formatGh(argv)} failed: ${safeStderr(error.message)}`,
-              { args: argv, cause: error },
+              { args: safeArgv, cause: error },
             ),
       );
     });
@@ -324,6 +398,9 @@ export function runGh(
         clearTimeout(killTimer);
         killTimer = null;
       }
+      // The tap's held-back tail is flushed even when the promise settled
+      // earlier, so a chunk that arrived after a timeout still reaches the sink.
+      stderrFilter?.flush();
       if (settled) return;
       if (status !== 0) {
         const safe = safeStderr(stderr);
@@ -331,7 +408,7 @@ export function runGh(
         const httpStatus = parseHttpStatus(safe);
         const message = `${formatGh(argv)} failed with exit ${status}:\n${safe}${hint ? `\n${hint}\n` : ""}`;
         const details = {
-          args: argv,
+          args: safeArgv,
           exitCode: status,
           signal: closeSignal ?? null,
           stderr: safe,

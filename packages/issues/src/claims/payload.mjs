@@ -346,7 +346,14 @@ export function parseClaimPayload(raw, { scope, profile, oid, refName }) {
       );
     }
     if (present === LEASE_KEYS.length) {
-      for (const key of ["claimedAt", "expiresAt", "renewAfter"]) {
+      // `startedAt` is validated with the lease block but not counted in it.
+      // Every LOCK carries a `startedAt`, including one written by a profile
+      // with no lease layer, so it is not an all-or-none member. It is still
+      // lease arithmetic: `leaseState` reads it for the policy ceiling and for
+      // the clock-skew guard, so an absent or unparsable value would leave
+      // `eligibleAtMs` NaN and the reference takeable by nobody. Refusing the
+      // commit here answers exit 16 instead of wedging the reference.
+      for (const key of ["startedAt", "claimedAt", "expiresAt", "renewAfter"]) {
         if (!isIsoInstant(payload[key])) {
           throw invalidLease(
             profile,
@@ -545,10 +552,13 @@ export function takeoverEligibility(payload, options = {}) {
   return {
     eligible: state.takeoverEligible,
     reason: state.leased ? state.takeoverReason : "no-expiry",
-    eligibleAt:
-      state.eligibleAtMs === null
-        ? null
-        : new Date(state.eligibleAtMs).toISOString(),
+    // Finite, not just non-null: a payload whose `startedAt` never reached
+    // `parseClaimPayload` — a locally built one, or one read under a profile
+    // with no lease layer — leaves `eligibleAtMs` NaN, and `new Date(NaN)`
+    // throws `RangeError` instead of answering a claim verdict.
+    eligibleAt: Number.isFinite(state.eligibleAtMs)
+      ? new Date(state.eligibleAtMs).toISOString()
+      : null,
     remainingMs: state.remainingMs,
   };
 }

@@ -1,6 +1,6 @@
 {
   "schema": "dependabot-prep-comment-marker-vectors:v1",
-  "generatedBy": "@mento-protocol/issues@0.1.0",
+  "generatedBy": "@mento-protocol/issues",
   "vectors": [
     {
       "name": "review-reply-decomposed-unicode",

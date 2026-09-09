@@ -173,7 +173,13 @@ function buildSummaryVector(input) {
   };
 }
 
-function readPackageVersion() {
+// The default `generatedBy` records the package NAME and no version. The
+// serialized fixture is byte-compared by `markers vectors --check`, and a
+// separate skill repository copies the file verbatim, so a version in this
+// field would make every release rewrite the fixture and fail that check until
+// someone regenerated it. The name answers the only question the field is
+// asked — which tool wrote these bytes — and it does not move on a release.
+function readPackageName() {
   const url = new URL("../../package.json", import.meta.url);
   let raw;
   try {
@@ -187,17 +193,12 @@ function readPackageVersion() {
     );
   }
   const pkg = JSON.parse(raw);
-  if (typeof pkg.version !== "string" || pkg.version.length === 0) {
-    throw new MarkerError("package.json is missing a version", {
-      code: "MARKER_VECTORS_PACKAGE_VERSION_MISSING",
-    });
-  }
   if (typeof pkg.name !== "string" || pkg.name.length === 0) {
     throw new MarkerError("package.json is missing a name", {
       code: "MARKER_VECTORS_PACKAGE_NAME_MISSING",
     });
   }
-  return `${pkg.name}@${pkg.version}`;
+  return pkg.name;
 }
 
 /**
@@ -206,11 +207,14 @@ function readPackageVersion() {
  * array. The top-level `schema` is unchanged from today's file; only the
  * per-vector `markerSchema` and the new `summaryVectors`/`generatedBy`
  * fields carry the v2 extension.
+ *
+ * `generatedBy` defaults to the package name and is stable across releases; an
+ * explicit value overrides it, which is how the vector tests pin their own.
  */
 export function generateMarkerVectors({ generatedBy } = {}) {
   return {
     schema: "dependabot-prep-comment-marker-vectors:v1",
-    generatedBy: generatedBy ?? readPackageVersion(),
+    generatedBy: generatedBy ?? readPackageName(),
     vectors: [...V1_VECTOR_INPUTS, ...V2_VECTOR_INPUTS].map(buildCommentVector),
     summaryVectors: SUMMARY_VECTOR_INPUTS.map(buildSummaryVector),
   };

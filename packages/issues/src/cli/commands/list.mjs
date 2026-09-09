@@ -8,7 +8,7 @@
  * then `release --outcome skipped` — and this command still deletes nothing.
  */
 
-import { listClaims } from "../../claims/ref.mjs";
+import { listClaims, mapWithConcurrency } from "../../claims/ref.mjs";
 import { readPullRequestState } from "../github.mjs";
 import { markFailureContext } from "./common.mjs";
 
@@ -49,8 +49,9 @@ function summaryLine(entry, ctx) {
 export async function runList(runtime) {
   const { ctx, flags } = runtime;
   const warnings = [];
+  const concurrency = flags.concurrency ?? 4;
   const entries = await listClaims(ctx, {
-    concurrency: flags.concurrency ?? 4,
+    concurrency,
     numbers: flags.prs ?? null,
   });
   const selected =
@@ -58,25 +59,37 @@ export async function runList(runtime) {
       ? entries.filter((entry) => entry.stale === true)
       : entries;
 
+  // `--concurrency` governs both halves of the listing. The claim reads already
+  // ran under it and the pull-request reads ran one at a time, which is the
+  // slower half on a namespace of any size. `mapWithConcurrency` stores results
+  // by input position, so the printed order and the warnings stay the input's
+  // however the reads interleave.
   const readState =
     runtime.operations.gh?.readPullRequestState ?? readPullRequestState;
+  const read = await mapWithConcurrency(
+    selected,
+    concurrency,
+    async (entry) => {
+      const line = summaryLine(entry, ctx);
+      const pullRequest = await readState(ctx.options, entry.number);
+      line.pullRequest = {
+        state: pullRequest.state,
+        draft: pullRequest.draft,
+        merged: pullRequest.merged,
+      };
+      return { line, error: pullRequest.error ?? null };
+    },
+  );
   const lines = [];
-  for (const entry of selected) {
-    const line = summaryLine(entry, ctx);
-    const pullRequest = await readState(ctx.options, entry.number);
-    line.pullRequest = {
-      state: pullRequest.state,
-      draft: pullRequest.draft,
-      merged: pullRequest.merged,
-    };
-    if (pullRequest.error) {
+  for (const entry of read) {
+    if (entry.error) {
       warnings.push({
         stage: "read-pull-request",
-        number: entry.number,
-        message: pullRequest.error,
+        number: entry.line.number,
+        message: entry.error,
       });
     }
-    lines.push(line);
+    lines.push(entry.line);
   }
   if (selected.length > 0) markFailureContext(runtime, selected[0].number);
 

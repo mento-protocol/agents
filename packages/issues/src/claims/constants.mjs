@@ -61,6 +61,17 @@ export const MIN_REMAINING_FLOOR_MS = 30_000;
  */
 export const MIN_GUARD_RENEW_INTERVAL_MS = 1_000;
 
+/**
+ * How often guard re-checks its proven lease against the clock.
+ *
+ * This check reads no reference and starts nothing: it compares one stored
+ * instant to `ctx.clock.now()` for each guarded claim. It therefore has a much
+ * shorter period than the renew tick, and a timer of its own, because a renew
+ * tick can be parked inside a transport call that never answers while the
+ * child it is meant to stop keeps publishing.
+ */
+export const GUARD_DEADLINE_CHECK_INTERVAL_MS = 250;
+
 /** Default lease shape, in the units the config document uses. */
 export const DEFAULT_LEASE = Object.freeze({
   ttlMinutes: 30,

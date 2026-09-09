@@ -114,6 +114,38 @@ test("the two checked-in v1 marker vectors re-derive byte-for-byte", () => {
   );
 });
 
+test("the default generatedBy names the package without its version, so a release never rewrites the fixture", () => {
+  // The default used to be `name@version`. A version bump therefore changed
+  // one line of the serialized fixture, and `markers vectors --check` answered
+  // exit 3 until someone regenerated it — here and in the separate skill
+  // repository that copies the file verbatim.
+  const manifest = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const generated = generateMarkerVectors();
+  assert.equal(generated.generatedBy, manifest.name);
+  assert.equal(
+    generated.generatedBy.includes(manifest.version),
+    false,
+    "a package version in generatedBy makes every release a fixture change",
+  );
+
+  // The checked-in fixture carries that same stable value.
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/comment-marker-vectors.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(fixture.generatedBy, manifest.name);
+
+  // An explicit value still wins, which is what every vector test injects.
+  assert.equal(
+    generateMarkerVectors({ generatedBy: "test-fixture" }).generatedBy,
+    "test-fixture",
+  );
+});
+
 test("a v2 marker equals the v1 marker with a claim field appended before the closing delimiter", () => {
   const v1Input = V1_VECTOR_INPUTS[1]; // top-level-minimal-id
   const v2Input = V2_VECTOR_INPUTS[1]; // top-level-claimed

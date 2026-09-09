@@ -10,23 +10,40 @@
 /** Hard cap on the stderr excerpt carried by a message or a result. */
 export const GH_STDERR_MAX_BYTES = 4096;
 
-const SECRET_PATTERNS = Object.freeze([
-  /gh[pousr]_[A-Za-z0-9]{20,}/g,
-  /github_pat_[A-Za-z0-9_]{20,}/g,
-]);
-
 const REDACTION = "[redacted-github-token]";
 
 /**
- * Replace GitHub token shapes with a fixed placeholder.
+ * The credential shapes, and what replaces each.
+ *
+ * The token rules are deliberately narrow. A 40-hex string is matched by
+ * nothing here, because every commit oid this package prints is one, and a
+ * rule wide enough to cover a classic personal access token would erase the
+ * package's own diagnostics.
+ */
+const SECRET_PATTERNS = Object.freeze([
+  { pattern: /gh[pousr]_[A-Za-z0-9]{20,}/g, replacement: REDACTION },
+  { pattern: /github_pat_[A-Za-z0-9_]{20,}/g, replacement: REDACTION },
+  // An `Authorization` value is a credential whatever shape it has, so it is
+  // redacted by position rather than by pattern. That is what covers a GitHub
+  // App JWT, a `Basic` credential, and anything else a caller hands to
+  // `gh api -H`. The scheme word survives: it says what was sent without
+  // saying what the credential was.
+  {
+    pattern: /(authorization\s*:\s*(?:bearer\s+|token\s+|basic\s+)?)\S+/giu,
+    replacement: `$1${REDACTION}`,
+  },
+]);
+
+/**
+ * Replace credential shapes with a fixed placeholder.
  *
  * @param {unknown} text any value; non-strings are stringified.
  * @returns {string}
  */
 export function redactSecrets(text) {
   let value = String(text ?? "");
-  for (const pattern of SECRET_PATTERNS) {
-    value = value.replace(pattern, REDACTION);
+  for (const { pattern, replacement } of SECRET_PATTERNS) {
+    value = value.replace(pattern, replacement);
   }
   return value;
 }

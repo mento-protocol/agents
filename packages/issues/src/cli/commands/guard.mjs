@@ -18,10 +18,55 @@
 import { writeFileSync } from "node:fs";
 
 import { assertNoLiveDuplicateRunId } from "../../claims/context.mjs";
+import { ClaimConfigError } from "../../claims/errors.mjs";
 import { claimRefName } from "../../claims/ref.mjs";
 import { canonicalFencePurpose, guardChild } from "../../claims/verify.mjs";
 import { pairClaimFlags } from "../args.mjs";
 import { markFailureContext, recordLeaseState } from "./common.mjs";
+
+/**
+ * Reserve one host-local guard slot per pair, atomically, before any spawn.
+ *
+ * C-1, defence in depth, and the part `assertNoLiveDuplicateRunId` cannot do:
+ * that check reads the state entry and this command writes it afterwards, so
+ * two guards starting together both read the same record — usually the claim's,
+ * naming a process that has already exited — both pass, and both spawn a child
+ * that publishes under one claim. The exclusive create closes that window. The
+ * ref remains the mutual-exclusion authority; this only stops one host from
+ * running two publishers under one run id.
+ *
+ * It fails closed. A slot that cannot be created proves nothing about
+ * duplicates, and a guard that cannot prove it is alone must not spawn.
+ *
+ * @param {object} runtime the CLI runtime.
+ * @param {Array<{number: number, token: string}>} pairs the guarded pairs.
+ * @param {string} runId the owning run id.
+ * @returns {() => void} releases every slot this call reserved.
+ */
+function reserveGuardSlots(runtime, pairs, runId) {
+  const store = runtime.stateStore;
+  if (!store || typeof store.reserveGuardSlot !== "function") return () => {};
+  const held = [];
+  const releaseAll = () => {
+    for (const slot of held.splice(0)) slot.release();
+  };
+  for (const pair of pairs) {
+    const slot = store.reserveGuardSlot(pair.number, runId);
+    if (!slot.reserved) {
+      releaseAll();
+      throw new ClaimConfigError(slot.message, {
+        details: {
+          runId,
+          number: pair.number,
+          slot: slot.path,
+          pid: slot.holder?.pid ?? null,
+        },
+      });
+    }
+    held.push(slot);
+  }
+  return releaseAll;
+}
 
 /**
  * Record one guarded pair in the host-local state file.
@@ -70,6 +115,10 @@ export async function runGuard(runtime) {
   for (const pair of pairs) {
     assertNoLiveDuplicateRunId(ctx, pair.number, runId);
   }
+  // The atomic half of the same rule, and the one that survives two guards
+  // starting in the same instant. It is taken before the state entry is
+  // written and before anything is spawned.
+  const releaseSlots = reserveGuardSlots(runtime, pairs, runId);
   const stateWarnings = pairs.flatMap((pair) =>
     recordGuardState(runtime, pair, runId),
   );
@@ -93,24 +142,31 @@ export async function runGuard(runtime) {
     }
     runtime.stderr.write(`${line}\n`);
   };
-  const result = await guardChild(ctx, pairs, {
-    runId,
-    purpose,
-    argv: runtime.childArgv,
-    renewIfNeeded: flags["no-renew"] !== true,
-    advisory: flags.advisory === true,
-    reportSink: emit,
-    spawn: runtime.spawn,
-    warnings: stateWarnings,
-    // A guard renew rotates the token, so the state file has to follow it.
-    // Otherwise a later `adopt --from-state` after a crash reads the acquire's
-    // candidate, finds this run's own newer LOCK at the head, and reports the
-    // claim superseded — exit 13, "treat work in flight as forfeit" — for a
-    // claim this run still holds.
-    onRenew: (entry) => {
-      if (entry.lease) recordLeaseState(runtime, entry.number, entry.lease);
-    },
-  });
+  let result;
+  try {
+    result = await guardChild(ctx, pairs, {
+      runId,
+      purpose,
+      argv: runtime.childArgv,
+      renewIfNeeded: flags["no-renew"] !== true,
+      advisory: flags.advisory === true,
+      reportSink: emit,
+      spawn: runtime.spawn,
+      warnings: stateWarnings,
+      // A guard renew rotates the token, so the state file has to follow it.
+      // Otherwise a later `adopt --from-state` after a crash reads the acquire's
+      // candidate, finds this run's own newer LOCK at the head, and reports the
+      // claim superseded — exit 13, "treat work in flight as forfeit" — for a
+      // claim this run still holds.
+      onRenew: (entry) => {
+        if (entry.lease) recordLeaseState(runtime, entry.number, entry.lease);
+      },
+    });
+  } finally {
+    // The slot lasts exactly as long as the child. A guard that is killed
+    // outright leaves it behind, and the next guard reclaims it by liveness.
+    releaseSlots();
+  }
 
   if (flags.report !== undefined) {
     try {

@@ -126,7 +126,14 @@ export class ClaimRefInvalidError extends ClaimStaleError {
   static defaultClaimCode = "CLAIM_REF_INVALID";
 }
 
-/** A family claim aborted; exit 10, or 16 when a rollback release failed. */
+/**
+ * A family claim aborted; exit 10, or 16 when a rollback release failed.
+ *
+ * A member whose lock compare-and-swap ended unknown carries
+ * `claimCode: "CLAIM_UNKNOWN_OUTCOME"` instead, so it exits 12 and asks for
+ * `adopt`. Telling the caller to skip the family (exit 10) would be wrong
+ * while a LOCK this run may hold is still on a ref.
+ */
 export class ClaimFamilyAbortedError extends ClaimError {
   static defaultClaimCode = "CLAIM_FAMILY_ABORTED";
 }

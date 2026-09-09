@@ -5,6 +5,7 @@ import {
   ClaimFamilyAbortedError,
   isRecoverableClaimRaceError,
 } from "../src/claims/errors.mjs";
+import { prClaimProfile } from "../src/claims/profile.mjs";
 import { claimRefName, listClaims } from "../src/claims/ref.mjs";
 import { acquireClaim } from "../src/claims/transitions.mjs";
 import { createFakeRefServer } from "../src/testing/fake-ref-server.mjs";
@@ -289,6 +290,80 @@ test("claim refuses when the state file names our run id under a different live 
   });
   const lease = await acquireClaim(dead.ctx, PR, {});
   assert.equal(lease.status, "acquired");
+});
+
+test("the pull-request profile refuses a ref template that does not name {pr} exactly once", () => {
+  for (const [label, refTemplate] of [
+    ["no placeholder", "refs/mento-claims/v1/pr/all"],
+    ["two placeholders", "refs/mento-claims/v1/pr/{pr}/{pr}"],
+    ["a non-string template", 872],
+  ]) {
+    assert.throws(
+      () => prClaimProfile({ refTemplate }),
+      (error) => {
+        assert.match(
+          error.message,
+          /ref template must contain \{pr\} exactly once/,
+          label,
+        );
+        return true;
+      },
+      label,
+    );
+  }
+
+  // Without the check, the first of those renders one ref name for every pull
+  // request, so every claim contends with every other claim.
+  const valid = prClaimProfile({ refTemplate: "refs/custom/{pr}/claim" });
+  assert.equal(valid.refName({ pr: 872 }), "refs/custom/872/claim");
+  assert.notEqual(valid.refName({ pr: 872 }), valid.refName({ pr: 880 }));
+});
+
+test("acquire that must take over an expired LOCK accepts the same metadata an acquire accepts", async () => {
+  // `acquireClaim` strips the envelope keys before validating, then forwards
+  // the caller's raw bag to the takeover path. Validating it unstripped there
+  // made the same call succeed against an UNLOCK and fail against an expired
+  // LOCK with `Unknown metadata key agent`.
+  const { ctx, server, clock } = createTestContext();
+  const refName = claimRefName(ctx, PR);
+  seedRef(
+    server,
+    refName,
+    buildTestLock(ctx, PR, { ownerRunId: "peer-run-1" }),
+  );
+  clock.advance(40 * MINUTE);
+
+  const lease = await acquireClaim(ctx, PR, {
+    agent: "dependabot-prep",
+    lastPushedHead: "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22",
+  });
+
+  assert.equal(lease.status, "taken-over");
+  assert.equal(lease.payload.agent, "dependabot-prep");
+  assert.equal(
+    lease.payload.lastPushedHead,
+    "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22",
+  );
+
+  // A genuinely unknown key is still refused on both paths.
+  const { ctx: unlocked } = createTestContext({ uuidPrefix: "unlocked" });
+  await assert.rejects(() => acquireClaim(unlocked, PR, { nonsense: 1 }), {
+    claimCode: "CLAIM_CONFIG",
+  });
+  const {
+    ctx: expired,
+    server: expiredServer,
+    clock: expiredClock,
+  } = createTestContext({ uuidPrefix: "expired" });
+  seedRef(
+    expiredServer,
+    claimRefName(expired, PR),
+    buildTestLock(expired, PR, { ownerRunId: "peer-run-2" }),
+  );
+  expiredClock.advance(40 * MINUTE);
+  await assert.rejects(() => acquireClaim(expired, PR, { nonsense: 1 }), {
+    claimCode: "CLAIM_CONFIG",
+  });
 });
 
 test("isRecoverableClaimRaceError is true for contention and false for a partial family claim", async () => {

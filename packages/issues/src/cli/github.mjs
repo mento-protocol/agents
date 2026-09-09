@@ -18,7 +18,10 @@ const SCOPES_HEADER_PATTERN = /^x-oauth-scopes:\s*(.*)$/imu;
  * The open/closed state of one pull request.
  *
  * A read that fails is reported, never thrown: a claim listing must still
- * print the claims it did read.
+ * print the claims it did read. The number is checked before it is spliced
+ * into the REST path, which is the same rule `repository` follows in the
+ * config loader: the path is built unencoded, so nothing but a positive safe
+ * integer may reach it.
  *
  * @param {{repo: string, dryRun?: boolean, timeoutMs?: number}} options
  * @param {number} number the pull request number.
@@ -31,6 +34,15 @@ export async function readPullRequestState(
   number,
   { json = ghJson } = {},
 ) {
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return {
+      number,
+      state: null,
+      draft: null,
+      merged: null,
+      error: `Pull request number must be a positive integer, got: ${String(number)}`,
+    };
+  }
   const { nameWithOwner } = splitRepo(options.repo);
   try {
     const read = await json(
