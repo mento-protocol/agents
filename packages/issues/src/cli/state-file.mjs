@@ -20,12 +20,14 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { join } from "node:path";
 
@@ -76,10 +78,56 @@ export function processIsAlive(pid) {
 }
 
 /**
+ * Probe one recorded process id, reporting **why**, not merely yes or no.
+ *
+ * `processIsAlive` collapses every failure into "not alive". That is right for
+ * a defence-in-depth check and wrong for the one place that deletes a file:
+ * `clearGuardSlot` may remove a slot only on positive proof of death, and a
+ * `false` from that helper can equally mean an errno it never inspected or a
+ * pid it could not pass to `kill` at all. Removing a slot on either would be
+ * removing a live guard's file — real CLI runs cleared documents recording
+ * `0`, `"123"` and `2147483648` before this existed.
+ *
+ * - `invalid` — not a positive safe integer, so no probe was made.
+ * - `alive` — `kill(pid, 0)` succeeded.
+ * - `restricted` — `EPERM`: the process exists and this user may not signal
+ *   it. POSIX-alive, and never proof of death.
+ * - `dead` — `ESRCH`, and only `ESRCH`. The one answer that permits a removal.
+ * - `unknown` — any other errno. Proof of nothing.
+ *
+ * @param {unknown} pid the recorded process id.
+ * @returns {"invalid"|"alive"|"restricted"|"dead"|"unknown"}
+ */
+export function probeProcessState(pid) {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) {
+    return "invalid";
+  }
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    if (error?.code === "ESRCH") return "dead";
+    if (error?.code === "EPERM") return "restricted";
+    return "unknown";
+  }
+}
+
+/**
+ * Render one value for a command line a human will copy.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function quoteForCommand(value) {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:@=-]+$/u.test(text) ? text : JSON.stringify(text);
+}
+
+/**
  * Create the state store for one repository.
  *
  * @param {object} input `{ repository, root, env, platform, isProcessAlive,
- *   pid, clock }`.
+ *   probeProcess, configPath, pid, clock }`.
  * @returns {object} the store, shaped for `assertNoLiveDuplicateRunId`.
  */
 export function createStateStore(input) {
@@ -88,6 +136,12 @@ export function createStateStore(input) {
     root = stateRootFor({ env: input.env, platform: input.platform }),
     numberKey = "pr",
     isProcessAlive = processIsAlive,
+    // Errno-aware, and separate on purpose: only the clear path may act on the
+    // difference between "not alive" and "provably dead".
+    probeProcess = probeProcessState,
+    // The `--config` this invocation was given, so a refusal can print a
+    // recovery command that runs as written rather than a placeholder.
+    configPath = null,
     pid = process.pid,
     // The context's clock, so the one artefact the CLI persists is stamped
     // from the same instant every document is. `Date.now` only when a caller
@@ -96,6 +150,12 @@ export function createStateStore(input) {
   } = input;
   const { owner, name } = splitRepo(repository);
   const directory = join(root, `${owner}__${name}`);
+  // The root this host would use with no `--state`, so the printed recovery
+  // command carries the flag exactly when it is needed.
+  const defaultRoot = stateRootFor({
+    env: input.env,
+    platform: input.platform,
+  });
 
   function pathFor(number) {
     return join(directory, `${numberKey}-${number}.json`);
@@ -134,14 +194,25 @@ export function createStateStore(input) {
    * The exact command that removes one guard slot.
    *
    * A refusal prints it, because clearing a slot is an operator step and the
-   * operator should not have to work out the flags from a path.
+   * operator should not have to work out the flags from a path. It carries
+   * **this invocation's** `--config` and, when the store is not on this host's
+   * default root, its `--state`: a command that named neither ran against a
+   * different store and answered `absent` while the slot it was printed for
+   * stayed exactly where it was.
    *
    * @param {number} number PR or issue number.
    * @param {string} runId the owning run id.
    * @returns {string}
    */
   function clearGuardSlotCommand(number, runId) {
-    return `mento-issues claims slot clear --${numberKey} ${number} --run-id ${runId} --config <path>`;
+    const parts = [
+      "mento-issues claims slot clear",
+      `--${numberKey} ${number}`,
+      `--run-id ${quoteForCommand(runId)}`,
+      `--config ${configPath === null ? "<path>" : quoteForCommand(configPath)}`,
+    ];
+    if (root !== defaultRoot) parts.push(`--state ${quoteForCommand(root)}`);
+    return parts.join(" ");
   }
 
   function readEntry(number) {
@@ -340,18 +411,49 @@ export function createStateStore(input) {
         release,
       });
 
+      let descriptor = null;
       try {
         mkdirSync(directory, { recursive: true });
-        writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`, {
-          flag: "wx",
-          mode: 0o600,
-        });
-        return { path, reserved: true, holder: null, message: null, release };
+        // `wx` is `O_CREAT | O_EXCL`: this open either creates the file or
+        // fails, and nothing else about it can be raced. The document is
+        // written through the descriptor it returns and flushed, so a slot
+        // that survives a crash carries its own nonce. The window this cannot
+        // close is between the open and the write — a kill in there leaves an
+        // empty file that `slot clear` correctly refuses as unreadable, and
+        // that an operator removes by hand. It is documented rather than
+        // papered over, because closing it needs a second file or a rename,
+        // and both of those are what made every earlier design unsound.
+        descriptor = openSync(path, "wx", 0o600);
       } catch (error) {
         if (error?.code !== "EEXIST") {
           return refuse(
             `The guard slot ${path} could not be created: ${firstLine(error)}`,
           );
+        }
+      }
+      if (descriptor !== null) {
+        try {
+          writeSync(descriptor, `${JSON.stringify(document, null, 2)}\n`);
+          fsyncSync(descriptor);
+          return { path, reserved: true, holder: null, message: null, release };
+        } catch (error) {
+          // The exclusive open made this file this reservation's a moment ago,
+          // so removing it removes its own; leaving an empty slot would wedge
+          // the run behind a file no `slot clear` can prove anything about.
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            // Reported by the refusal below either way.
+          }
+          return refuse(
+            `The guard slot ${path} could not be written: ${firstLine(error)}`,
+          );
+        } finally {
+          try {
+            closeSync(descriptor);
+          } catch {
+            // The descriptor goes out of scope either way.
+          }
         }
       }
 
@@ -370,11 +472,15 @@ export function createStateStore(input) {
      * Clear one guard slot a crashed guard left behind.
      *
      * The explicit half of the reservation rule, and the only thing in this
-     * package that removes a slot it did not create. It refuses unless the
-     * recorded process is **provably dead** — `process.kill(pid, 0)` raising
-     * `ESRCH`, with `EPERM` counting as alive — and a slot whose document
-     * cannot be read has no pid to prove dead, so it is refused too and named
-     * for an operator to remove by hand.
+     * package that removes a slot it did not create. It removes one **only on
+     * positive proof of death** — `process.kill(pid, 0)` answering `ESRCH`,
+     * and nothing else. Every other outcome refuses under a status that says
+     * which: a pid that is not a positive safe integer (`invalid-pid`, no
+     * probe was even possible), `EPERM` or a successful signal (`held`, the
+     * process exists), any other errno (`unprovable`), and a document that
+     * cannot be parsed (`unreadable`, no pid to probe at all). "Not alive" is
+     * not proof of death, and this is the one place where that distinction
+     * decides whether a file is deleted.
      *
      * `guard` never calls this. The residual is real and is documented rather
      * than papered over: running it beside a live guard of the same run id on
@@ -415,13 +521,31 @@ export function createStateStore(input) {
           `The guard slot ${path} cannot be read, so no process can be proved dead; inspect it and remove it by hand`,
         );
       }
-      const holderPid = holder.pid ?? null;
-      if (holderPid == null || isProcessAlive(holderPid)) {
+      const holderPid = holder.pid;
+      const state = probeProcess(holderPid);
+      const since = holder.reservedAt ?? "<unrecorded>";
+      if (state === "invalid") {
+        return answer(
+          "invalid-pid",
+          false,
+          holder,
+          `The guard slot ${path} records ${JSON.stringify(holderPid) ?? "no"} as its process id, which is not a positive process id this host can probe; nothing about it can be proved, so inspect it and remove it by hand`,
+        );
+      }
+      if (state === "alive" || state === "restricted") {
         return answer(
           "held",
           false,
           holder,
-          `The guard slot ${path} is held by live process ${holderPid ?? "<unreadable>"} since ${holder.reservedAt ?? "<unrecorded>"}; stop that guard before clearing its slot`,
+          `The guard slot ${path} is held by live process ${holderPid} since ${since}${state === "restricted" ? " (it exists but this user may not signal it)" : ""}; stop that guard before clearing its slot`,
+        );
+      }
+      if (state !== "dead") {
+        return answer(
+          "unprovable",
+          false,
+          holder,
+          `The guard slot ${path} records process ${holderPid}, which this host could neither reach nor prove dead; only an ESRCH clears a slot, so inspect it and remove it by hand`,
         );
       }
       if (options.dryRun === true) {

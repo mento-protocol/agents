@@ -1102,9 +1102,27 @@ A holder removes its own slot when the child exits, on every exit path, and only
 its own: `release` opens the file, reads the nonce back through that descriptor,
 and unlinks only when it is this reservation's. A slot carrying another nonce,
 or none that can be read, is left where it is and reported as a warning on
-guard's report line. Nothing after the `wx` create can fail a reservation, so no
-path creates a slot and then refuses while holding it; a spawn that fails still
-reaches the same release.
+guard's report line. A spawn that fails reaches the same release, and the only
+step that can fail a reservation after the exclusive open is the write itself,
+which removes the file it just created rather than leaving an empty one behind.
+
+Two windows are left, both narrow, both documented because closing either would
+need a rename or a second file — the constructs that made every earlier design
+unsound:
+
+- **A kill between the open and the write.** `openSync(path, "wx")` and the
+  `writeSync` that follows it are separate syscalls, so a guard killed between
+  them leaves a **zero-length slot**. It carries no pid, so `slot clear`
+  correctly refuses it as `unreadable`: there is nothing there to prove dead.
+  Recovery is manual — confirm that no guard of that run is alive, then delete
+  that empty file — and it is the one case where an operator removes a slot by
+  hand.
+- **`release` is a read and then an unlink, not one operation.** "Removes only
+  its own slot" holds while no `slot clear` runs beside it. A clear that removes
+  the holder's slot between that read and that unlink lets a successor create a
+  slot which the departing holder then unlinks. It is the same residual as
+  `slot clear` itself, and it closes the same way: one guard per run at a time,
+  and clear a slot only after confirming that no guard of that run is alive.
 
 **Guard takes no slot over, by any means: no liveness reclaim, no age, no
 lock.** Three designs tried, each unsound, and the reason is structural rather
@@ -1121,17 +1139,26 @@ that cannot be raced, so it is the only one left in the hot path.
 
 An existing slot therefore always refuses — live, dead or unreadable holder
 alike — and the refusal carries the recorded pid, the instant the slot was
-taken, and the exact recovery command. Recovery is explicit:
+taken, and the exact recovery command, which is printed with **this
+invocation's** `--config` and, when the store is not on the host's default root,
+its `--state`. A command printed without them ran against a different store and
+answered `absent` while the slot it named stayed where it was. Recovery is
+explicit:
 
 ```bash
 mento-issues claims slot clear --config <cfg> --pr 872 --run-id <rid>
 ```
 
 `claims slot clear` is the only thing in the package that removes a slot it did
-not create. It refuses unless the recorded process is **provably dead** —
-`kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive — refuses a slot
-whose document cannot be read, since that has no pid to prove anything about,
-supports `--dry-run`, and touches no network. `guard` never calls it.
+not create, and it does so **only on positive proof of death**: `kill(pid, 0)`
+answering `ESRCH`, and nothing else. Every other outcome refuses under a status
+that says which — `held` for a signal that succeeded or `EPERM` (the process
+exists and may not be signalled), `invalid-pid` for a document whose pid is not
+a positive safe integer and so was never probed at all, `unprovable` for any
+other errno, and `unreadable` for a document that cannot be parsed. "Not alive"
+is not proof of death, and this is the one place where the difference decides
+whether a file is deleted. It supports `--dry-run` and touches no network.
+`guard` never calls it.
 
 **The residual is procedural and is stated rather than papered over.** Run
 beside a live guard of the same run id on the same host, `slot clear` can

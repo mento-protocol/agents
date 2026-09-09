@@ -45,10 +45,16 @@ export async function runSlotClear(runtime) {
   const result = store.clearGuardSlot(number, runId, {
     dryRun: runtime.flags["dry-run"] === true,
   });
-  // A slot whose holder is alive, or whose document cannot be read, is a
-  // refusal: this command exists to recover a crashed guard's slot, and
-  // nothing else may remove a file another process believes it owns.
-  if (result.status === "held" || result.status === "unreadable") {
+  // Anything short of positive proof of death refuses: a live or unsignalable
+  // holder, a pid this host cannot probe at all, an errno that proves nothing,
+  // or a document that cannot be parsed. This command recovers a crashed
+  // guard's slot; nothing else may remove a file another process owns.
+  if (
+    result.status === "held" ||
+    result.status === "unreadable" ||
+    result.status === "invalid-pid" ||
+    result.status === "unprovable"
+  ) {
     throw new ClaimConfigError(result.message, {
       details: {
         number,

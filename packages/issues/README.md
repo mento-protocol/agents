@@ -212,7 +212,16 @@ Before it spawns, guard creates one host-local file per guarded pair —
 number of racing guards makes the file, and every other one exits 3. The holder
 removes it when the child exits, and only its own: the nonce inside is read
 back through a descriptor opened before the unlink, and a file carrying anyone
-else's nonce is left alone with a warning.
+else's nonce is left alone with a warning. That "only its own" holds while no
+`slot clear` runs beside it — the read and the unlink are two operations, so a
+clear in between lets a successor create a slot the departing holder then
+removes. Same residual as `slot clear` below, and it closes the same way.
+
+The exclusive create and the write are two syscalls as well, so a guard killed
+between them leaves a **zero-length slot**. `slot clear` refuses that one as
+`unreadable` — there is no pid in it to prove anything about — and it is the
+single case an operator handles by hand: confirm that no guard of that run is
+alive, then delete the empty file.
 
 **Guard never takes a slot over**, so a guard that was killed outright leaves a
 slot that refuses every later guard of that run, whatever state the recorded
@@ -223,16 +232,29 @@ then take the file" reclaim has a window between the two steps that an
 unbounded pause can stretch until two guards hold one slot. Four concurrent
 processes were enough to demonstrate it against each design that tried.
 
-Recovery is one explicit command:
+Recovery is one explicit command, which the refusal prints ready to run — with
+that invocation's own `--config`, and its `--state` whenever the store is not on
+the host's default root:
 
 ```bash
 mento-issues claims slot clear --config <cfg> --pr 872 --run-id <rid>
 ```
 
-It refuses (exit 3) unless the recorded process is provably dead —
-`kill(pid, 0)` raising `ESRCH`, with `EPERM` counted as alive — and refuses a
-slot whose document cannot be read, since that has no pid to prove anything
-about. `--dry-run` reports what it would remove. It reaches no network.
+It removes a slot **only on positive proof of death**: `kill(pid, 0)` answering
+`ESRCH`, and nothing else. Every other outcome exits 3 under a status that says
+which:
+
+| Status        | Meaning                                                            |
+| ------------- | ------------------------------------------------------------------ |
+| `held`        | the signal succeeded, or `EPERM` — the process exists              |
+| `invalid-pid` | the document's pid is not a positive safe integer; never probed    |
+| `unprovable`  | any other errno: the host could neither reach it nor prove it dead |
+| `unreadable`  | the document cannot be parsed, so there is no pid to probe         |
+| `absent`      | there is no slot; exit 0                                           |
+
+"Not alive" is not proof of death, and this is the one place where the
+difference decides whether a file is deleted. `--dry-run` reports what it would
+remove. It reaches no network.
 
 **The residual, stated plainly:** run beside a live guard of the same run id on
 the same host, `slot clear` can displace that guard, because a liveness check

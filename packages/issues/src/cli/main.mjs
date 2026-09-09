@@ -292,6 +292,14 @@ async function createRuntime(parsed, options) {
     }),
     numberKey: config.profile.numberKey,
     isProcessAlive: options.isProcessAlive,
+    probeProcess: options.probeProcess,
+    // So a guard-slot refusal prints a `claims slot clear` that runs as
+    // written: this invocation's config, and its state root when that is not
+    // the host default. `env` and `platform` are what tell the store which
+    // root the host would have used on its own.
+    configPath: runtime.configPath,
+    env,
+    platform: options.platform ?? process.platform,
     clock: runtime.clock,
   });
   runtime.stateStore = stateStore;

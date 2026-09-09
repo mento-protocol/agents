@@ -112,6 +112,15 @@ function recordGuardState(runtime, pair, runId) {
 }
 
 /**
+ * Run the guard.
+ *
+ * Order of the two duplicate checks: **the slot is reserved first**, and the
+ * state-entry check (`assertNoLiveDuplicateRunId`) runs under it. Both refuse
+ * a second guard under one run id; only the slot can say which file is in the
+ * way, when it was taken and what removes it. Neither ordering weakens the
+ * gate — both precede the state write and the spawn, and a refusal from the
+ * second releases what the first reserved.
+ *
  * @param {object} runtime the CLI runtime.
  * @returns {Promise<{handled: true, exitCode: number}>}
  */
@@ -122,18 +131,30 @@ export async function runGuard(runtime) {
   const runId = flags["run-id"];
   markFailureContext(runtime, pairs[0].number);
 
-  // C-1, defence in depth, and guard needs it more than `renew` does: guard is
-  // the publish gate, so two invocations under one run id and token would each
-  // verify held and each spawn a publishing child, while their renew ticks
-  // merely contend harmlessly as `owner-renewed`. The check reads the state
-  // file, so it runs before this process writes its own entry into it.
-  for (const pair of pairs) {
-    assertNoLiveDuplicateRunId(ctx, pair.number, runId);
-  }
-  // The atomic half of the same rule, and the one that survives two guards
-  // starting in the same instant. It is taken before the state entry is
-  // written and before anything is spawned.
+  // The slot comes first, and the order is load-bearing for the diagnostic
+  // rather than for the safety. Both checks refuse a second guard under one
+  // run id; only the slot knows *which* file is in the way, when it was taken
+  // and what removes it, because it is the thing that was actually created.
+  // `assertNoLiveDuplicateRunId` reads the state entry — usually the claim's,
+  // naming a process that has already exited — and can only report a pid.
+  // Running it first meant a real duplicate guard was told a pid and nothing
+  // else. Neither ordering weakens the gate: both run before the entry is
+  // written and before anything is spawned, and the slot is released if the
+  // second check refuses, so a refusal on either path spawns nothing and
+  // leaves nothing behind.
   const releaseSlots = reserveGuardSlots(runtime, pairs, runId);
+  try {
+    // C-1, defence in depth, and guard needs it more than `renew` does: guard
+    // is the publish gate, so two invocations under one run id and token would
+    // each verify held and each spawn a publishing child, while their renew
+    // ticks merely contend harmlessly as `owner-renewed`.
+    for (const pair of pairs) {
+      assertNoLiveDuplicateRunId(ctx, pair.number, runId);
+    }
+  } catch (error) {
+    releaseSlots();
+    throw error;
+  }
   const stateWarnings = pairs.flatMap((pair) =>
     recordGuardState(runtime, pair, runId),
   );

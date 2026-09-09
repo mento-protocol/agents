@@ -185,6 +185,7 @@ async function invoke(argv, options = {}) {
     randomUUID: options.randomUUID,
     random: options.random,
     isProcessAlive: options.isProcessAlive,
+    probeProcess: options.probeProcess,
     packageIdentity: options.packageIdentity,
     platform: "linux",
   });
@@ -2559,9 +2560,27 @@ test("two guards under one run id contend for one host-local slot and only one s
   assert.equal(calls.length, 1, "the first guard ran its child");
   assert.equal(duplicate.calls.length, 0, "the second guard never spawned");
   assert.equal(second.exitCode, 3);
+  // The refusal a real duplicate guard gets is the slot's, not the state
+  // entry's: the slot is reserved before `assertNoLiveDuplicateRunId` runs,
+  // because only the slot knows which file is in the way, when it was taken
+  // and what removes it. The entry check could report a pid and nothing else.
+  const duplicateRefusal = second.stderrDocuments.at(-1).error;
+  assert.match(duplicateRefusal.message, /already has the guard slot/u);
+  assert.equal(duplicateRefusal.details.pid, process.pid);
   assert.match(
-    second.stderrDocuments.at(-1).error.message,
-    /already has the guard slot/u,
+    duplicateRefusal.details.reservedAt,
+    /^\d{4}-\d{2}-\d{2}T/u,
+    "the refusal says when the slot was taken",
+  );
+  assert.match(
+    duplicateRefusal.details.clear,
+    /^mento-issues claims slot clear/u,
+  );
+  assert.ok(
+    duplicateRefusal.details.clear.includes(
+      `--state ${context.options.stateRoot}`,
+    ),
+    "and how to clear this store's slot",
   );
 
   // The slot lasts exactly as long as the child: once the first guard is done,
@@ -2660,38 +2679,110 @@ test("a slot left behind refuses every later guard, and slot clear is the only r
   assert.equal(blockedSpawn.calls.length, 0, "no child under an existing slot");
   const refusal = blocked.stderrDocuments.at(-1).error;
   assert.match(refusal.message, /already has the guard slot/u);
-  assert.match(refusal.message, /claims slot clear --pr 872 --run-id /u);
   assert.equal(refusal.details.pid, stalePid);
   assert.equal(refusal.details.reservedAt, "2026-09-09T09:00:00.000Z");
 
-  // `slot clear` refuses while the recorded process is alive. `EPERM` counts
-  // as alive, which `processIsAlive` is what pins.
-  const held = await context.run(clearArgv, { isProcessAlive: () => true });
-  assert.equal(held.exitCode, 3);
-  assert.match(held.document.error.message, /is held by live process/u);
-  assert.equal(existsSync(slotPath), true, "a live holder's slot is untouched");
+  // The printed command must run as written. A placeholder config and a
+  // missing `--state` sent the operator at a *different* store, which
+  // answered `absent` exit 0 while the slot stayed exactly where it was.
+  const printed = refusal.message.slice(
+    refusal.message.indexOf("mento-issues claims slot clear"),
+  );
+  assert.equal(printed, refusal.details.clear);
+  assert.match(printed, /--pr 872 /u);
+  assert.ok(
+    printed.includes(`--config ${context.configPath}`),
+    `the printed command carries this config: ${printed}`,
+  );
+  assert.ok(
+    printed.includes(`--state ${context.options.stateRoot}`),
+    `the printed command carries this state root: ${printed}`,
+  );
+  // And it is the argv this test drives, flag for flag.
+  assert.deepEqual(printed.split(" ").slice(1), [
+    ...clearArgv,
+    "--config",
+    context.configPath,
+    "--state",
+    context.options.stateRoot,
+  ]);
+  // Run exactly what was printed, with nothing else injected: the flags on
+  // that line have to be enough to reach the store the slot is really in. Its
+  // own `--state` is what does that, and the absence of one is what made the
+  // old line answer `absent` while the slot stayed exactly where it was.
+  const asPrinted = await invoke(printed.split(" ").slice(1), {
+    clock: context.clock,
+    operations: context.options.operations,
+    probeProcess: () => "dead",
+  });
+  assert.equal(asPrinted.exitCode, 0, "the printed command runs as written");
+  assert.equal(asPrinted.document.slot.status, "cleared");
+  assert.equal(existsSync(slotPath), false, "and clears the slot it named");
+  seedSlot(staleSlot);
+
+  // `slot clear` refuses while the recorded process is alive, and `EPERM` —
+  // it exists, this user may not signal it — is alive, never proof of death.
+  for (const [state, pattern] of [
+    ["alive", /is held by live process/u],
+    ["restricted", /may not signal it/u],
+    ["unknown", /neither reach nor prove dead/u],
+  ]) {
+    const refused = await context.run(clearArgv, {
+      probeProcess: () => state,
+    });
+    assert.equal(refused.exitCode, 3, state);
+    assert.match(refused.document.error.message, pattern);
+    assert.equal(existsSync(slotPath), true, `${state} keeps the slot`);
+  }
+
+  // A pid no `kill` can even be given is proof of nothing, so a document
+  // recording one is refused rather than cleared. The real probe runs here:
+  // `processIsAlive` answered "not alive" for every one of these, and "not
+  // alive" was once enough to delete the file.
+  for (const badPid of [0, -1, "123", 2147483648.5, null, 2 ** 60]) {
+    seedSlot(
+      JSON.stringify({
+        schema: GUARD_SLOT_SCHEMA,
+        repository: REPOSITORY,
+        number: PR,
+        runId,
+        pid: badPid,
+        nonce: "a-guard-that-recorded-a-pid-like-that",
+        reservedAt: "2026-09-09T09:00:00.000Z",
+      }),
+    );
+    const refused = await context.run(clearArgv);
+    assert.equal(refused.exitCode, 3, `pid ${JSON.stringify(badPid)}`);
+    assert.match(refused.document.error.message, /not a positive process id/u);
+    assert.equal(
+      existsSync(slotPath),
+      true,
+      `pid ${JSON.stringify(badPid)} keeps the slot`,
+    );
+  }
 
   // A slot whose document cannot be read has no pid to prove dead, so it is
-  // refused too rather than removed on a guess.
+  // refused too rather than removed on a guess. That is also the state a guard
+  // killed between its exclusive create and its write leaves behind.
   seedSlot("{ not json");
   const unreadable = await context.run(clearArgv, {
-    isProcessAlive: () => false,
+    probeProcess: () => "dead",
   });
   assert.equal(unreadable.exitCode, 3);
   assert.match(unreadable.document.error.message, /cannot be read/u);
   assert.equal(existsSync(slotPath), true);
 
-  // Provably dead: cleared, and reported.
+  // Provably dead — `ESRCH`, and only that — is cleared, and reported.
   seedSlot(staleSlot);
   const planned = await context.run([...clearArgv, "--dry-run"], {
-    isProcessAlive: () => false,
+    probeProcess: () => "dead",
   });
   assert.equal(planned.exitCode, 0);
   assert.equal(planned.document.slot.status, "clearable");
   assert.equal(planned.document.slot.removed, false);
   assert.equal(existsSync(slotPath), true, "--dry-run removes nothing");
 
-  const cleared = await context.run(clearArgv, { isProcessAlive: () => false });
+  const cleared = await context.run(clearArgv, { probeProcess: () => "dead" });
   assert.equal(cleared.exitCode, 0);
   assert.equal(cleared.document.slot.status, "cleared");
   assert.equal(cleared.document.slot.removed, true);
@@ -2699,7 +2790,7 @@ test("a slot left behind refuses every later guard, and slot clear is the only r
   assert.equal(existsSync(slotPath), false);
 
   // Clearing again is not an error; there is simply nothing there.
-  const again = await context.run(clearArgv, { isProcessAlive: () => false });
+  const again = await context.run(clearArgv, { probeProcess: () => "dead" });
   assert.equal(again.exitCode, 0);
   assert.equal(again.document.slot.status, "absent");
   assert.equal(again.document.slot.removed, false);
@@ -2844,15 +2935,18 @@ test("nothing in the guard path renames or unlinks a slot it did not create", ()
       `the reservation must not call ${mutation}`,
     );
   }
+  // Exactly two removals, and both of a file this reservation created: the
+  // release, behind the nonce comparison, and the cleanup of an empty slot
+  // whose write failed after the exclusive open made the file ours.
   const removals = reservation.split("rmSync").length - 1;
-  assert.equal(removals, 1, "the reservation removes exactly one thing");
+  assert.equal(removals, 2, "the reservation removes only its own file");
   assert.ok(
     reservation.indexOf("held?.nonce !== nonce") <
       reservation.indexOf("rmSync"),
-    "and only after comparing the nonce it wrote",
+    "the release compares the nonce it wrote first",
   );
-  // The write is exclusive, and it is the whole reservation.
-  assert.ok(reservation.includes('flag: "wx"'));
+  // The create is exclusive, and it is what the reservation rests on.
+  assert.ok(reservation.includes('openSync(path, "wx", 0o600)'));
 });
 
 test("releasing a claim twice is idempotent", async () => {
