@@ -35,14 +35,11 @@ export const STATE_SCHEMA = "mento-issues-lease:v1";
 /** The guard-slot document schema. */
 export const GUARD_SLOT_SCHEMA = "mento-issues-guard-slot:v1";
 
-/**
- * How long a guard-slot reclaim lock is honoured before it counts as abandoned.
- *
- * A reclaim is a handful of syscalls, so this is generous by three orders of
- * magnitude. It exists only so a guard killed between taking the lock and
- * releasing it cannot wedge the host.
- */
-export const GUARD_RECLAIM_LOCK_MAX_AGE_MS = 10_000;
+/** The host reservation-lock document schema. */
+export const GUARD_LOCK_SCHEMA = "mento-issues-guard-lock:v1";
+
+/** The name of the one file that serializes guard-slot reservations. */
+export const GUARD_RESERVATION_LOCK_NAME = ".guard-reservation.lock";
 
 /** The directory name the store lives under, in every location. */
 export const STATE_DIRECTORY_NAME = "mento-issues";
@@ -100,6 +97,11 @@ export function createStateStore(input) {
     // from the same instant every document is. `Date.now` only when a caller
     // builds a store with no clock at all.
     clock = { now: () => Date.now() },
+    // The interleaving seam. `reserveGuardSlot` calls it at each named point
+    // of a reservation, so a test can run another guard's whole reservation
+    // inside one window — the instant a race needs — without any timing. It is
+    // a no-op everywhere else and must never throw.
+    onReserveStep = () => {},
   } = input;
   const { owner, name } = splitRepo(repository);
   const directory = join(root, `${owner}__${name}`);
@@ -127,6 +129,15 @@ export function createStateStore(input) {
     return join(directory, `${numberKey}-${number}.guard-${digest}.json`);
   }
 
+  /** Parse one JSON document, or `null` for anything unreadable. */
+  function readJsonDocument(target) {
+    try {
+      return JSON.parse(readFileSync(target, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   function readEntry(number) {
     const path = pathFor(number);
     if (!existsSync(path)) return null;
@@ -140,11 +151,14 @@ export function createStateStore(input) {
     }
   }
 
+  const reservationLockPath = join(directory, GUARD_RESERVATION_LOCK_NAME);
+
   return {
     root,
     directory,
     pathFor,
     isProcessAlive,
+    reservationLockPath,
 
     /**
      * Read one entry, or `null` when there is none this store can trust.
@@ -215,29 +229,38 @@ export function createStateStore(input) {
      * reclaim is the part that has to be exclusive too. Removing the slot and
      * creating it again is two steps: two guards that both read the same dead
      * holder would both remove and both create, and the second removal deletes
-     * the first guard's *fresh* slot rather than the stale one it read. Five
-     * things close that:
+     * the first guard's *fresh* slot rather than the stale one it read.
      *
-     * 1. a `.reclaim` lock, created with `wx`, so only one guard reclaims;
-     * 2. an abandoned lock taken over by one atomic `renameSync` and a fresh
-     *    `wx` create, never by proceeding while it is left where it lies:
-     *    ignoring it put two guards inside the reclaim body owning nothing,
-     *    which is the whole race back again;
-     * 3. a second liveness check under that lock, so a guard that reclaimed
-     *    first and is now running is seen;
-     * 4. `renameSync` rather than `rmSync` for the stale slot itself, which
-     *    exactly one guard can win — every loser gets `ENOENT` instead of
-     *    silently deleting a slot somebody else owns;
-     * 5. an identity check on both sides of that rename. The rename is atomic
-     *    but says nothing about *which* file it moved, so the moved file is
-     *    compared with the slot this reservation inspected under the lock, and
-     *    the slot created in its place is read back and checked for this
-     *    reservation's own `nonce`. A mismatch is refused, and a slot moved by
-     *    mistake is put back.
+     * **One lock covers the whole reservation**, not the reclaim alone:
+     * `${GUARD_RESERVATION_LOCK_NAME}` beside the entries, created with `wx`.
+     * The fresh create, the reclaim, the rename, the create that follows it,
+     * the verification and the restore all happen under it. A per-slot lock
+     * around the reclaim alone was not enough: a guard that renamed a slot away
+     * and then had to put it back could find a *third* guard's fresh slot
+     * already in the path, because nothing stopped that third guard from
+     * creating one.
      *
-     * The reclaim lock is advisory over a slot file that is itself only
-     * host-local defence in depth. The reference is the mutual-exclusion
-     * authority, here as everywhere else.
+     * **The lock is taken over only from a process that is provably dead** —
+     * `process.kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive —
+     * and never by age. Age was the second half of the same defect: a guard
+     * merely slow, paused past some maximum, was treated as abandoned and lost
+     * its exclusivity to a guard that arrived later, and both then reclaimed.
+     * A dead owner is displaced by one atomic `renameSync` plus a fresh `wx`
+     * create, so exactly one guard can take an abandoned lock over and the host
+     * is still never wedged by a file nobody owns.
+     *
+     * Under that lock, the reclaim itself uses `renameSync` rather than
+     * `rmSync` for the stale slot — exactly one caller can win it, and every
+     * loser gets `ENOENT` instead of silently deleting a slot somebody else
+     * owns — and checks identity on both sides of it. The rename is atomic but
+     * says nothing about *which* file it moved, so the moved file is compared
+     * with the slot this reservation inspected, and the slot created in its
+     * place is read back and checked for this reservation's own `nonce`. A
+     * mismatch is refused, and a slot moved by mistake is put back.
+     *
+     * The lock is advisory over a slot file that is itself only host-local
+     * defence in depth. The reference is the mutual-exclusion authority, here
+     * as everywhere else.
      *
      * Every other failure refuses too. A slot that cannot be created proves
      * nothing about duplicates, and guard is the publish gate.
@@ -249,18 +272,10 @@ export function createStateStore(input) {
      */
     reserveGuardSlot(number, runId) {
       const path = guardSlotPathFor(number, runId);
-      const reclaimPath = `${path}.reclaim`;
       // This reservation's identity, written into every file it creates. It is
       // what makes "the slot I now hold" answerable after a rename that only
       // ever reported *that* it moved a file, never which one.
       const nonce = randomUUID();
-      const release = () => {
-        try {
-          rmSync(path, { force: true });
-        } catch {
-          // A slot left behind is reclaimed by the next guard's liveness check.
-        }
-      };
       const document = {
         schema: GUARD_SLOT_SCHEMA,
         repository: `${owner}/${name}`,
@@ -270,22 +285,26 @@ export function createStateStore(input) {
         nonce,
         reservedAt: new Date(clock.now()).toISOString(),
       };
-      const create = (target) => {
+      const release = () => {
+        try {
+          // Only this reservation's own slot. A slot carrying another nonce
+          // belongs to whoever wrote it, and releasing is not a licence to
+          // delete it.
+          const held = readJsonDocument(path);
+          if (held?.nonce === nonce) rmSync(path, { force: true });
+        } catch {
+          // A slot left behind is reclaimed by the next guard's liveness check.
+        }
+      };
+      const create = (target, body = document) => {
         mkdirSync(directory, { recursive: true });
-        writeFileSync(target, `${JSON.stringify(document, null, 2)}\n`, {
+        writeFileSync(target, `${JSON.stringify(body, null, 2)}\n`, {
           flag: "wx",
           mode: 0o600,
         });
       };
-      const readDocument = (target) => {
-        try {
-          return JSON.parse(readFileSync(target, "utf8"));
-        } catch {
-          return null;
-        }
-      };
       const readSlotAt = (target) => {
-        const parsed = readDocument(target);
+        const parsed = readJsonDocument(target);
         return parsed?.schema === GUARD_SLOT_SCHEMA ? parsed : null;
       };
       const readSlot = () => readSlotAt(path);
@@ -316,96 +335,113 @@ export function createStateStore(input) {
       const firstLine = (error) =>
         String(error?.message ?? error).split("\n")[0];
 
-      try {
-        create(path);
-        return { path, reserved: true, holder: null, message: null, release };
-      } catch (error) {
-        if (error?.code !== "EEXIST") {
-          return refuse(
-            `The guard slot ${path} could not be created: ${firstLine(error)}`,
-          );
-        }
-      }
-
-      const holder = readSlot();
-      const holderPid = holder?.pid ?? null;
-      // A slot this store cannot read is treated as held: an unreadable file is
-      // not evidence that nobody is publishing under it.
-      if (holderPid == null || isProcessAlive(holderPid)) {
-        return refuse(
-          `Run id ${runId} already holds the guard slot ${path} under live process ${holderPid ?? "<unreadable>"}`,
-          holder,
-        );
-      }
-
-      let holdsReclaimLock = false;
-      try {
-        create(reclaimPath);
-        holdsReclaimLock = true;
-      } catch (error) {
-        if (error?.code !== "EEXIST") {
-          return refuse(
-            `The reclaim lock ${reclaimPath} could not be created: ${firstLine(error)}`,
-            holder,
-          );
-        }
-        const other = readDocument(reclaimPath);
-        const startedAtMs = Date.parse(other?.reservedAt ?? "");
-        if (
-          Number.isFinite(startedAtMs) &&
-          clock.now() - startedAtMs < GUARD_RECLAIM_LOCK_MAX_AGE_MS
-        ) {
-          return refuse(
-            `Another guard is reclaiming the guard slot ${path}; process ${other?.pid ?? "<unreadable>"} holds ${reclaimPath}`,
-            holder,
-          );
-        }
-        // A reclaim is a handful of syscalls, so a lock older than the maximum
-        // age was abandoned by a guard that died holding it. Taking it over is
-        // itself exclusive: `renameSync` moves it aside for exactly one guard,
-        // every loser gets `ENOENT`, and the winner then creates its own lock
-        // with `wx`. Ignoring the abandoned file and proceeding put two guards
-        // inside the reclaim body at once, each owning nothing — the very race
-        // the lock exists to prevent.
-        const takenLock = `${reclaimPath}.abandoned.${pid}.${nonce}`;
+      // The one mutex. It covers every path that touches the slot, so a guard
+      // that renamed a slot away can always put it back: nobody else can be
+      // creating one meanwhile.
+      const lockDocument = {
+        schema: GUARD_LOCK_SCHEMA,
+        repository: `${owner}/${name}`,
+        number,
+        runId,
+        pid,
+        nonce,
+        acquiredAt: new Date(clock.now()).toISOString(),
+      };
+      const inFlight = (owned) =>
+        `A reservation of the guard slot ${path} is in flight: process ${owned?.pid ?? "<unreadable>"} holds ${reservationLockPath}`;
+      const takeReservationLock = () => {
         try {
-          renameSync(reclaimPath, takenLock);
-          rmSync(takenLock, { force: true });
-          create(reclaimPath);
-          holdsReclaimLock = true;
-        } catch (takeoverError) {
-          return refuse(
-            `The abandoned reclaim lock ${reclaimPath} could not be taken over: ${firstLine(takeoverError)}`,
-            holder,
-          );
+          create(reservationLockPath, lockDocument);
+          return { held: true, message: null, holder: null };
+        } catch (error) {
+          if (error?.code !== "EEXIST") {
+            return {
+              held: false,
+              holder: null,
+              message: `The reservation lock ${reservationLockPath} could not be created: ${firstLine(error)}`,
+            };
+          }
         }
-      }
+        const parsed = readJsonDocument(reservationLockPath);
+        const owned = parsed?.schema === GUARD_LOCK_SCHEMA ? parsed : null;
+        const ownerPid = owned?.pid ?? null;
+        // Age never displaces an owner; only death does. A lock this store
+        // cannot read has no owner to prove dead, so it is treated as held.
+        if (ownerPid == null || isProcessAlive(ownerPid)) {
+          return { held: false, holder: owned, message: inFlight(owned) };
+        }
+        // The owner is gone. Exactly one guard may take the lock over: the
+        // rename decides which, and every loser gets `ENOENT`.
+        const abandoned = `${reservationLockPath}.abandoned.${pid}.${nonce}`;
+        try {
+          renameSync(reservationLockPath, abandoned);
+          rmSync(abandoned, { force: true });
+          create(reservationLockPath, lockDocument);
+          return { held: true, message: null, holder: null };
+        } catch (error) {
+          return {
+            held: false,
+            holder: owned,
+            message: `The reservation lock ${reservationLockPath} of dead process ${ownerPid} could not be taken over: ${firstLine(error)}`,
+          };
+        }
+      };
+      const releaseReservationLock = () => {
+        try {
+          const owned = readJsonDocument(reservationLockPath);
+          if (owned?.nonce === nonce) {
+            rmSync(reservationLockPath, { force: true });
+          }
+        } catch {
+          // A lock left behind is taken over by the next guard, which proves
+          // this process dead before it touches anything.
+        }
+      };
 
+      const lock = takeReservationLock();
+      if (!lock.held) return refuse(lock.message, lock.holder);
+
+      let holder = null;
       try {
-        // Under the lock, and only now: the holder may have been reclaimed by
-        // a guard that is running by the time we get here.
-        const current = readSlot();
-        const currentPid = current?.pid ?? null;
-        if (currentPid != null && isProcessAlive(currentPid)) {
-          return refuse(
-            `The guard slot ${path} was reclaimed by live process ${currentPid} first`,
-            current,
-          );
+        let created = false;
+        try {
+          create(path);
+          created = true;
+        } catch (error) {
+          if (error?.code !== "EEXIST") {
+            return refuse(
+              `The guard slot ${path} could not be created: ${firstLine(error)}`,
+            );
+          }
         }
-        const inspected = slotIdentity(current);
-        if (inspected == null) {
-          // Gone or unreadable under the lock. Neither is evidence that this
-          // reservation may take the slot, and there is nothing left to
-          // compare the rename against.
+        if (created) {
+          if (readSlot()?.nonce !== nonce) {
+            return refuse(
+              `The guard slot ${path} does not carry this reservation's nonce`,
+              readSlot(),
+            );
+          }
+          return { path, reserved: true, holder: null, message: null, release };
+        }
+
+        holder = readSlot();
+        const holderPid = holder?.pid ?? null;
+        // A slot this store cannot read is treated as held: an unreadable file
+        // is not evidence that nobody is publishing under it.
+        if (holderPid == null || isProcessAlive(holderPid)) {
           return refuse(
-            `The guard slot ${path} could not be read under the reclaim lock ${reclaimPath}`,
+            `Run id ${runId} already holds the guard slot ${path} under live process ${holderPid ?? "<unreadable>"}`,
             holder,
           );
         }
+
+        const inspected = slotIdentity(holder);
+        onReserveStep("slot-inspected");
         // Exactly one guard can rename the stale slot away; every other one
         // fails with `ENOENT` rather than deleting a fresh slot it never read.
         const taken = `${path}.stale.${pid}.${nonce}`;
         renameSync(path, taken);
+        onReserveStep("slot-renamed");
         if (slotIdentity(readSlotAt(taken)) !== inspected) {
           // The rename moved a file this reservation never inspected, so its
           // owner still believes it holds the slot. Put it back and refuse.
@@ -418,7 +454,7 @@ export function createStateStore(input) {
             }
           }
           return refuse(
-            `The guard slot ${path} changed under the reclaim lock and was left to its owner`,
+            `The guard slot ${path} changed under the reservation lock and was left to its owner`,
             holder,
           );
         }
@@ -434,18 +470,11 @@ export function createStateStore(input) {
         return { path, reserved: true, holder, message: null, release };
       } catch (error) {
         return refuse(
-          `The stale guard slot ${path} of process ${holderPid} could not be reclaimed: ${firstLine(error)}`,
+          `The stale guard slot ${path} of process ${holder?.pid ?? "<unreadable>"} could not be reclaimed: ${firstLine(error)}`,
           holder,
         );
       } finally {
-        if (holdsReclaimLock) {
-          try {
-            rmSync(reclaimPath, { force: true });
-          } catch {
-            // An abandoned reclaim lock is taken over by age, not by an
-            // operator, so failing to remove it wedges nothing.
-          }
-        }
+        releaseReservationLock();
       }
     },
 

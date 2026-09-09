@@ -1063,6 +1063,61 @@ test("the live stderr tap carries the Authorization context across chunks and th
   assert.equal(dropped.includes("zzz"), false, `leaked: ${dropped}`);
   assert.match(dropped, /^Authorization: token \[redacted-github-token\]/u);
   assert.match(dropped, /tail\n$/u);
+
+  // The header name and the colon split, with a space between them. The
+  // header word ends the chunk on a character that cannot continue a token, so
+  // the old hold-back released it and the value arrived with no header to key
+  // on. `redactSecrets` accepts the space, so the tap must too.
+  assert.equal(
+    await tap(["Authorization ", `: token ${headerValue}\n`]),
+    "Authorization : token [redacted-github-token]\n",
+  );
+  assert.equal(
+    await tap(["Authoriz", "ation", "\n: Bearer ", `${headerValue} ok\n`]),
+    "Authorization\n: Bearer [redacted-github-token] ok\n",
+  );
+
+  // Whitespace, not the value, consumes the hold-back cap. The header context
+  // must survive that too; the run of whitespace is squeezed to keep the
+  // buffer bounded, and nothing of the value is ever forwarded.
+  const padded = " ".repeat(600);
+  assert.equal(
+    await tap([`Authorization:${padded}`, `token ${headerValue}\n`]),
+    "Authorization: token [redacted-github-token]\n",
+  );
+});
+
+test("the live stderr tap keeps its context until stderr ends, not until the promise settles", async () => {
+  // `settleResolve` and `settleReject` flushed the tap, so an abort or a
+  // timeout ended the filter's parsing context while the child was still
+  // writing. `Authorization: Bearer ` was flushed as a complete line, and the
+  // credential that arrived afterwards was a fresh stream with no header in
+  // front of it — forwarded verbatim on the close flush. Only the end of the
+  // stream may flush.
+  const headerValue = "3f0a1b2c3d4e5f60718293a4b5c6d7e8f9012345";
+  const controller = new AbortController();
+  const sink = [];
+  const spawn = createFakeSpawn((child) => {
+    child.stderr.emit("data", "Authorization: Bearer ");
+    controller.abort();
+    child.stderr.emit("data", `${headerValue}\n`);
+    child.emit("close", null, "SIGTERM");
+  });
+
+  const error = await runGh(["api", "user"], {
+    env: { PATH: "/usr/bin" },
+    spawn,
+    signal: controller.signal,
+    stderrSink: (chunk) => sink.push(chunk),
+  }).then(
+    () => assert.fail("an abort must reject"),
+    (failure) => failure,
+  );
+
+  const text = sink.join("");
+  assert.equal(text.includes(headerValue), false, `leaked: ${text}`);
+  assert.equal(text, "Authorization: Bearer [redacted-github-token]\n");
+  assert.equal(error.name, "GhAbortError");
 });
 
 test("the repository splitter requires exactly two non-empty components", () => {

@@ -49,7 +49,7 @@ import {
   CLOUD_SESSION_GATEWAY_BODY,
   githubContentsScopeHint,
 } from "./hints.mjs";
-import { redactSecrets, safeStderr } from "./redact.mjs";
+import { REDACTION, redactSecrets, safeStderr } from "./redact.mjs";
 
 export const GH_OUTPUT_MAX_BYTES = 20 * 1024 * 1024;
 export const GH_DEFAULT_TIMEOUT_MS = 60_000;
@@ -156,15 +156,23 @@ function writeToStderr(text) {
 const SECRET_TAIL_PATTERN = /[A-Za-z0-9_]*$/u;
 
 /**
- * An `Authorization` header at the very end of the buffer, value or no value.
+ * An `Authorization` header at the very end of the buffer, however incomplete.
  *
  * `redactSecrets` redacts an `Authorization` value by **position**, so it needs
  * the header word and the credential in one string. This is what recognizes a
  * header whose credential has not arrived — or has not ended — yet, so the
  * whole of it is held back rather than forwarded ahead of its own value.
+ *
+ * Everything after the header word is optional, because a chunk can end
+ * anywhere: after `Authorization`, inside the whitespace before its colon,
+ * after the colon, after the scheme, or part-way through the value. The
+ * whitespace class is `redactSecrets`'s own, so a header split over a line break
+ * is held exactly as one is redacted. Group 1 is the part that carries no
+ * credential — word, punctuation, scheme — and group 2 is what has arrived of
+ * the value.
  */
 const PENDING_AUTHORIZATION_PATTERN =
-  /authorization[ \t]*:[ \t]*(?:(?:bearer|token|basic)[ \t]*)?\S*$/iu;
+  /(authorization\s*(?::\s*(?:(?:bearer|token|basic)\b\s*)?)?)(\S*)$/iu;
 
 /** Longest tail held back while the rest of a possible token is awaited. */
 const STDERR_SINK_HOLD_BACK_MAX_CHARS = 512;
@@ -187,13 +195,30 @@ const STDERR_SINK_HOLD_BACK_MAX_CHARS = 512;
  *     credential afterwards, where positional redaction no longer had a header
  *     to key on and no pattern matches a 40-hex string on purpose. The same
  *     went for `Authorization: Bearer ` and its value in the next chunk, whose
- *     token run is empty.
+ *     token run is empty, and for a split between the header word and its own
+ *     colon.
  *
- * The hold-back is capped at `STDERR_SINK_HOLD_BACK_MAX_CHARS`. A token run
- * over the cap is forwarded rather than grown without bound, as before; an
- * `Authorization` value over the cap is redacted with what has arrived and the
- * rest of that run is dropped, because forwarding its tail in clear is the one
- * thing this filter exists to prevent.
+ * The hold-back is capped at `STDERR_SINK_HOLD_BACK_MAX_CHARS`, and which part
+ * of a header outgrew the cap decides what happens:
+ *
+ *   - the **value**: the header this filter has already parsed is forwarded
+ *     verbatim — word, colon and scheme carry no credential — with the
+ *     redaction in place of the value, and the rest of that run is dropped.
+ *     Forwarding its tail in clear is the one thing this filter exists to
+ *     prevent.
+ *   - the **whitespace** inside the header, which is a credential nowhere: the
+ *     run is squeezed to a single space and the header context is kept, so a
+ *     value that arrives afterwards is still redacted. Only that whitespace is
+ *     lost.
+ *
+ * A token run over the cap that is not part of a header is forwarded rather
+ * than grown without bound, as before.
+ *
+ * The filter is flushed when stderr **ends**, never when the promise settles.
+ * A rejection can arrive first — an abort or a timeout terminates the child
+ * while it is still writing — and flushing there ended the parsing context
+ * mid-header, leaving the credential in the next chunk with nothing in front
+ * of it.
  *
  * @param {(chunk: string) => void} sink the caller's tap.
  * @returns {{write: (chunk: string) => void, flush: () => void}}
@@ -201,8 +226,8 @@ const STDERR_SINK_HOLD_BACK_MAX_CHARS = 512;
 function createStderrSinkFilter(sink) {
   let pending = "";
   // Set once an over-long `Authorization` value has been redacted: the rest of
-  // that credential is dropped, up to the whitespace that ends it.
-  let droppingCredential = false;
+  // that value is dropped, up to the whitespace that ends it.
+  let droppingValue = false;
   const forward = (text) => {
     if (text.length === 0) return;
     try {
@@ -212,13 +237,13 @@ function createStderrSinkFilter(sink) {
     }
   };
   const consume = (isFinal) => {
-    if (droppingCredential) {
+    if (droppingValue) {
       const end = /\s/u.exec(pending);
       if (!end) {
         pending = "";
         return;
       }
-      droppingCredential = false;
+      droppingValue = false;
       pending = pending.slice(end.index);
     }
     if (isFinal) {
@@ -232,11 +257,18 @@ function createStderrSinkFilter(sink) {
     if (header && header.index < holdFrom) holdFrom = header.index;
     if (pending.length - holdFrom > STDERR_SINK_HOLD_BACK_MAX_CHARS) {
       if (header && header.index === holdFrom) {
-        // Redact the header with the part of its value that has arrived, then
-        // drop the remainder of the run rather than print it.
-        forward(redactSecrets(pending));
-        pending = "";
-        droppingCredential = true;
+        const [, prefix, value] = header;
+        const before = redactSecrets(pending.slice(0, holdFrom));
+        if (value.length > STDERR_SINK_HOLD_BACK_MAX_CHARS) {
+          forward(`${before}${prefix}${REDACTION}`);
+          pending = "";
+          droppingValue = true;
+          return;
+        }
+        // Whitespace, not the value, filled the buffer. Squeeze it and keep
+        // parsing: the value has not arrived yet and must still be redacted.
+        forward(before);
+        pending = `${prefix.replaceAll(/\s+/gu, " ")}${value}`;
         return;
       }
       holdFrom = pending.length;
@@ -338,12 +370,16 @@ export function runGh(
       }
     }
 
+    // Neither settler flushes the tap. The promise can settle while the child
+    // is still writing — an abort or a timeout terminates it mid-stream — and a
+    // flush there ends the filter's parsing context, so an `Authorization`
+    // header already forwarded leaves the credential in the next chunk with
+    // nothing in front of it to key on. Only the end of the stream flushes.
     function settleResolve(value) {
       if (settled) return;
       settled = true;
       clearTimeoutTimer();
       clearAbortListener();
-      stderrFilter?.flush();
       resolve(value);
     }
 
@@ -352,7 +388,6 @@ export function runGh(
       settled = true;
       clearTimeoutTimer();
       clearAbortListener();
-      stderrFilter?.flush();
       reject(error);
     }
 
@@ -455,8 +490,9 @@ export function runGh(
         clearTimeout(killTimer);
         killTimer = null;
       }
-      // The tap's held-back tail is flushed even when the promise settled
-      // earlier, so a chunk that arrived after a timeout still reaches the sink.
+      // The one flush. `close` is the end of the child's output, so the tap
+      // parses every chunk in one context however early the promise settled,
+      // and a chunk that arrived after a timeout still reaches the sink.
       stderrFilter?.flush();
       if (settled) return;
       if (status !== 0) {

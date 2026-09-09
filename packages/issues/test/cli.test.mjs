@@ -15,7 +15,7 @@ import { COMMAND_SPECS, GATED_FLAGS } from "../src/cli/args.mjs";
 import { CONFIG_SCHEMAS, normalizeConfigDocument } from "../src/cli/config.mjs";
 import { readPullRequestState } from "../src/cli/github.mjs";
 import {
-  GUARD_RECLAIM_LOCK_MAX_AGE_MS,
+  GUARD_LOCK_SCHEMA,
   GUARD_SLOT_SCHEMA,
   createStateStore,
 } from "../src/cli/state-file.mjs";
@@ -2665,25 +2665,29 @@ test("a guard slot left by a dead process is reclaimed, and one that cannot be t
   }
 });
 
-test("two guards reclaiming one stale slot interleave through the reclaim lock", async () => {
-  // The interleaving this pins is the one a `rmSync` plus `create` reclaim
-  // admits: B and C both read the same dead holder, B removes and creates, and
-  // C's removal then deletes B's FRESH slot instead of the stale one it read,
-  // so both create and both spawn. `isProcessAlive` is the seam the test
-  // interleaves on: C runs B's whole reservation inside its own liveness check,
-  // which is exactly the instant C has read the stale holder and not yet acted.
-  const context = harness();
+/**
+ * A guard-slot fixture: one store per simulated guard, and a stale slot.
+ *
+ * Every store shares the state root and the clock, and each carries its own
+ * pid, so the simulated guards are distinguishable to the liveness check the
+ * way separate processes are. `dead` is the pid of the guard that left the
+ * stale slot behind, and it is the only pid that is not alive.
+ */
+function guardSlotFixture(context) {
   const runId = RUN_ID;
-  const stalePid = process.pid + 1;
-  const storeFor = (isProcessAlive) =>
+  const dead = process.pid + 1;
+  const storeFor = (pid, extra = {}) =>
     createStateStore({
       repository: REPOSITORY,
       root: context.options.stateRoot,
       clock: context.clock,
-      isProcessAlive,
+      pid,
+      isProcessAlive: (candidate) => candidate !== dead,
+      ...extra,
     });
-  const seedStaleSlot = (store) => {
-    const slotPath = store.guardSlotPathFor(PR, runId);
+  const paths = storeFor(process.pid);
+  const slotPath = paths.guardSlotPathFor(PR, runId);
+  const seedStaleSlot = () => {
     mkdirSync(dirname(slotPath), { recursive: true });
     writeFileSync(
       slotPath,
@@ -2692,124 +2696,57 @@ test("two guards reclaiming one stale slot interleave through the reclaim lock",
         repository: REPOSITORY,
         number: PR,
         runId,
-        pid: stalePid,
+        pid: dead,
         reservedAt: "2026-09-09T09:00:00.000Z",
       })}\n`,
     );
     return slotPath;
   };
-
-  // The stale pid is dead; every other pid is this live process.
-  const liveness = (candidate) => candidate !== stalePid;
-  const guardB = storeFor(liveness);
-  const slotPath = seedStaleSlot(guardB);
-  let reservedByB = null;
-  const guardC = storeFor((candidate) => {
-    if (reservedByB === null) reservedByB = guardB.reserveGuardSlot(PR, runId);
-    return liveness(candidate);
-  });
-
-  const reservedByC = guardC.reserveGuardSlot(PR, runId);
-  assert.equal(reservedByB.reserved, true, "B reclaimed the stale slot");
-  assert.equal(reservedByC.reserved, false, "C did not reclaim it as well");
-  assert.match(
-    reservedByC.message,
-    new RegExp(slotPath.replaceAll(".", "\\."), "u"),
-  );
-  const held = JSON.parse(readFileSync(slotPath, "utf8"));
-  assert.equal(held.pid, process.pid, "B's slot survived C's attempt");
-  assert.equal(
-    existsSync(`${slotPath}.reclaim`),
-    false,
-    "the reclaim lock is released whether the reclaim won or lost",
-  );
-
-  // A reclaim in flight refuses a second guard outright rather than letting it
-  // race the removal.
-  const inFlight = storeFor(liveness);
-  seedStaleSlot(inFlight);
-  writeFileSync(
-    `${slotPath}.reclaim`,
-    `${JSON.stringify({
-      schema: GUARD_SLOT_SCHEMA,
-      pid: stalePid,
-      reservedAt: new Date(context.clock.now()).toISOString(),
-    })}\n`,
-  );
-  const blocked = inFlight.reserveGuardSlot(PR, runId);
-  assert.equal(blocked.reserved, false);
-  assert.match(blocked.message, /Another guard is reclaiming/u);
-
-  // And a reclaim lock a guard died holding is taken over by age, so the host
-  // is never wedged by a file nobody owns.
-  context.clock.advance(GUARD_RECLAIM_LOCK_MAX_AGE_MS);
-  const abandoned = inFlight.reserveGuardSlot(PR, runId);
-  assert.equal(abandoned.reserved, true);
-  assert.equal(JSON.parse(readFileSync(slotPath, "utf8")).pid, process.pid);
-  assert.equal(
-    existsSync(`${slotPath}.reclaim`),
-    false,
-    "the taken-over lock is released too",
-  );
-});
-
-test("an abandoned reclaim lock is taken over exclusively, never merely ignored", () => {
-  // The hole an expired lock opened. Two guards that both read the same
-  // abandoned `.reclaim` file both proceeded owning nothing, so both ran the
-  // reclaim body at once: C read the stale slot, B reclaimed it and created
-  // its FRESH slot, and C's rename then moved B's fresh slot aside and created
-  // its own. Both reserved and both would have spawned a publishing child.
-  //
-  // The seam is the liveness check *under* the reclaim lock, which fires
-  // exactly between C's second slot read and its rename — the instant the
-  // interleaving needs. No timing, no sleep.
-  const context = harness();
-  const runId = RUN_ID;
-  const stalePid = process.pid + 1;
-  const storeFor = (isProcessAlive) =>
-    createStateStore({
-      repository: REPOSITORY,
-      root: context.options.stateRoot,
-      clock: context.clock,
-      isProcessAlive,
-    });
-  const liveness = (candidate) => candidate !== stalePid;
-  const guardB = storeFor(liveness);
-  const slotPath = guardB.guardSlotPathFor(PR, runId);
-  const reclaimPath = `${slotPath}.reclaim`;
-  mkdirSync(dirname(slotPath), { recursive: true });
-  writeFileSync(
+  const seedReservationLock = (pid, acquiredAt) => {
+    mkdirSync(dirname(slotPath), { recursive: true });
+    writeFileSync(
+      paths.reservationLockPath,
+      `${JSON.stringify({
+        schema: GUARD_LOCK_SCHEMA,
+        repository: REPOSITORY,
+        pid,
+        acquiredAt,
+      })}\n`,
+    );
+  };
+  return {
+    runId,
+    dead,
+    storeFor,
     slotPath,
-    `${JSON.stringify({
-      schema: GUARD_SLOT_SCHEMA,
-      repository: REPOSITORY,
-      number: PR,
-      runId,
-      pid: stalePid,
-      reservedAt: "2026-09-09T09:00:00.000Z",
-    })}\n`,
-  );
-  // A lock its holder died with, older than the maximum age.
-  writeFileSync(
-    reclaimPath,
-    `${JSON.stringify({
-      schema: GUARD_SLOT_SCHEMA,
-      pid: stalePid,
-      reservedAt: new Date(
-        context.clock.now() - GUARD_RECLAIM_LOCK_MAX_AGE_MS - 1,
-      ).toISOString(),
-    })}\n`,
-  );
+    lockPath: paths.reservationLockPath,
+    seedStaleSlot,
+    seedReservationLock,
+    slotDocument: () => JSON.parse(readFileSync(slotPath, "utf8")),
+  };
+}
 
+test("two guards reclaiming one stale slot serialize on the reservation lock", () => {
+  // The interleaving this pins is the one a `rmSync` plus `create` reclaim
+  // admits: B and C both read the same dead holder, B removes and creates, and
+  // C's removal then deletes B's FRESH slot instead of the stale one it read,
+  // so both create and both spawn. The reservation lock is what serializes
+  // them; `isProcessAlive` is the seam the test interleaves on, since C runs
+  // B's whole reservation inside its own liveness check — exactly the instant C
+  // has read the stale holder and not yet acted.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId, slotPath } = fixture;
+  fixture.seedStaleSlot();
+
+  const guardB = fixture.storeFor(process.pid + 2);
   let reservedByB = null;
-  let livenessCalls = 0;
-  const guardC = storeFor((candidate) => {
-    livenessCalls += 1;
-    // The second call is the one under the reclaim lock.
-    if (livenessCalls === 2 && reservedByB === null) {
-      reservedByB = guardB.reserveGuardSlot(PR, runId);
-    }
-    return liveness(candidate);
+  const guardC = fixture.storeFor(process.pid + 3, {
+    isProcessAlive: (candidate) => {
+      if (reservedByB === null)
+        reservedByB = guardB.reserveGuardSlot(PR, runId);
+      return candidate !== fixture.dead;
+    },
   });
 
   const reservedByC = guardC.reserveGuardSlot(PR, runId);
@@ -2818,80 +2755,169 @@ test("an abandoned reclaim lock is taken over exclusively, never merely ignored"
     1,
     "exactly one guard may hold the slot",
   );
-  // C took the abandoned lock over atomically, so B met a lock that is now
-  // live rather than a lock nobody owned.
+  // C holds the lock for the whole reservation, so B is refused rather than
+  // left to race it.
   assert.equal(reservedByC.reserved, true);
   assert.equal(reservedByB.reserved, false);
-  assert.match(reservedByB.message, /Another guard is reclaiming/u);
+  assert.match(reservedByB.message, /reservation of .* is in flight/u);
   assert.equal(
-    existsSync(reclaimPath),
-    false,
-    "the winner releases the lock it took over",
+    fixture.slotDocument().pid,
+    process.pid + 3,
+    "the slot belongs to the guard that held the lock",
   );
-  assert.equal(JSON.parse(readFileSync(slotPath, "utf8")).pid, process.pid);
+  assert.equal(
+    existsSync(fixture.lockPath),
+    false,
+    "the lock is released whether the reservation won or lost",
+  );
+  assert.equal(
+    existsSync(`${slotPath}.reclaim`),
+    false,
+    "no per-slot reclaim lock is left behind",
+  );
+});
+
+test("a paused reservation is never displaced, and no third guard reaches the path it renamed", () => {
+  // The B/C/D counterexample, replayed exactly. Under the age-based takeover
+  // it went: C captures the stale slot and pauses past the lock's maximum age;
+  // B takes the lock over *by age* and reserves; C resumes and renames B's
+  // fresh slot aside; D reserves the now-empty path; C sees the nonce mismatch
+  // and refuses, but cannot put B's slot back because D occupies the path.
+  // Observed B=true, C=false, D=true — two live reservations.
+  //
+  // Two seams drive it, both no-ops in production: `onReserveStep` runs B in
+  // the window between C's inspection and its rename, and D in the window
+  // between C's rename and its restore. The clock jumps far past any age a
+  // lock could be given, which is the point: age must not decide ownership.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId } = fixture;
+  fixture.seedStaleSlot();
+
+  const pidB = process.pid + 2;
+  const pidC = process.pid + 3;
+  const pidD = process.pid + 4;
+  const guardB = fixture.storeFor(pidB);
+  const guardD = fixture.storeFor(pidD);
+  let reservedByB = null;
+  let reservedByD = null;
+  const guardC = fixture.storeFor(pidC, {
+    onReserveStep: (step) => {
+      if (step === "slot-inspected" && reservedByB === null) {
+        // C is paused here for longer than any lock lifetime.
+        context.clock.advance(60 * MINUTE);
+        reservedByB = guardB.reserveGuardSlot(PR, runId);
+      }
+      if (step === "slot-renamed" && reservedByD === null) {
+        reservedByD = guardD.reserveGuardSlot(PR, runId);
+      }
+    },
+  });
+
+  const reservedByC = guardC.reserveGuardSlot(PR, runId);
+  const reservations = [reservedByB, reservedByC, reservedByD];
+  for (const [index, reservation] of reservations.entries()) {
+    assert.ok(reservation, `guard ${"BCD"[index]} ran`);
+  }
+  assert.equal(
+    reservations.filter((reservation) => reservation.reserved).length,
+    1,
+    `exactly one reservation: ${reservations.map((r) => r.reserved).join()}`,
+  );
+  // The paused guard is the one that holds the lock, so it is the one that
+  // keeps the slot. Neither B nor D may take it from a live holder.
+  assert.equal(reservedByC.reserved, true);
+  assert.equal(reservedByB.reserved, false);
+  assert.equal(reservedByD.reserved, false);
+  assert.match(reservedByB.message, /reservation of .* is in flight/u);
+  assert.match(reservedByD.message, /reservation of .* is in flight/u);
+  assert.equal(fixture.slotDocument().pid, pidC);
+  assert.equal(existsSync(fixture.lockPath), false);
+});
+
+test("a live reservation lock is never taken over by age, and a dead one always is", () => {
+  // Age was the hole: a lock older than its maximum was treated as abandoned,
+  // so a slow guard that was merely paused lost its exclusivity to a guard
+  // that arrived later. Only a provably dead owner may be displaced — `kill(pid,
+  // 0)` raising `ESRCH`, with `EPERM` counting as alive — and the anti-wedge
+  // property survives, because a dead owner is taken over however fresh its
+  // lock is.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId } = fixture;
+  fixture.seedStaleSlot();
+
+  const livePid = process.pid + 5;
+  fixture.seedReservationLock(livePid, "2020-01-01T00:00:00.000Z");
+  context.clock.advance(365 * 24 * 60 * MINUTE);
+  const refused = fixture.storeFor(process.pid + 6).reserveGuardSlot(PR, runId);
+  assert.equal(refused.reserved, false, "an ancient live lock still holds");
+  assert.match(refused.message, /reservation of .* is in flight/u);
+  assert.equal(
+    JSON.parse(readFileSync(fixture.lockPath, "utf8")).pid,
+    livePid,
+    "the live holder's lock is untouched",
+  );
+
+  // A lock whose owner this host cannot read is held too: an unreadable file
+  // is not evidence that nobody is reserving under it.
+  writeFileSync(fixture.lockPath, "{ not json\n");
+  const unreadable = fixture
+    .storeFor(process.pid + 6)
+    .reserveGuardSlot(PR, runId);
+  assert.equal(unreadable.reserved, false);
+
+  // The owner is dead: taken over at once, whatever the timestamp says.
+  fixture.seedReservationLock(
+    fixture.dead,
+    new Date(context.clock.now()).toISOString(),
+  );
+  const takenOver = fixture
+    .storeFor(process.pid + 7)
+    .reserveGuardSlot(PR, runId);
+  assert.equal(takenOver.reserved, true, "a dead owner never wedges the host");
+  assert.equal(fixture.slotDocument().pid, process.pid + 7);
+  assert.equal(existsSync(fixture.lockPath), false);
 });
 
 test("a guard slot that changes between the read and the rename is refused, not stolen", () => {
-  // Belt to the reclaim lock's braces: the rename is atomic but says nothing
-  // about *which* file it moved, so the slot is compared with the one this
-  // reservation inspected, and the slot it creates is read back and checked
-  // for its own nonce. Anything else fails closed rather than moving a guard's
-  // live slot out from under it.
+  // Belt to the reservation lock's braces: the rename is atomic but says
+  // nothing about *which* file it moved, so the slot is compared with the one
+  // this reservation inspected, and the slot it creates is read back and
+  // checked for its own nonce. Anything else fails closed rather than moving a
+  // guard's live slot out from under it.
   const context = harness();
-  const runId = RUN_ID;
-  const stalePid = process.pid + 1;
-  const store0 = createStateStore({
-    repository: REPOSITORY,
-    root: context.options.stateRoot,
-    clock: context.clock,
-  });
-  const slotPath = store0.guardSlotPathFor(PR, runId);
-  mkdirSync(dirname(slotPath), { recursive: true });
-  writeFileSync(
-    slotPath,
-    `${JSON.stringify({
-      schema: GUARD_SLOT_SCHEMA,
-      repository: REPOSITORY,
-      number: PR,
-      runId,
-      pid: stalePid,
-      reservedAt: "2026-09-09T09:00:00.000Z",
-    })}\n`,
-  );
+  const fixture = guardSlotFixture(context);
+  const { runId, slotPath } = fixture;
+  fixture.seedStaleSlot();
   const foreign = {
     schema: GUARD_SLOT_SCHEMA,
     repository: REPOSITORY,
     number: PR,
     runId,
-    pid: stalePid,
+    pid: fixture.dead,
     nonce: "a-slot-this-reservation-never-read",
     reservedAt: "2026-09-09T10:00:00.000Z",
   };
 
-  let livenessCalls = 0;
-  const store = createStateStore({
-    repository: REPOSITORY,
-    root: context.options.stateRoot,
-    clock: context.clock,
-    isProcessAlive: (candidate) => {
-      livenessCalls += 1;
+  const store = fixture.storeFor(process.pid + 8, {
+    onReserveStep: (step) => {
       // Between the read under the lock and the rename that follows it.
-      if (livenessCalls === 2) {
+      if (step === "slot-inspected") {
         writeFileSync(slotPath, `${JSON.stringify(foreign)}\n`);
       }
-      return candidate !== stalePid;
     },
   });
 
   const result = store.reserveGuardSlot(PR, runId);
   assert.equal(result.reserved, false);
-  assert.match(result.message, /changed under the reclaim lock/u);
+  assert.match(result.message, /changed under the reservation lock/u);
   assert.deepEqual(
     JSON.parse(readFileSync(slotPath, "utf8")),
     foreign,
     "the slot this reservation never read is put back",
   );
-  assert.equal(existsSync(`${slotPath}.reclaim`), false);
+  assert.equal(existsSync(fixture.lockPath), false);
 });
 
 test("releasing a claim twice is idempotent", async () => {

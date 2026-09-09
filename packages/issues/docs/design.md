@@ -802,9 +802,20 @@ two chunks is rejoined rather than printed in halves. Holding only the token
 run was not enough: positional redaction needs the header and its credential in
 one string, and `Authorization: token <40 hex>` with no trailing separator left
 as the prefix now and the bare credential on the flush, where nothing named it
-a credential any more. A value longer than the hold-back cap is redacted with
-what has arrived and the rest of its run dropped, rather than forwarded in
-clear.
+a credential any more. The header is recognized however it is split — inside
+the word, before its own colon, after the scheme, part-way through the value —
+because every part after the word is optional in the pattern that holds it.
+
+Which part of a header outgrows the hold-back cap decides what happens to it.
+An over-long **value** is dropped and the header already parsed is forwarded
+with the redaction in its place; an over-long run of **whitespace** inside the
+header is squeezed to a single space and the parsing context is kept, since
+whitespace is a credential nowhere and the value has yet to arrive.
+
+The tap is flushed when stderr **ends**, never when the promise settles. An
+abort or a timeout rejects while the child is still writing, and flushing there
+ended the parsing context mid-header, leaving the credential in the next chunk
+with nothing in front of it.
 
 The token rules stay narrow — GitHub's own `gh[pousr]_` and `github_pat_`
 prefixes — because a rule wide enough for a classic 40-hex token would erase
@@ -1083,23 +1094,38 @@ is the reservation. That is a check the state entry cannot make: two guards
 starting together both read the previous, dead pid, both pass
 `assertNoLiveDuplicateRunId`, both overwrite the entry, and both spawn a
 publishing child. The slot is held for the child's lifetime and released on
-every exit path; a slot whose recorded pid is dead is reclaimed under an
-exclusive reclaim lock rather than wedging the host.
+every exit path — and only if it still carries that reservation's own `nonce`,
+so releasing is never a licence to delete a successor's slot. A slot whose
+recorded pid is dead is reclaimed rather than wedging the host.
 
-That reclaim is exclusive from end to end, the recovery from a lock a guard
-died holding included. An expired lock is **taken over** by one atomic
-`renameSync` and a fresh `wx` create, never by proceeding while the abandoned
-file lies where it is: two guards that both read the same expired lock both
-entered the reclaim body owning nothing, and the second one's rename then moved
-the first one's _fresh_ slot aside, so both reserved and both would have
-spawned. The rename of the stale slot is atomic but reports only _that_ it
-moved a file, so the file it moved is compared with the slot this reservation
-read under the lock, and the slot created in its place is read back and checked
-for this reservation's own `nonce`. Either mismatch refuses, and a slot moved
-by mistake is put back. It fails closed throughout — a slot that cannot be
-created, read or proved is not evidence that nobody is publishing. Like the
-state entry it is host-local defence in depth, and the reference remains the
-mutual-exclusion authority.
+**One lock covers the whole reservation**, not the reclaim alone:
+`.guard-reservation.lock` beside the entries, created with `wx`, held across
+the fresh create, the reclaim, the rename, the create that follows it, the
+verification and the restore. A lock around the reclaim alone was not enough. A
+guard that renamed a slot away and then had to put it back could find a _third_
+guard's fresh slot already in the path, because nothing stopped that third guard
+from creating one, and the sequence ended with two live reservations.
+
+**The lock is taken over only from a process that is provably dead** —
+`process.kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive — and
+never by age. Age was the other half of the same defect: a guard that was merely
+slow, paused past some maximum, was treated as abandoned, lost its exclusivity
+to a guard that arrived later, and both then reclaimed the same slot. A dead
+owner is displaced by one atomic `renameSync` plus a fresh `wx` create, so
+exactly one guard can take an abandoned lock over and the host is still never
+wedged by a file nobody owns. A lock whose owner cannot be read has no owner to
+prove dead, so it is treated as held.
+
+Under that lock the reclaim renames the stale slot rather than removing it —
+exactly one caller wins a rename, and every loser gets `ENOENT` instead of
+deleting a slot somebody else owns — and checks identity on both sides of it.
+The rename is atomic but reports only _that_ it moved a file, so the file it
+moved is compared with the slot this reservation inspected, and the slot created
+in its place is read back and checked for this reservation's own `nonce`. Either
+mismatch refuses, and a slot moved by mistake is put back. It fails closed
+throughout — a slot that cannot be created, read or proved is not evidence that
+nobody is publishing. Like the state entry it is host-local defence in depth,
+and the reference remains the mutual-exclusion authority.
 
 | Exit | `status`                                                                              | Agent action                                             |
 | ---- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |

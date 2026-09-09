@@ -10,7 +10,14 @@
 /** Hard cap on the stderr excerpt carried by a message or a result. */
 export const GH_STDERR_MAX_BYTES = 4096;
 
-const REDACTION = "[redacted-github-token]";
+/**
+ * What replaces a credential, everywhere.
+ *
+ * Exported because the live stderr filter emits it directly: a value it holds
+ * back can outgrow its buffer, and the filter then prints the header it has
+ * already parsed with this in place of the value it will never print.
+ */
+export const REDACTION = "[redacted-github-token]";
 
 /**
  * The credential shapes, and what replaces each.
