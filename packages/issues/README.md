@@ -53,16 +53,16 @@ belongs to the child it spawns, so its own documents go to stderr.
 
 ### Global flags
 
-| Flag                                        | Meaning                                                                                                                                                                                                                                                                                              |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--config <path>`                           | the policy or package config; required for every `claims` command                                                                                                                                                                                                                                    |
-| `--json`                                    | the only output mode; accepted for explicitness                                                                                                                                                                                                                                                      |
-| `--dry-run`                                 | plan and print; performs no write and no label call                                                                                                                                                                                                                                                  |
-| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                                                                                                                                                                                                                                              |
-| `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                                                                                                                                                                                                                                          |
-| `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                   |
-| `--state <path>`                            | state-file root                                                                                                                                                                                                                                                                                      |
-| `--run-id <id>`                             | required by `renew`, `release`, `verify`, `guard` and `family release`; **rejected** by `claim`, `takeover` and `family claim`, which generate their own; `adopt` resolves it from the flag, from `--from-state` or from this host's state entry; `read`, `list`, `label` and `doctor` never need it |
+| Flag                                        | Meaning                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--config <path>`                           | the policy or package config; required for every `claims` command                                                                                                                                                                                                                                                  |
+| `--json`                                    | the only output mode; accepted for explicitness                                                                                                                                                                                                                                                                    |
+| `--dry-run`                                 | plan and print; performs no write and no label call                                                                                                                                                                                                                                                                |
+| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                                                                                                                                                                                                                                                            |
+| `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                                                                                                                                                                                                                                                        |
+| `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                                 |
+| `--state <path>`                            | state-file root                                                                                                                                                                                                                                                                                                    |
+| `--run-id <id>`                             | required by `renew`, `release`, `verify`, `guard`, `family release` and `slot clear`; **rejected** by `claim`, `takeover` and `family claim`, which generate their own; `adopt` resolves it from the flag, from `--from-state` or from this host's state entry; `read`, `list`, `label` and `doctor` never need it |
 
 Gated flags need `allowOverrides: true` in the loaded config, or they exit 3:
 `--ttl-minutes`, `--grace-minutes`, `--min-remaining-seconds`, and `--now <iso>`
@@ -97,6 +97,7 @@ uncovered exits 3 exactly as the equivalent policy would.
 | `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                                       | commits, references                |
 | `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                                                   | labels only                        |
 | `label reconcile --pr <n>`                                         | `[--apply]`                                                                                                | labels only                        |
+| `slot clear --pr <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                |
 | `doctor`                                                           | —                                                                                                          | none                               |
 
 **`claim` takes over automatically.** Against an UNLOCK it acquires; against a
@@ -202,6 +203,45 @@ Repeated `--pr`/`--token` pairs under one `--run-id` guard a whole family. A
 second live guard holding the same `--run-id` for the same item exits 3: guard
 is the publish gate, so two of them under one run id would each verify held and
 each spawn a publishing child.
+
+#### The guard slot, and `claims slot clear`
+
+Before it spawns, guard creates one host-local file per guarded pair —
+`<state dir>/<owner>__<repo>/pr-<n>.guard-<digest of run id>.json` — with an
+**exclusive create**. That create is the whole reservation: exactly one of any
+number of racing guards makes the file, and every other one exits 3. The holder
+removes it when the child exits, and only its own: the nonce inside is read
+back through a descriptor opened before the unlink, and a file carrying anyone
+else's nonce is left alone with a warning.
+
+**Guard never takes a slot over**, so a guard that was killed outright leaves a
+slot that refuses every later guard of that run, whatever state the recorded
+process is in. That is deliberate. Node offers exclusive create, `link`,
+`rename` and `unlink`, and none of them compares before it acts — there is no
+compare-and-rename and no compare-and-unlink — so every "inspect the holder,
+then take the file" reclaim has a window between the two steps that an
+unbounded pause can stretch until two guards hold one slot. Four concurrent
+processes were enough to demonstrate it against each design that tried.
+
+Recovery is one explicit command:
+
+```bash
+mento-issues claims slot clear --config <cfg> --pr 872 --run-id <rid>
+```
+
+It refuses (exit 3) unless the recorded process is provably dead —
+`kill(pid, 0)` raising `ESRCH`, with `EPERM` counted as alive — and refuses a
+slot whose document cannot be read, since that has no pid to prove anything
+about. `--dry-run` reports what it would remove. It reaches no network.
+
+**The residual, stated plainly:** run beside a live guard of the same run id on
+the same host, `slot clear` can displace that guard, because a liveness check
+and an `unlink` cannot be made one operation. The rule that closes it is
+procedural — **one guard per run at a time, and clear a slot only after
+confirming that no guard of that run is alive**. The slot is defence in depth
+against one run accidentally starting two guards; the reference's
+compare-and-swap and the exact-head `--force-with-lease` push are the safety
+controls, and neither depends on this file.
 
 ### `markers` and `config`
 

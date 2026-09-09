@@ -57,6 +57,7 @@ import { runMarkers } from "./commands/markers.mjs";
 import { runRead } from "./commands/read.mjs";
 import { runRelease } from "./commands/release.mjs";
 import { runRenew } from "./commands/renew.mjs";
+import { runSlotClear } from "./commands/slot.mjs";
 import { runTakeover } from "./commands/takeover.mjs";
 import { runVerify } from "./commands/verify.mjs";
 
@@ -77,6 +78,7 @@ const HANDLERS = Object.freeze({
   "claims family release": runFamilyRelease,
   "claims label ensure": runLabelEnsure,
   "claims label reconcile": runLabelReconcile,
+  "claims slot clear": runSlotClear,
   "claims doctor": runDoctor,
   "markers build": runMarkers,
   "markers verify": runMarkers,

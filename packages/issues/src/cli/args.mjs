@@ -194,6 +194,17 @@ export const COMMAND_SPECS = Object.freeze({
     flags: { pr: { type: "integer" }, apply: { type: "boolean" } },
     required: ["pr"],
   },
+  // The one command that removes a guard slot it did not create. `guard`
+  // never takes a slot over, so a crashed guard's slot is cleared here, by an
+  // operator, and only once its process is provably dead. It touches nothing
+  // on the server, so it never mutates.
+  "claims slot clear": {
+    command: "claims.slot.clear",
+    mutates: false,
+    requiresConfig: true,
+    flags: { pr: { type: "integer" } },
+    required: ["pr", "run-id"],
+  },
   "claims doctor": {
     command: "claims.doctor",
     mutates: false,

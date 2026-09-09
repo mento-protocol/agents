@@ -35,20 +35,33 @@ import { markFailureContext, recordLeaseState } from "./common.mjs";
  * ref remains the mutual-exclusion authority; this only stops one host from
  * running two publishers under one run id.
  *
+ * **Guard never takes a slot over and never removes one it did not create.**
+ * A slot that already exists refuses, whatever state its holder is in, and the
+ * refusal prints the `claims slot clear` command that removes it once no guard
+ * of that run is alive. Every automatic reclaim this package tried was unsound:
+ * no filesystem primitive compares before it acts, so the window between
+ * "inspect the holder" and "take the file" can always be stretched.
+ *
  * It fails closed. A slot that cannot be created proves nothing about
  * duplicates, and a guard that cannot prove it is alone must not spawn.
  *
  * @param {object} runtime the CLI runtime.
  * @param {Array<{number: number, token: string}>} pairs the guarded pairs.
  * @param {string} runId the owning run id.
- * @returns {() => void} releases every slot this call reserved.
+ * @returns {() => object[]} releases every slot this call reserved, and
+ *   returns one warning for each slot it declined to remove.
  */
 function reserveGuardSlots(runtime, pairs, runId) {
   const store = runtime.stateStore;
-  if (!store || typeof store.reserveGuardSlot !== "function") return () => {};
+  if (!store || typeof store.reserveGuardSlot !== "function") return () => [];
   const held = [];
   const releaseAll = () => {
-    for (const slot of held.splice(0)) slot.release();
+    const warnings = [];
+    for (const slot of held.splice(0)) {
+      const released = slot.release();
+      if (released?.warning) warnings.push(released.warning);
+    }
+    return warnings;
   };
   for (const pair of pairs) {
     const slot = store.reserveGuardSlot(pair.number, runId);
@@ -60,9 +73,8 @@ function reserveGuardSlots(runtime, pairs, runId) {
           number: pair.number,
           slot: slot.path,
           pid: slot.holder?.pid ?? null,
-          // A file the refused reservation moved aside and could not put back.
-          // Nothing deletes it, so the operator is told where it is.
-          orphan: slot.orphan ?? null,
+          reservedAt: slot.holder?.reservedAt ?? null,
+          clear: store.clearGuardSlotCommand(pair.number, runId),
         },
       });
     }
@@ -146,6 +158,7 @@ export async function runGuard(runtime) {
     runtime.stderr.write(`${line}\n`);
   };
   let result;
+  let releaseWarnings = [];
   try {
     result = await guardChild(ctx, pairs, {
       runId,
@@ -166,9 +179,26 @@ export async function runGuard(runtime) {
       },
     });
   } finally {
-    // The slot lasts exactly as long as the child. A guard that is killed
-    // outright leaves it behind, and the next guard reclaims it by liveness.
-    releaseSlots();
+    // The slot lasts exactly as long as the child, and a guard removes only
+    // the slot it created. A guard killed outright leaves its slot behind:
+    // the next guard of that run refuses and prints `claims slot clear`,
+    // which is the one command that removes somebody else's slot, and only
+    // once its process is provably dead.
+    releaseWarnings = releaseSlots();
+  }
+
+  // A slot this guard declined to remove is an anomaly worth a line of its
+  // own: it means the file at the path is no longer the one this guard
+  // created. It rides the report rather than the verdict, which has already
+  // been emitted by the time a slot is released.
+  if (releaseWarnings.length > 0) {
+    result.report = {
+      ...result.report,
+      warnings: [...(result.report.warnings ?? []), ...releaseWarnings],
+    };
+    emit(
+      JSON.stringify({ ...result.report, phase: "guard-slot-release-warning" }),
+    );
   }
 
   if (flags.report !== undefined) {

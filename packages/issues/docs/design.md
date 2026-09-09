@@ -955,6 +955,7 @@ dry-run planning keep the flag.
 | `claims family claim --prs 872,880,881`                                   | —                                                                                                          | commits, references                |
 | `claims family release --prs … --tokens …`                                | `[--outcome <slug>]`                                                                                       | commits, references                |
 | `claims label ensure` / `claims label reconcile --pr <n> [--apply]`       | —                                                                                                          | labels only                        |
+| `claims slot clear --pr <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                |
 | `claims doctor`                                                           | —                                                                                                          | none                               |
 | `markers build --input <job.json> [--out <body.txt>]`                     | —                                                                                                          | file only                          |
 | `markers verify --input <check.json>`                                     | —                                                                                                          | none                               |
@@ -1089,64 +1090,59 @@ different live pid — defence in depth behind the un-suppliable run id.
 
 `guard` adds a **slot file** beside that entry,
 `<numberKey>-<n>.guard-<first 16 hex of sha256(runId)>.json`, schema
-`mento-issues-guard-slot:v1`, created with the `wx` flag so the create itself
-is the reservation. That is a check the state entry cannot make: two guards
-starting together both read the previous, dead pid, both pass
-`assertNoLiveDuplicateRunId`, both overwrite the entry, and both spawn a
-publishing child. The slot is held for the child's lifetime and released on
-every exit path — and only if it still carries that reservation's own `nonce`,
-so releasing is never a licence to delete a successor's slot. A slot whose
-recorded pid is dead is reclaimed rather than wedging the host.
+`mento-issues-guard-slot:v1`, created with the `wx` flag. That exclusive create
+**is** the reservation, and it is the only step: exactly one of any number of
+racing guards makes the file and every other one gets `EEXIST` and exits 3. It
+is the check the state entry cannot make — two guards starting together both
+read the previous, dead pid, both pass `assertNoLiveDuplicateRunId`, both
+overwrite the entry, and both spawn a publishing child. The document carries the
+pid, a per-reservation `nonce` and `reservedAt`.
 
-**One lock covers the whole reservation**, not the reclaim alone:
-`.guard-reservation.lock` beside the entries, created with `wx`, held across
-the fresh create, the reclaim, the rename, the create that follows it, the
-verification and the restore. A lock around the reclaim alone was not enough. A
-guard that renamed a slot away and then had to put it back could find a _third_
-guard's fresh slot already in the path, because nothing stopped that third guard
-from creating one, and the sequence ended with two live reservations.
+A holder removes its own slot when the child exits, on every exit path, and only
+its own: `release` opens the file, reads the nonce back through that descriptor,
+and unlinks only when it is this reservation's. A slot carrying another nonce,
+or none that can be read, is left where it is and reported as a warning on
+guard's report line. Nothing after the `wx` create can fail a reservation, so no
+path creates a slot and then refuses while holding it; a spawn that fails still
+reaches the same release.
 
-**The lock is taken over only from a process that is provably dead** —
-`process.kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive — and
-never by age. Age was the other half of the same defect: a guard that was merely
-slow, paused past some maximum, was treated as abandoned, lost its exclusivity
-to a guard that arrived later, and both then reclaimed the same slot. A lock
-whose owner cannot be read has no owner to prove dead, so it is treated as held.
+**Guard takes no slot over, by any means: no liveness reclaim, no age, no
+lock.** Three designs tried, each unsound, and the reason is structural rather
+than incidental. Node's filesystem primitives are exclusive create, `link`,
+`rename` and `unlink`, and not one of them compares before it acts: there is no
+compare-and-rename and no compare-and-unlink. So every "inspect the holder, then
+take the file" path has a window between the two steps, an unbounded pause can
+stretch that window arbitrarily, and a nonce check on either side only moves it.
+Four concurrent OS processes were enough to end with two live reservations
+against the last such design: a guard that had verified its own ownership and
+paused immediately before its rename still renamed a slot another guard had
+legitimately created in the meantime. The exclusive create is the one operation
+that cannot be raced, so it is the only one left in the hot path.
 
-**The takeover moves the lock aside first and reads it after.** Reading first
-and renaming after left a window of its own: a newcomer took the same dead lock
-over in between, and the rename then moved that newcomer's _fresh_ lock aside on
-the strength of a corpse's identity, after which two guards reserved. So the
-moved file decides. If it is not exactly the dead owner that was inspected —
-same pid, same nonce — it is put straight back with `link` plus `unlink`, which
-fails with `EEXIST` rather than replacing a third guard's fresh lock the way
-`rename` silently would, and the reservation refuses. A file that cannot be put
-back is left where it is and named as the refusal's `orphan`, which `guard`
-carries into its error details: deleting a lock this reservation never owned is
-the worse outcome. Only the inspected corpse is removed and replaced by a fresh
-`wx` create, so exactly one guard takes an abandoned lock over and the host is
-still never wedged by a file nobody owns.
+An existing slot therefore always refuses — live, dead or unreadable holder
+alike — and the refusal carries the recorded pid, the instant the slot was
+taken, and the exact recovery command. Recovery is explicit:
 
-**Holding the lock is re-checked before every mutation and once after the slot
-is created**: the lock path must exist and carry this reservation's nonce. A
-reservation that lost its lock — because its owner was proved dead, or because
-anything else removed it — stops there having touched nothing: no rename, no
-create, no restore. By then another guard may legitimately own the slot, and
-moving that guard's file aside is damage no later check can undo. A slot is
-reserved only when the check _after_ the create passed and the created slot
-carries this nonce.
+```bash
+mento-issues claims slot clear --config <cfg> --pr 872 --run-id <rid>
+```
 
-Under that lock the reclaim renames the stale slot rather than removing it —
-exactly one caller wins a rename, and every loser gets `ENOENT` instead of
-deleting a slot somebody else owns — and checks identity on both sides of it.
-The rename is atomic but reports only _that_ it moved a file, so the file it
-moved is compared with the slot this reservation inspected, and the slot created
-in its place is read back and checked for this reservation's own `nonce`. Either
-mismatch refuses, and a slot moved by mistake is put back while the lock is
-still held, or else left and named as the refusal's `orphan`. It fails closed
-throughout — a slot that cannot be created, read or proved is not evidence that
-nobody is publishing. Like the state entry it is host-local defence in depth,
-and the reference remains the mutual-exclusion authority.
+`claims slot clear` is the only thing in the package that removes a slot it did
+not create. It refuses unless the recorded process is **provably dead** —
+`kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive — refuses a slot
+whose document cannot be read, since that has no pid to prove anything about,
+supports `--dry-run`, and touches no network. `guard` never calls it.
+
+**The residual is procedural and is stated rather than papered over.** Run
+beside a live guard of the same run id on the same host, `slot clear` can
+displace that guard: a liveness check and an `unlink` cannot be made one
+operation either. The rule that closes it belongs to the playbook, not the code
+— **one guard per run at a time, and clear a slot only after confirming that no
+guard of that run is alive**. That is an acceptable trade because of what the
+slot is for: it is host-local defence in depth against one run accidentally
+starting two guards. The reference's compare-and-swap and the exact-head
+`--force-with-lease` push are the safety controls, they are not host-local, and
+neither of them consults this file.
 
 | Exit | `status`                                                                              | Agent action                                             |
 | ---- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |
