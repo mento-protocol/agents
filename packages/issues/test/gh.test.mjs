@@ -1,0 +1,815 @@
+/**
+ * `@mento-protocol/issues/gh` — offline transport tests.
+ *
+ * Nothing here spawns `gh`, reaches the network, or touches the filesystem.
+ * `runGh` takes an injected `spawn`; every wrapper takes an injected runner.
+ */
+
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import test from "node:test";
+
+import {
+  CLOUD_SESSION_GATEWAY_BODY,
+  GH_ENVIRONMENT_PINS,
+  GH_STDERR_MAX_BYTES,
+  GhCommandError,
+  GhEnvError,
+  GhOutputLimitError,
+  GhPermissionError,
+  GhTimeoutError,
+  GITHUB_CLI_HOST,
+  addIssueLabels,
+  assertCanonicalGithubCliEnvironment,
+  createCommit,
+  ghGraphql,
+  isUnknownOutcomeError,
+  listRefCommits,
+  pinnedGithubCliEnvironment,
+  readRefCommit,
+  readServerDateMs,
+  readViewerLogin,
+  removeIssueLabel,
+  resetViewerLoginMemo,
+  runGh,
+  updateRefCompareAndSwap,
+} from "../src/gh/index.mjs";
+import { callOptions } from "../src/gh/rest.mjs";
+import { readPullRequestState, readTokenScopes } from "../src/cli/github.mjs";
+
+const REF_NAME = "refs/mento-claims/v1/pr/872";
+const COMMIT_OID = "a6fe65deb282c4fbc0663c9f576d6ff10677c65a";
+const TREE_OID = "2fc690ff01cbf493d085a2d27b39f89d9f303504";
+const PARENT_OID = "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22";
+const ZERO_OID = "0000000000000000000000000000000000000000";
+const REPOSITORY_ID = "R_kgDOObNo8w";
+const AUTHOR = {
+  name: "Mento claims",
+  email: "claims@users.noreply.github.com",
+};
+
+/** A `child_process` stand-in with recorded signals and no real process. */
+function createFakeChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr = new EventEmitter();
+  child.stderr.setEncoding = () => {};
+  child.killSignals = [];
+  const waiters = new Map();
+  child.kill = (signal = "SIGTERM") => {
+    child.killSignals.push(signal);
+    for (const resolve of waiters.get(signal) ?? []) resolve();
+    waiters.delete(signal);
+    return true;
+  };
+  child.whenKilled = (signal) =>
+    new Promise((resolve) => {
+      if (child.killSignals.includes(signal)) {
+        resolve();
+        return;
+      }
+      waiters.set(signal, [...(waiters.get(signal) ?? []), resolve]);
+    });
+  return child;
+}
+
+/**
+ * Build an injectable `spawn`. `script(child)` drives the fake child; the
+ * recorded calls let a test assert the argv and the pinned environment.
+ */
+function createFakeSpawn(script) {
+  const calls = [];
+  const spawn = (command, args, options) => {
+    const child = createFakeChild();
+    calls.push({ command, args, options, child });
+    setImmediate(() => script(child, args, options));
+    return child;
+  };
+  spawn.calls = calls;
+  return spawn;
+}
+
+/** A spawn that fails the test if it is ever called. */
+function forbiddenSpawn() {
+  assert.fail("gh must not be spawned on this path");
+}
+
+function respondWith({ stdout = "", stderr = "", status = 0 } = {}) {
+  return createFakeSpawn((child) => {
+    if (stdout) child.stdout.emit("data", stdout);
+    if (stderr) child.stderr.emit("data", stderr);
+    child.emit("close", status, null);
+  });
+}
+
+test("env pinning rejects a non-github.com host and a qualified repo and sets the four new pins", async () => {
+  assert.throws(
+    () => assertCanonicalGithubCliEnvironment({ GH_HOST: "ghe.example.com" }),
+    (error) =>
+      error instanceof GhEnvError &&
+      error.code === "GH_ENV" &&
+      /GH_HOST must be unset or exactly github\.com/u.test(error.message),
+  );
+  assert.throws(
+    () =>
+      assertCanonicalGithubCliEnvironment({ GH_REPO: "github.com/owner/name" }),
+    (error) =>
+      error instanceof GhEnvError &&
+      /GH_REPO must be an unqualified owner\/repo/u.test(error.message),
+  );
+
+  // An unset or already-canonical host is accepted, exactly as monitoring has it.
+  assert.doesNotThrow(() => assertCanonicalGithubCliEnvironment({}));
+  assert.doesNotThrow(() =>
+    assertCanonicalGithubCliEnvironment({
+      GH_HOST: GITHUB_CLI_HOST,
+      GH_REPO: "o/n",
+    }),
+  );
+
+  const pinned = pinnedGithubCliEnvironment({
+    PATH: "/usr/bin",
+    GH_REPO: "owner/name",
+    GH_PAGER: "less",
+    NO_COLOR: "",
+  });
+  assert.equal(pinned.GH_HOST, GITHUB_CLI_HOST);
+  assert.equal("GH_REPO" in pinned, false);
+  assert.equal(pinned.PATH, "/usr/bin");
+  assert.deepEqual(
+    {
+      GH_PROMPT_DISABLED: pinned.GH_PROMPT_DISABLED,
+      GH_NO_UPDATE_NOTIFIER: pinned.GH_NO_UPDATE_NOTIFIER,
+      GH_PAGER: pinned.GH_PAGER,
+      NO_COLOR: pinned.NO_COLOR,
+    },
+    { ...GH_ENVIRONMENT_PINS },
+  );
+
+  // The pinned environment is what the subprocess actually receives.
+  const spawn = respondWith({ stdout: "{}\n" });
+  await runGh(["api", "user"], {
+    env: { GH_REPO: "owner/name", GH_PAGER: "less" },
+    spawn,
+  });
+  assert.equal(spawn.calls.length, 1);
+  assert.equal(spawn.calls[0].command, "gh");
+  assert.deepEqual(spawn.calls[0].args, ["api", "user"]);
+  assert.deepEqual(spawn.calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
+  // No shell, ever: the argv array reaches `gh` unchanged.
+  assert.equal(spawn.calls[0].options.shell, undefined);
+  assert.equal(spawn.calls[0].options.env.GH_HOST, GITHUB_CLI_HOST);
+  assert.equal(spawn.calls[0].options.env.GH_PAGER, "cat");
+  assert.equal("GH_REPO" in spawn.calls[0].options.env, false);
+
+  // A refused environment never reaches spawn.
+  assert.throws(
+    () =>
+      runGh(["api", "user"], {
+        env: { GH_HOST: "ghe.example.com" },
+        spawn: forbiddenSpawn,
+      }),
+    GhEnvError,
+  );
+});
+
+test("dryRun with mutates skips the subprocess while dryRun alone still executes reads", async () => {
+  const notices = [];
+  const mutation = await runGh(
+    [
+      "api",
+      "--method",
+      "POST",
+      "repos/owner/name/git/commits",
+      "-f",
+      "message={}",
+    ],
+    {
+      dryRun: true,
+      mutates: true,
+      spawn: forbiddenSpawn,
+      writeNotice: (text) => notices.push(text),
+    },
+  );
+  assert.equal(mutation, "");
+  assert.equal(notices.length, 1);
+  assert.match(
+    notices[0],
+    /^\[dry-run\] gh api --method POST repos\/owner\/name\/git\/commits/u,
+  );
+
+  // dryRun ALONE does not suppress a read: the subprocess still runs.
+  const readSpawn = respondWith({ stdout: '[{"ref":"refs/heads/main"}]\n' });
+  const stdout = await runGh(
+    ["api", "repos/owner/name/git/matching-refs/heads"],
+    {
+      dryRun: true,
+      spawn: readSpawn,
+    },
+  );
+  assert.equal(readSpawn.calls.length, 1);
+  assert.equal(stdout, '[{"ref":"refs/heads/main"}]\n');
+
+  // The same rule inside the wrappers: createCommit under dryRun writes nothing
+  // and reports a null oid, while readRefCommit still reads.
+  const commit = await createCommit(
+    { repo: "owner/name", dryRun: true },
+    { oid: PARENT_OID, treeOid: TREE_OID },
+    { kind: "mento-claim", version: 1 },
+    "2026-09-09T09:58:12.004Z",
+    {
+      author: AUTHOR,
+      json: async (args, options) => {
+        assert.equal(options.mutates, true);
+        assert.equal(options.dryRun, true);
+        return null;
+      },
+    },
+  );
+  assert.deepEqual(commit, { oid: null, treeOid: TREE_OID, dryRun: true });
+
+  // matching-refs is a PREFIX match: `.../87` also returns `.../872`.
+  const jsonCalls = [];
+  const graphqlCalls = [];
+  const read = await readRefCommit(
+    { repo: "owner/name", dryRun: true },
+    REF_NAME,
+    {
+      json: async (args, options) => {
+        jsonCalls.push({ args, options });
+        return [
+          {
+            ref: "refs/mento-claims/v1/pr/87",
+            object: { sha: PARENT_OID, type: "commit" },
+          },
+          { ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } },
+          {
+            ref: "refs/mento-claims/v1/pr/8720",
+            object: { sha: TREE_OID, type: "commit" },
+          },
+        ];
+      },
+      graphql: async (query, variables, options) => {
+        graphqlCalls.push({ query, variables, options });
+        return {
+          data: {
+            repository: {
+              id: REPOSITORY_ID,
+              object: {
+                __typename: "Commit",
+                oid: COMMIT_OID,
+                message: '{"state":"LOCK"}',
+                tree: { oid: TREE_OID },
+              },
+            },
+          },
+        };
+      },
+    },
+  );
+  assert.equal(jsonCalls.length, 1);
+  assert.deepEqual(jsonCalls[0].args, [
+    "api",
+    "repos/owner/name/git/matching-refs/mento-claims/v1/pr/872",
+  ]);
+  assert.equal(jsonCalls[0].options.mutates, false);
+  assert.equal(graphqlCalls[0].variables.oid, COMMIT_OID);
+  assert.deepEqual(read, {
+    refName: REF_NAME,
+    oid: COMMIT_OID,
+    treeOid: TREE_OID,
+    repositoryId: REPOSITORY_ID,
+    message: '{"state":"LOCK"}',
+    targetType: "Commit",
+  });
+
+  // A ref that does not exist reads as null, without a second call.
+  const absent = await readRefCommit({ repo: "owner/name" }, REF_NAME, {
+    json: async () => [
+      {
+        ref: "refs/mento-claims/v1/pr/87",
+        object: { sha: PARENT_OID, type: "commit" },
+      },
+    ],
+    graphql: async () => assert.fail("no object read for an absent ref"),
+  });
+  assert.equal(absent, null);
+
+  // A ref pointing at something other than a commit reports it instead of
+  // pretending to have a payload.
+  const foreign = await readRefCommit({ repo: "owner/name" }, REF_NAME, {
+    json: async () => [
+      { ref: REF_NAME, object: { sha: COMMIT_OID, type: "tag" } },
+    ],
+    graphql: async () => ({
+      data: {
+        repository: {
+          id: REPOSITORY_ID,
+          object: { __typename: "Tag", oid: COMMIT_OID },
+        },
+      },
+    }),
+  });
+  assert.equal(foreign.message, null);
+  assert.equal(foreign.treeOid, null);
+  assert.equal(foreign.targetType, "Tag");
+
+  // Prefix listing keeps every ref under the namespace, for `claims list`.
+  const listed = await listRefCommits(
+    { repo: "owner/name" },
+    "refs/mento-claims/v1/pr",
+    {
+      json: async (args) => {
+        assert.deepEqual(args, [
+          "api",
+          "repos/owner/name/git/matching-refs/mento-claims/v1/pr",
+        ]);
+        return [
+          {
+            ref: "refs/mento-claims/v1/pr/87",
+            object: { sha: PARENT_OID, type: "commit" },
+          },
+          { ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } },
+        ];
+      },
+    },
+  );
+  assert.deepEqual(listed, [
+    { ref: "refs/mento-claims/v1/pr/87", oid: PARENT_OID, type: "commit" },
+    { ref: REF_NAME, oid: COMMIT_OID, type: "commit" },
+  ]);
+  assert.deepEqual(
+    await listRefCommits({ repo: "owner/name" }, "refs/mento-claims/v1/pr", {
+      json: async () => null,
+    }),
+    [],
+  );
+
+  // The viewer login is read once per process.
+  resetViewerLoginMemo();
+  let loginReads = 0;
+  const readLogin = async () => {
+    loginReads += 1;
+    return "chapati23\n";
+  };
+  assert.equal(await readViewerLogin({ run: readLogin }), "chapati23");
+  assert.equal(await readViewerLogin({ run: readLogin }), "chapati23");
+  assert.equal(loginReads, 1);
+  resetViewerLoginMemo();
+
+  // The server clock comes from the Date response header of a cheap read.
+  const serverDateMs = await readServerDateMs({
+    run: async (args) => {
+      assert.deepEqual(args, ["api", "--include", "rate_limit"]);
+      return [
+        "HTTP/2.0 200 OK",
+        "Date: Wed, 09 Sep 2026 09:58:12 GMT",
+        "X-Ratelimit-Remaining: 4999",
+        "",
+        '{"rate":{"limit":5000}}',
+      ].join("\r\n");
+    },
+  });
+  assert.equal(serverDateMs, Date.parse("2026-09-09T09:58:12.000Z"));
+  await assert.rejects(
+    readServerDateMs({ run: async () => "HTTP/2.0 200 OK\r\n\r\n{}" }),
+    /no parseable Date header/u,
+  );
+});
+
+test("a stream over the cap kills the child and a hung gh is terminated at timeoutMs", async () => {
+  const overflowing = createFakeSpawn((child) => {
+    child.stdout.emit("data", "x".repeat(64));
+    child.stdout.emit("data", "y".repeat(64));
+  });
+  const overflowError = await runGh(
+    ["api", "repos/owner/name/git/matching-refs/x"],
+    {
+      maxBytes: 32,
+      killGraceMs: 5,
+      spawn: overflowing,
+    },
+  ).then(
+    () => assert.fail("an oversized stream must reject"),
+    (error) => error,
+  );
+  assert.ok(overflowError instanceof GhOutputLimitError);
+  assert.equal(overflowError.stream, "stdout");
+  assert.equal(overflowError.limitBytes, 32);
+  assert.equal(isUnknownOutcomeError(overflowError), true);
+  assert.equal(
+    overflowing.calls[0].child.killSignals.includes("SIGTERM"),
+    true,
+  );
+
+  // A hung child is terminated at the wall-clock budget. The outcome of a
+  // mutating call is UNKNOWN, never a definitive failure.
+  const hanging = createFakeSpawn(() => {});
+  const timeoutError = await runGh(
+    ["api", "graphql", "-f", "query=mutation{updateRefs}"],
+    { mutates: true, timeoutMs: 5, killGraceMs: 5, spawn: hanging },
+  ).then(
+    () => assert.fail("a hung gh must reject"),
+    (error) => error,
+  );
+  assert.ok(timeoutError instanceof GhTimeoutError);
+  assert.equal(timeoutError.code, "GH_TIMEOUT");
+  assert.equal(timeoutError.timeoutMs, 5);
+  assert.equal(timeoutError.mutates, true);
+  assert.equal(timeoutError.outcomeUnknown, true);
+  assert.equal(timeoutError instanceof GhCommandError, false);
+
+  const hungChild = hanging.calls[0].child;
+  assert.deepEqual(hungChild.killSignals, ["SIGTERM"]);
+  const keepAlive = setInterval(() => {}, 1000);
+  await hungChild.whenKilled("SIGKILL");
+  clearInterval(keepAlive);
+  assert.deepEqual(hungChild.killSignals, ["SIGTERM", "SIGKILL"]);
+
+  // An AbortSignal terminates the same way and is equally unknown. A signal
+  // that is already aborted never spawns at all.
+  const aborting = createFakeSpawn(() => {});
+  const controller = new AbortController();
+  const abortPromise = runGh(["api", "user"], {
+    signal: controller.signal,
+    killGraceMs: 5,
+    spawn: aborting,
+  });
+  controller.abort();
+  const abortError = await abortPromise.then(
+    () => assert.fail("an aborted call must reject"),
+    (error) => error,
+  );
+  assert.equal(abortError.code, "GH_ABORTED");
+  assert.equal(isUnknownOutcomeError(abortError), true);
+  assert.equal(aborting.calls[0].child.killSignals.includes("SIGTERM"), true);
+
+  await assert.rejects(
+    runGh(["api", "user"], {
+      signal: AbortSignal.abort(),
+      spawn: forbiddenSpawn,
+    }),
+    (error) => error.code === "GH_ABORTED",
+  );
+});
+
+test("a 403 shapes a permission error with the contents-write hint and a distinct cloud-gateway branch", async () => {
+  const scopeStderr =
+    "gh: Resource not accessible by personal access token (HTTP 403)\n" +
+    "This API operation requires one of the following scopes: ['repo']\n";
+
+  const cliManaged = await runGh(
+    ["api", "--method", "POST", "repos/owner/name/git/commits"],
+    {
+      mutates: true,
+      env: { PATH: "/usr/bin" },
+      spawn: respondWith({ stderr: scopeStderr, status: 1 }),
+    },
+  ).then(
+    () => assert.fail("a 403 must reject"),
+    (error) => error,
+  );
+  assert.ok(cliManaged instanceof GhPermissionError);
+  assert.ok(cliManaged instanceof GhCommandError);
+  assert.equal(cliManaged.code, "GH_PERMISSION");
+  assert.equal(cliManaged.httpStatus, 403);
+  assert.equal(cliManaged.exitCode, 1);
+  assert.match(cliManaged.message, /gh auth refresh -h github\.com -s repo/u);
+  assert.match(cliManaged.message, /Contents: Read & Write/u);
+  assert.doesNotMatch(cliManaged.message, /project/iu);
+
+  const envToken = await runGh(
+    ["api", "graphql", "-f", "query=mutation{updateRefs}"],
+    {
+      mutates: true,
+      env: { GH_TOKEN: "supplied-by-the-environment" },
+      spawn: respondWith({ stderr: scopeStderr, status: 1 }),
+    },
+  ).then(
+    () => assert.fail("a 403 must reject"),
+    (error) => error,
+  );
+  assert.ok(envToken instanceof GhPermissionError);
+  assert.match(
+    envToken.message,
+    /does not update environment-provided tokens/u,
+  );
+  assert.doesNotMatch(envToken.message, /gh auth refresh -h/u);
+
+  // The cloud-session gateway is a session boundary, not a credential fault.
+  const gateway = await runGh(["api", "repos/owner/name/git/matching-refs/x"], {
+    env: { PATH: "/usr/bin" },
+    spawn: respondWith({
+      stderr: `gh: ${CLOUD_SESSION_GATEWAY_BODY} (HTTP 403)\n`,
+      status: 1,
+    }),
+  }).then(
+    () => assert.fail("a gateway refusal must reject"),
+    (error) => error,
+  );
+  assert.ok(gateway instanceof GhPermissionError);
+  assert.match(
+    gateway.message,
+    /cloud session's GitHub gateway refused this repository/u,
+  );
+  assert.doesNotMatch(gateway.message, /gh auth refresh/u);
+
+  // An ordinary non-permission failure stays a plain command error.
+  const validation = await runGh(
+    ["api", "--method", "POST", "repos/owner/name/git/commits"],
+    {
+      mutates: true,
+      env: { PATH: "/usr/bin" },
+      spawn: respondWith({
+        stderr: "gh: Validation Failed (HTTP 422)\n",
+        status: 1,
+      }),
+    },
+  ).then(
+    () => assert.fail("a 422 must reject"),
+    (error) => error,
+  );
+  assert.equal(validation instanceof GhPermissionError, false);
+  assert.ok(validation instanceof GhCommandError);
+  assert.equal(validation.httpStatus, 422);
+  assert.equal(isUnknownOutcomeError(validation), false);
+
+  // A label that is already gone is the desired state, so a 404 is success;
+  // a permission failure still propagates.
+  const removed = await removeIssueLabel(
+    { repo: "owner/name" },
+    872,
+    "dependabot-prep:claimed",
+    {
+      json: async () => {
+        throw new GhCommandError("gh: Label does not exist (HTTP 404)", {
+          httpStatus: 404,
+        });
+      },
+    },
+  );
+  assert.deepEqual(removed, { removed: false, status: "not-found" });
+  await assert.rejects(
+    removeIssueLabel({ repo: "owner/name" }, 872, "dependabot-prep:claimed", {
+      json: async () => {
+        throw new GhPermissionError("gh: Forbidden (HTTP 403)", {
+          httpStatus: 403,
+        });
+      },
+    }),
+    GhPermissionError,
+  );
+  const added = await addIssueLabels(
+    { repo: "owner/name" },
+    872,
+    ["dependabot-prep:claimed"],
+    {
+      json: async (args, options) => {
+        assert.deepEqual(args, [
+          "api",
+          "--method",
+          "POST",
+          "repos/owner/name/issues/872/labels",
+          "-f",
+          "labels[]=dependabot-prep:claimed",
+        ]);
+        assert.equal(options.mutates, true);
+        return [];
+      },
+    },
+  );
+  assert.deepEqual(added, { added: true, status: "added" });
+});
+
+test("stderr containing a token is redacted and truncated", async () => {
+  const token = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const patToken = `github_pat_${"9".repeat(30)}`;
+  const noisy = `gh: Bad credentials (HTTP 401)\nAuthorization: token ${token}\nfallback ${patToken}\n${"padding ".repeat(1200)}`;
+  assert.ok(Buffer.byteLength(noisy, "utf8") > GH_STDERR_MAX_BYTES);
+
+  const error = await runGh(["api", "user"], {
+    env: { PATH: "/usr/bin" },
+    spawn: respondWith({ stderr: noisy, status: 1 }),
+  }).then(
+    () => assert.fail("a 401 must reject"),
+    (failure) => failure,
+  );
+
+  assert.ok(error instanceof GhPermissionError);
+  assert.equal(error.httpStatus, 401);
+  for (const text of [error.message, error.stderr]) {
+    assert.equal(text.includes(token), false);
+    assert.equal(text.includes(patToken), false);
+    assert.match(text, /\[redacted-github-token\]/u);
+  }
+  assert.ok(Buffer.byteLength(error.stderr, "utf8") <= GH_STDERR_MAX_BYTES);
+  assert.match(error.stderr, /\[gh stderr truncated to 4096 bytes\]$/u);
+  // The head of the message survives, so the failure is still diagnosable.
+  assert.match(error.stderr, /^gh: Bad credentials \(HTTP 401\)/u);
+});
+
+test("ghGraphql types numbers with -F and everything else with -f", async () => {
+  const calls = [];
+  const run = async (args, options) => {
+    calls.push({ args, options });
+    return '{"data":{"updateRefs":{"clientMutationId":null}}}';
+  };
+
+  await ghGraphql(
+    "query($owner:String!){repository(owner:$owner){id}}",
+    {
+      owner: "mento-protocol",
+      pr: 872,
+      enabled: true,
+      mixed: [1, "two"],
+      skippedNull: null,
+      skippedUndefined: undefined,
+    },
+    { run },
+  );
+  assert.deepEqual(calls[0].args, [
+    "api",
+    "graphql",
+    "-f",
+    "query=query($owner:String!){repository(owner:$owner){id}}",
+    "-f",
+    "owner=mento-protocol",
+    "-F",
+    "pr=872",
+    "-f",
+    "enabled=true",
+    "-F",
+    "mixed[]=1",
+    "-f",
+    "mixed[]=two",
+  ]);
+
+  // The compare-and-swap document carries `force:false` as a literal and never
+  // passes a zero afterOid.
+  calls.length = 0;
+  await updateRefCompareAndSwap(
+    { repo: "owner/name" },
+    REPOSITORY_ID,
+    REF_NAME,
+    PARENT_OID,
+    COMMIT_OID,
+    {
+      graphql: (query, variables, options) =>
+        ghGraphql(query, variables, { ...options, run }),
+    },
+  );
+  const [document] = calls[0].args.filter((arg) =>
+    String(arg).startsWith("query="),
+  );
+  assert.match(document, /force:\s*false/u);
+  assert.doesNotMatch(document, /force:\s*\$/u);
+  assert.match(document, /updateRefs\(\s*input:/u);
+  assert.ok(calls[0].args.includes(`before=${PARENT_OID}`));
+  assert.ok(calls[0].args.includes(`after=${COMMIT_OID}`));
+  assert.equal(calls[0].options.mutates, true);
+
+  await assert.rejects(
+    updateRefCompareAndSwap(
+      { repo: "owner/name" },
+      REPOSITORY_ID,
+      REF_NAME,
+      PARENT_OID,
+      ZERO_OID,
+      {
+        graphql: async () => assert.fail("a zero afterOid must never be sent"),
+      },
+    ),
+    (error) =>
+      error instanceof GhEnvError &&
+      /never be the zero OID/u.test(error.message),
+  );
+  await assert.rejects(
+    updateRefCompareAndSwap(
+      { repo: "owner/name" },
+      REPOSITORY_ID,
+      "mento-claims/v1/pr/872",
+      PARENT_OID,
+      COMMIT_OID,
+      {
+        graphql: async () =>
+          assert.fail("an unqualified ref must never be sent"),
+      },
+    ),
+    GhEnvError,
+  );
+});
+
+test("a missing gh executable is a config fault, never a retryable transport one", async () => {
+  // ENOENT and EACCES reach the same `error` handler a transport failure does.
+  // Reported as GH_COMMAND_FAILED they map to exit 20, "retry with backoff",
+  // and an agent following the coarse rule would spend its whole budget
+  // retrying a fault that can never clear.
+  for (const code of ["ENOENT", "EACCES"]) {
+    const spawn = createFakeSpawn((child) => {
+      const error = new Error(`spawn gh ${code}`);
+      error.code = code;
+      child.emit("error", error);
+    });
+    await assert.rejects(
+      runGh(["api", "user"], { spawn, mutates: false }),
+      (error) => {
+        assert.equal(error instanceof GhEnvError, true, code);
+        assert.equal(error.code, "GH_ENV");
+        assert.equal(error instanceof GhCommandError, false);
+        assert.match(error.message, /is the gh CLI installed and on PATH\?/u);
+        return true;
+      },
+    );
+  }
+
+  // Every other spawn failure stays a command failure.
+  const other = createFakeSpawn((child) => {
+    const error = new Error("spawn gh EAGAIN");
+    error.code = "EAGAIN";
+    child.emit("error", error);
+  });
+  await assert.rejects(
+    runGh(["api", "user"], { spawn: other, mutates: false }),
+    (error) => {
+      assert.equal(error instanceof GhCommandError, true);
+      assert.equal(error.code, "GH_COMMAND_FAILED");
+      return true;
+    },
+  );
+});
+
+test("the transport ref-name guard rejects characters that would truncate a REST path", async () => {
+  // The name is spliced into `repos/<owner>/<name>/git/matching-refs/<rest>`
+  // unencoded, so a `#` truncates the request at the fragment and the read
+  // comes back "absent" — a fail-open answer for a malformed namespace.
+  for (const refName of [
+    "refs/mento-claims/v1#x/pr/872",
+    "refs/mento-claims/v1%2e/pr/872",
+    "refs/mento-claims/v1&a=b/pr/872",
+    "refs/mento-claims/v1?x/pr/872",
+  ]) {
+    await assert.rejects(
+      readRefCommit({ repo: "owner/name" }, refName, {
+        json: async () => assert.fail("a malformed ref must never be sent"),
+        graphql: async () => assert.fail("a malformed ref must never be sent"),
+      }),
+      (error) => {
+        assert.equal(error instanceof GhEnvError, true, refName);
+        assert.match(error.message, /is not a usable ref name/u);
+        return true;
+      },
+      `${refName} must be refused`,
+    );
+  }
+
+  // The ordinary name still passes.
+  const read = await readRefCommit({ repo: "owner/name" }, REF_NAME, {
+    json: async () => [],
+    graphql: async () => assert.fail("no ref means no object query"),
+  });
+  assert.equal(read, null);
+});
+
+test("the CLI reads forward the caller's env, signal and timeout", async () => {
+  // `callOptions` is the single derivation every gh call shares. Dropping
+  // `env` silently falls back to the ambient environment — which is also what
+  // keeps this suite offline — and dropping `signal` makes a call impossible
+  // to cancel.
+  const controller = new AbortController();
+  const options = {
+    repo: "owner/name",
+    env: { MENTO_TEST: "1" },
+    signal: controller.signal,
+    timeoutMs: 7_000,
+  };
+
+  const seen = [];
+  await readPullRequestState(options, 872, {
+    json: async (_args, runOptions) => {
+      seen.push(runOptions);
+      return { state: "open", draft: false, merged: false };
+    },
+  });
+  await readTokenScopes(options, {
+    run: async (_args, runOptions) => {
+      seen.push(runOptions);
+      return "x-oauth-scopes: repo\n\n{}";
+    },
+  });
+
+  assert.equal(seen.length, 2);
+  for (const runOptions of seen) {
+    assert.deepEqual(runOptions.env, options.env);
+    assert.equal(runOptions.signal, controller.signal);
+    assert.equal(runOptions.timeoutMs, 7_000);
+    assert.equal(runOptions.mutates, false);
+  }
+
+  assert.deepEqual(callOptions(options, true), {
+    mutates: true,
+    timeoutMs: 7_000,
+    signal: controller.signal,
+    env: options.env,
+  });
+});

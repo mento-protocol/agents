@@ -1,0 +1,2010 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { COMMAND_SPECS, GATED_FLAGS } from "../src/cli/args.mjs";
+import { CONFIG_SCHEMAS, normalizeConfigDocument } from "../src/cli/config.mjs";
+import { claimProfile } from "../src/claims/profile.mjs";
+import {
+  CLAIM_CODE_STATUSES,
+  STATUS_EXIT_CODES,
+  exitCodeForCliError,
+  statusForError,
+} from "../src/cli/exit-codes.mjs";
+import { runCli } from "../src/cli/main.mjs";
+import {
+  ClaimAlreadyHeldError,
+  ClaimClockSkewError,
+  ClaimConfigError,
+  ClaimContendedError,
+  ClaimExpiredError,
+  ClaimFamilyAbortedError,
+  ClaimNotExpiredError,
+  ClaimNotHeldError,
+  ClaimRefInvalidError,
+  ClaimRenewRequiredError,
+  ClaimStaleError,
+  ClaimSupersededError,
+  ClaimUnknownOutcomeError,
+} from "../src/claims/errors.mjs";
+import { ClaimUsageError } from "../src/claims/verify.mjs";
+import { createFakeClock } from "../src/testing/fake-clock.mjs";
+import { createFakeRefServer } from "../src/testing/fake-ref-server.mjs";
+
+const REPOSITORY = "mento-protocol/frontend-monorepo";
+const PR = 872;
+const RUN_ID = "claude-code-mac-20260909T095812Z-7c1a9e4213b0";
+const MINUTE = 60_000;
+
+/** A 40-character lowercase object id, deterministic and unique per index. */
+function hexOid(index) {
+  return index.toString(16).padStart(40, "0");
+}
+
+/**
+ * The fake reference server, re-keyed onto 40-hex object ids.
+ *
+ * The CLI refuses a `--token` that is not 40 lowercase hex before it touches
+ * any operation, so the offline suite has to produce object ids of the real
+ * shape. The commit map is re-keyed rather than the server rewritten: every
+ * compare-and-swap, parent and payload byte stays the fake server's own.
+ */
+function createHexRefServer(input = {}) {
+  const server = createFakeRefServer(input);
+  let created = 0;
+  const base = server.operations;
+  const operations = {
+    ...base,
+    async createStateCommit(ctx, parent, payload, timestamp) {
+      const commit = await base.createStateCommit(
+        ctx,
+        parent,
+        payload,
+        timestamp,
+      );
+      const stored = server.commits.get(commit.oid);
+      server.commits.delete(commit.oid);
+      const oid = hexOid(++created);
+      server.commits.set(oid, { ...stored, oid });
+      return { oid, treeOid: commit.treeOid };
+    },
+  };
+  return { ...server, operations };
+}
+
+function createFakeLabelOperations(server) {
+  const definitions = new Map();
+  return {
+    definitions,
+    async readLabel(_ctx, name) {
+      return definitions.get(name) ?? null;
+    },
+    async createLabel(_ctx, { name, color, description }) {
+      const label = {
+        name,
+        color: color ?? null,
+        description: description ?? null,
+      };
+      definitions.set(name, label);
+      return label;
+    },
+    async listIssueLabels(_ctx, number) {
+      return [...(server.labels.get(number) ?? [])];
+    },
+    async addLabel(_ctx, number, name) {
+      const present = server.hasLabel(number, name);
+      server.addLabel(number, name);
+      return present
+        ? { added: false, status: "already-present" }
+        : { added: true, status: "added" };
+    },
+    async removeLabel(_ctx, number, name) {
+      const removed = server.removeLabel(number, name);
+      return { removed, status: removed ? "removed" : "unchanged" };
+    },
+  };
+}
+
+const BASE_CLAIMS = Object.freeze({
+  schema: CONFIG_SCHEMAS.CLAIMS,
+  profile: "pr",
+  namespace: "refs/mento-claims/v1/pr",
+  scopeTemplate: "refs/mento-claims/v1/pr/{pr}",
+  ttlMinutes: 30,
+  renewMinutes: 10,
+  graceMinutes: 5,
+  label: "dependabot-prep:claimed",
+  package: { name: "@mento-protocol/issues", version: "0.1.0" },
+});
+
+function packageDocument(claims = {}) {
+  return {
+    schema: CONFIG_SCHEMAS.PACKAGE,
+    repository: REPOSITORY,
+    claims: { ...BASE_CLAIMS, ...claims },
+  };
+}
+
+function policyDocument(overrides = {}) {
+  return {
+    schema: CONFIG_SCHEMAS.POLICY,
+    repository: REPOSITORY,
+    workflow: { skill: "dependabot-prep", revision: "trusted-agent-v2" },
+    coordination: {
+      primitive: "github-ref-claims",
+      claims: { ...BASE_CLAIMS },
+      ...overrides.coordination,
+    },
+    ...overrides.document,
+  };
+}
+
+function temporaryDirectory() {
+  return mkdtempSync(join(tmpdir(), "mento-issues-cli-"));
+}
+
+function writeJson(directory, name, document) {
+  const path = join(directory, name);
+  writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`);
+  return path;
+}
+
+/** One CLI invocation, fully offline and fully captured. */
+async function invoke(argv, options = {}) {
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const exitCode = await runCli(argv, {
+    stdout: { write: (chunk) => stdoutChunks.push(chunk) },
+    stderr: { write: (chunk) => stderrChunks.push(chunk) },
+    env: options.env ?? { CLAUDECODE: "1" },
+    operations: options.operations,
+    stateRoot: options.stateRoot,
+    clock: options.clock,
+    spawn: options.spawn,
+    randomUUID: options.randomUUID,
+    random: options.random,
+    isProcessAlive: options.isProcessAlive,
+    packageIdentity: options.packageIdentity,
+    platform: "linux",
+  });
+  const stdout = stdoutChunks.join("");
+  const stderr = stderrChunks.join("");
+  const documents = stdout
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+  return {
+    exitCode,
+    stdout,
+    stderr,
+    documents,
+    document: documents[0] ?? null,
+    stderrDocuments: stderr
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line)),
+  };
+}
+
+/** A complete offline harness: config file, fake server, temp state root. */
+function harness(input = {}) {
+  const directory = temporaryDirectory();
+  const clock = createFakeClock(input.now ?? "2026-09-09T09:58:12.004Z");
+  const server = createHexRefServer({ clock });
+  const labels = createFakeLabelOperations(server);
+  const configPath = writeJson(
+    directory,
+    "config.json",
+    input.document ?? packageDocument(input.claims),
+  );
+  const options = {
+    stateRoot: join(directory, "state"),
+    clock,
+    operations: {
+      claims: input.operations ?? server.operations,
+      labels,
+      // Injected by default so the suite exercises the recorded login rather
+      // than the production reader's fallback. `gh: null` means "inject
+      // nothing", which is how the production wiring is proved.
+      gh:
+        input.gh === null
+          ? {}
+          : { readViewerLogin: async () => "chapati23", ...input.gh },
+    },
+    env: input.env ?? { CLAUDECODE: "1" },
+    ...input.options,
+  };
+  return {
+    directory,
+    clock,
+    server,
+    labels,
+    configPath,
+    options,
+    run: (argv, extra = {}) =>
+      invoke(withConfig(argv, configPath), { ...options, ...extra }),
+  };
+}
+
+/**
+ * Splice `--config <path>` before the first bare `--`.
+ *
+ * Exactly what the frontend wrapper does: a guarded child's argv must stay
+ * intact, so the flag can never be appended after the separator.
+ */
+function withConfig(argv, configPath) {
+  const separator = argv.indexOf("--");
+  if (separator === -1) return [...argv, "--config", configPath];
+  return [
+    ...argv.slice(0, separator),
+    "--config",
+    configPath,
+    ...argv.slice(separator),
+  ];
+}
+
+async function claimOnce(context, argv = []) {
+  return context.run(["claims", "claim", "--pr", String(PR), ...argv]);
+}
+
+test("the config loader accepts v1 and v4, rejects v3 by name and rejects unknown claims keys", async () => {
+  const packageConfig = normalizeConfigDocument(packageDocument());
+  assert.equal(packageConfig.schema, CONFIG_SCHEMAS.PACKAGE);
+  assert.equal(packageConfig.repository, REPOSITORY);
+  assert.equal(packageConfig.claims.namespace, "refs/mento-claims/v1/pr");
+  // AMENDMENTS §F: the optional keys arrive as documented defaults.
+  assert.equal(packageConfig.claims.maxTtlMinutes, 360);
+  assert.equal(packageConfig.claims.minRemainingSeconds, 360);
+  assert.equal(packageConfig.claims.allowOverrides, false);
+  assert.equal(packageConfig.lease.minRemainingMs, 360_000);
+
+  const policyConfig = normalizeConfigDocument(policyDocument());
+  assert.equal(policyConfig.schema, CONFIG_SCHEMAS.POLICY);
+  assert.equal(policyConfig.repository, REPOSITORY);
+  assert.deepEqual(policyConfig.claims.package, BASE_CLAIMS.package);
+
+  // C-9, the other direction: a policy naming a revision this package does not
+  // implement is a hard stop, not a downgrade to the last understood shape.
+  assert.throws(
+    () =>
+      normalizeConfigDocument(
+        policyDocument({
+          document: { workflow: { revision: "trusted-agent-v1" } },
+        }),
+      ),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.equal(error.code, "CLAIM_CONFIG_REVISION_MISMATCH");
+      return true;
+    },
+  );
+
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        ...policyDocument(),
+        schema: CONFIG_SCHEMAS.RETIRED_POLICY,
+      }),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.match(error.message, /dependabot-prep-policy:v3 is retired/u);
+      return true;
+    },
+  );
+
+  // AMENDMENTS §F removes `waitUnderGuard`, so it is now an unknown key.
+  assert.throws(
+    () => normalizeConfigDocument(packageDocument({ waitUnderGuard: true })),
+    (error) => {
+      assert.match(error.message, /Unknown key in claims: waitUnderGuard/u);
+      return true;
+    },
+  );
+
+  const directory = temporaryDirectory();
+  const accepted = await invoke([
+    "config",
+    "validate",
+    "--config",
+    writeJson(directory, "policy.json", policyDocument()),
+  ]);
+  assert.equal(accepted.exitCode, 0);
+  assert.equal(accepted.document.status, "ok");
+  assert.equal(accepted.document.config.valid, undefined);
+  assert.equal(accepted.document.valid, true);
+
+  const rejected = await invoke([
+    "config",
+    "show",
+    "--config",
+    writeJson(directory, "v3.json", {
+      ...policyDocument(),
+      schema: CONFIG_SCHEMAS.RETIRED_POLICY,
+    }),
+  ]);
+  assert.equal(rejected.exitCode, 3);
+  assert.equal(rejected.document.status, "config");
+});
+
+test("the config loader rejects a policy carrying lockPath without a claims block", async () => {
+  const withLockPath = {
+    schema: CONFIG_SCHEMAS.POLICY,
+    repository: REPOSITORY,
+    workflow: { revision: "trusted-agent-v2" },
+    coordination: {
+      lockPath: "/home/molt/state/dependabot-prep/active",
+      allWriters: "same-atomic-lock-before-writes",
+    },
+  };
+  assert.throws(
+    () => normalizeConfigDocument(withLockPath),
+    (error) => {
+      assert.equal(error.code, "CLAIM_CONFIG_RETIRED_COORDINATION");
+      assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.match(error.message, /no longer acquires that lock/u);
+      return true;
+    },
+  );
+
+  // `allWriters` alone is enough: the retired shape is either marker.
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        ...withLockPath,
+        coordination: { allWriters: "same-atomic-lock-before-writes" },
+      }),
+    (error) => {
+      assert.equal(error.code, "CLAIM_CONFIG_RETIRED_COORDINATION");
+      return true;
+    },
+  );
+
+  // A v4 document with neither marker and no claims is still refused, just not
+  // as a retired coordination shape.
+  assert.throws(
+    () =>
+      normalizeConfigDocument({
+        schema: CONFIG_SCHEMAS.POLICY,
+        repository: REPOSITORY,
+        workflow: { revision: "trusted-agent-v2" },
+        coordination: { primitive: "github-ref-claims" },
+      }),
+    (error) => {
+      assert.equal(error.code, "CLAIM_CONFIG");
+      assert.match(error.message, /must carry coordination\.claims/u);
+      return true;
+    },
+  );
+
+  const directory = temporaryDirectory();
+  const result = await invoke([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--config",
+    writeJson(directory, "retired.json", withLockPath),
+  ]);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.document.error.code, "CLAIM_CONFIG_RETIRED_COORDINATION");
+});
+
+test("the loader rejects renewMinutes twice over ttlMinutes, minRemainingSeconds at or above the renew window, a bad scopeTemplate and a version below the floor", async () => {
+  // The name is PLAN a5's and is kept for traceability, but AMENDMENTS §A
+  // removed the version floor entirely: the policy pins an EXACT version and
+  // `minimumVersion` does not exist. The version clause of this case now reads
+  // "the pin must be exact", and the floor-shaped pin is refused by name. The
+  // three arithmetic clauses are unchanged.
+  assert.throws(
+    () => normalizeConfigDocument(packageDocument({ renewMinutes: 20 })),
+    (error) => {
+      assert.match(error.message, /at least twice claims\.renewMinutes/u);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () =>
+      normalizeConfigDocument(packageDocument({ minRemainingSeconds: 600 })),
+    (error) => {
+      assert.match(error.message, /below the renew window of 600 seconds/u);
+      return true;
+    },
+  );
+
+  for (const scopeTemplate of [
+    "mento-claims/v1/pr/{pr}",
+    "refs/mento-claims/v1/pr/{pr}/{pr}",
+    "refs/mento-claims/v1/pr/fixed",
+    "refs/mento-claims/v2/pr/{pr}",
+  ]) {
+    assert.throws(
+      () => normalizeConfigDocument(packageDocument({ scopeTemplate })),
+      (error) => {
+        assert.equal(error.claimCode, "CLAIM_CONFIG");
+        return true;
+      },
+      `scopeTemplate ${scopeTemplate} must be refused`,
+    );
+  }
+
+  // AMENDMENTS §A retires the version floor: the policy pins an EXACT version
+  // and `minimumVersion` does not exist, so the version clause of this rule is
+  // now "the pin must be exact", and a floor-shaped pin is refused by name.
+  assert.throws(
+    () =>
+      normalizeConfigDocument(
+        packageDocument({
+          package: { name: "@mento-protocol/issues", minimumVersion: "0.1.0" },
+        }),
+      ),
+    (error) => {
+      assert.match(error.message, /minimumVersion does not exist/u);
+      return true;
+    },
+  );
+  for (const version of ["^0.1.0", "0.1", "latest", "0.1.0-rc.1"]) {
+    assert.throws(
+      () =>
+        normalizeConfigDocument(
+          packageDocument({
+            package: { name: "@mento-protocol/issues", version },
+          }),
+        ),
+      (error) => {
+        assert.match(error.message, /exact major\.minor\.patch version/u);
+        return true;
+      },
+      `version ${version} must be refused`,
+    );
+  }
+
+  // PLAN §2.18: the pinned name must be the package that loaded the document.
+  // A policy naming another package describes another tool's semantics, so
+  // nothing it says about namespaces or lease arithmetic can be trusted here.
+  const wrongName = harness({
+    claims: { package: { name: "@someone-else/issues", version: "0.1.0" } },
+  });
+  const refused = await wrongName.run(["claims", "read", "--pr", String(PR)], {
+    packageIdentity: { name: "@mento-protocol/issues", version: "0.1.0" },
+  });
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.status, "config");
+  assert.equal(refused.document.error.code, "CLAIM_CONFIG_PACKAGE_MISMATCH");
+  assert.equal(wrongName.server.calls.read.length, 0);
+
+  // A version drift is a warning, never a refusal: AMENDMENTS §A enforces the
+  // exact version where it is spawned (`pnpm --package=<name>@<version> dlx`),
+  // so a drift observed here is a stale dlx cache or a checkout bin run by
+  // hand, and deadlocking the run would be the worse outcome.
+  const drifted = harness();
+  const warned = await drifted.run(["claims", "read", "--pr", String(PR)], {
+    packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+  });
+  assert.equal(warned.exitCode, 0);
+  assert.deepEqual(
+    warned.document.warnings.map((warning) => warning.stage),
+    ["package-version"],
+  );
+  assert.match(warned.document.warnings[0].message, /0\.1\.0.*0\.2\.0/u);
+});
+
+test("the config rejects a package block without an exact version", async () => {
+  // This case replaces PLAN a5's "an installed version above the floor is
+  // accepted": AMENDMENTS §A removed the floor, so there is no ordering left
+  // to accept or refuse. What survives of the rule is the exactness of the
+  // pin, which is what this asserts.
+  for (const block of [
+    undefined,
+    null,
+    {},
+    { name: "@mento-protocol/issues" },
+    { name: "@mento-protocol/issues", version: "0.1.0", integrity: "sha512-x" },
+    { name: "-leading-dash", version: "0.1.0" },
+    { name: "@mento-protocol/issues", version: 1 },
+  ]) {
+    assert.throws(
+      () => normalizeConfigDocument(packageDocument({ package: block })),
+      (error) => {
+        assert.equal(error.claimCode, "CLAIM_CONFIG");
+        return true;
+      },
+      `package ${JSON.stringify(block ?? null)} must be refused`,
+    );
+  }
+
+  const directory = temporaryDirectory();
+  const result = await invoke([
+    "config",
+    "validate",
+    "--config",
+    writeJson(
+      directory,
+      "no-version.json",
+      packageDocument({ package: { name: "@mento-protocol/issues" } }),
+    ),
+  ]);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.document.status, "config");
+  assert.match(result.document.error.message, /exact major\.minor\.patch/u);
+
+  const accepted = normalizeConfigDocument(packageDocument());
+  assert.deepEqual(accepted.claims.package, {
+    name: "@mento-protocol/issues",
+    version: "0.1.0",
+  });
+});
+
+test("gated flags are refused without allowOverrides", async () => {
+  const refused = harness();
+  for (const flag of Object.keys(GATED_FLAGS)) {
+    const value = flag === "now" ? "2026-09-09T10:00:00.000Z" : "5";
+    const result = await refused.run([
+      "claims",
+      "read",
+      "--pr",
+      String(PR),
+      `--${flag}`,
+      value,
+    ]);
+    assert.equal(result.exitCode, 3, `--${flag} must be refused`);
+    assert.equal(result.document.status, "config");
+    assert.match(result.document.error.message, /allowOverrides/u);
+  }
+
+  const allowed = harness({ claims: { allowOverrides: true } });
+  const ttl = await allowed.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--ttl-minutes",
+    "40",
+    "--grace-minutes",
+    "6",
+    "--min-remaining-seconds",
+    "300",
+  ]);
+  assert.equal(ttl.exitCode, 0);
+
+  // `allowOverrides` permits changing the numbers, not leaving the floors:
+  // the merged lease runs through the same `assertLeaseInvariants` the config
+  // document does, so a gated flag can never buy a mutual-exclusion budget the
+  // policy's own validator would have refused.
+  const floors = [
+    [
+      ["--grace-minutes", "0"],
+      /graceMinutes must be an integer of at least 1/u,
+    ],
+    [
+      ["--min-remaining-seconds", "1"],
+      /minRemainingSeconds must be an integer of at least 30/u,
+    ],
+    [
+      ["--min-remaining-seconds", "60"],
+      /must cover the renew window of 600 seconds/u,
+    ],
+    [["--ttl-minutes", "5"], /at least twice claims\.renewMinutes/u],
+    [["--grace-minutes", "600"], /graceMinutes \(600\) must not exceed 60/u],
+  ];
+  for (const [flagPair, pattern] of floors) {
+    const refusedFloor = await allowed.run([
+      "claims",
+      "read",
+      "--pr",
+      String(PR),
+      ...flagPair,
+    ]);
+    assert.equal(
+      refusedFloor.exitCode,
+      3,
+      `${flagPair.join(" ")} must be refused`,
+    );
+    assert.equal(refusedFloor.document.status, "config");
+    assert.match(refusedFloor.document.error.message, pattern);
+  }
+
+  // A fractional lease minute is a grammar refusal, because the lease block it
+  // would write carries `ttlSeconds`, which the payload parser requires to be
+  // a safe integer: the CLI must never write a payload its own reader refuses.
+  const fractional = await allowed.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--ttl-minutes",
+    "0.001",
+  ]);
+  assert.equal(fractional.exitCode, 2);
+  assert.equal(fractional.document.status, "usage");
+  assert.match(
+    fractional.document.error.message,
+    /--ttl-minutes needs a non-negative integer/u,
+  );
+
+  // `--now` needs allowOverrides AND the environment variable.
+  const withoutVariable = await allowed.run(
+    ["claims", "read", "--pr", String(PR), "--now", "2026-09-09T10:00:00.000Z"],
+    { env: { CLAUDECODE: "1" } },
+  );
+  assert.equal(withoutVariable.exitCode, 3);
+  assert.match(
+    withoutVariable.document.error.message,
+    /MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE=1/u,
+  );
+
+  const withVariable = await allowed.run(
+    ["claims", "read", "--pr", String(PR), "--now", "2026-09-09T10:00:00.000Z"],
+    { env: { CLAUDECODE: "1", MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE: "1" } },
+  );
+  assert.equal(withVariable.exitCode, 0);
+});
+
+/** Every mutating command, with a well-formed argument vector. */
+function mutatingInvocations() {
+  const token = hexOid(1);
+  return [
+    ["claims claim", ["claims", "claim", "--pr", String(PR)]],
+    [
+      "claims renew",
+      [
+        "claims",
+        "renew",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+    ],
+    [
+      "claims takeover",
+      ["claims", "takeover", "--pr", String(PR), "--supersedes", token],
+    ],
+    [
+      "claims release",
+      [
+        "claims",
+        "release",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+    ],
+    [
+      "claims guard",
+      [
+        "claims",
+        "guard",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+        "--gate",
+        "push",
+        "--",
+        "node",
+        "--version",
+      ],
+    ],
+    ["claims family claim", ["claims", "family", "claim", "--prs", "872,880"]],
+    [
+      "claims family release",
+      [
+        "claims",
+        "family",
+        "release",
+        "--prs",
+        String(PR),
+        "--tokens",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+    ],
+    ["claims label ensure", ["claims", "label", "ensure"]],
+    [
+      "claims label reconcile",
+      ["claims", "label", "reconcile", "--pr", String(PR)],
+    ],
+  ];
+}
+
+test("every mutating command refuses under GITHUB_ACTIONS while reads still work", async () => {
+  const invocations = mutatingInvocations();
+  assert.deepEqual(
+    invocations.map(([key]) => key).sort(),
+    Object.entries(COMMAND_SPECS)
+      .filter(([, spec]) => spec.mutates === true)
+      .map(([key]) => key)
+      .sort(),
+    "the table must cover every mutating command",
+  );
+
+  const context = harness();
+  const env = { GITHUB_ACTIONS: "true", CLAUDECODE: "1" };
+  for (const [key, argv] of invocations) {
+    const result = await context.run(argv, { env });
+    assert.equal(result.exitCode, 3, `${key} must refuse under GITHUB_ACTIONS`);
+    // Guard's documents go to stderr, refusals included (AMENDMENTS §D).
+    const document = result.document ?? result.stderrDocuments[0];
+    assert.equal(document.status, "config");
+    assert.match(document.error.message, /never written from GitHub Actions/u);
+  }
+  assert.equal(context.server.calls.cas.length, 0, "no ref was written");
+  assert.equal(context.server.calls.commit.length, 0, "no commit was created");
+
+  for (const argv of [
+    ["claims", "read", "--pr", String(PR)],
+    ["claims", "list", "--prs", String(PR)],
+  ]) {
+    const read = await context.run(argv, {
+      env,
+      operations: {
+        ...context.options.operations,
+        gh: {
+          readPullRequestState: async (_options, number) => ({
+            number,
+            state: "open",
+            draft: false,
+            merged: false,
+            error: null,
+          }),
+        },
+      },
+    });
+    assert.equal(read.exitCode, 0, `${argv.join(" ")} must still work`);
+    assert.equal(read.document.status, "ok");
+  }
+});
+
+test("every mutating command refuses under CLAUDE_CODE_REMOTE unless allowCloudWriters is true", async () => {
+  const refusing = harness();
+  const env = { CLAUDE_CODE_REMOTE: "true", CLAUDECODE: "1" };
+  for (const [key, argv] of mutatingInvocations()) {
+    const result = await refusing.run(argv, { env });
+    assert.equal(result.exitCode, 3, `${key} must refuse in a cloud session`);
+    const document = result.document ?? result.stderrDocuments[0];
+    assert.match(document.error.message, /allowCloudWriters/u);
+  }
+  assert.equal(refusing.server.calls.cas.length, 0);
+
+  const allowing = harness({ claims: { allowCloudWriters: true } });
+  const claimed = await allowing.run(["claims", "claim", "--pr", String(PR)], {
+    env,
+  });
+  assert.equal(claimed.exitCode, 0);
+  assert.equal(claimed.document.status, "acquired");
+});
+
+test("every command emits exactly one parseable JSON document including every error path", async () => {
+  const context = harness();
+  const gh = {
+    readPullRequestState: async (_options, number) => ({
+      number,
+      state: "closed",
+      draft: false,
+      merged: true,
+      error: null,
+    }),
+    readServerDate: async () => context.clock.now(),
+    readTokenScopes: async () => ({ scopes: ["repo"], error: null }),
+    readViewerLogin: async () => "chapati23",
+  };
+  const withGh = { operations: { ...context.options.operations, gh } };
+
+  const acquired = await claimOnce(context);
+  assert.equal(acquired.exitCode, 0);
+  const token = acquired.document.claim.token;
+  const runId = acquired.document.claim.runId;
+
+  const markerJob = join(context.directory, "job.json");
+  writeFileSync(
+    markerJob,
+    JSON.stringify({
+      markerSchema: "dependabot-prep-comment:v2",
+      root: { restDatabaseId: 1, body: "Line one\nLine two\twith tab" },
+      operator: { id: 42, login: "a-b", type: "User" },
+      visibleBody: "Won't fix: the update is outside this repository policy.",
+      head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      decision: "wont-fix",
+      claim: "9c1f4e2a7b0d3856ef91a24c6d70b8f5e3a1c0d9",
+    }),
+  );
+
+  const cases = [
+    ["read", ["claims", "read", "--pr", String(PR)], {}],
+    ["list", ["claims", "list", "--prs", "872,880"], withGh],
+    [
+      "verify",
+      [
+        "claims",
+        "verify",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        runId,
+      ],
+      {},
+    ],
+    [
+      "verify not held",
+      [
+        "claims",
+        "verify",
+        "--pr",
+        String(PR),
+        "--token",
+        hexOid(999),
+        "--run-id",
+        runId,
+      ],
+      {},
+    ],
+    [
+      "renew",
+      [
+        "claims",
+        "renew",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        runId,
+        "--if-due",
+      ],
+      {},
+    ],
+    [
+      "adopt",
+      [
+        "claims",
+        "adopt",
+        "--pr",
+        String(PR),
+        "--candidate",
+        token,
+        "--operation-id",
+        "lock-nope",
+      ],
+      {},
+    ],
+    [
+      "label reconcile",
+      ["claims", "label", "reconcile", "--pr", String(PR)],
+      {},
+    ],
+    ["label ensure", ["claims", "label", "ensure"], {}],
+    ["doctor", ["claims", "doctor"], withGh],
+    ["config show", ["config", "show"], {}],
+    ["markers build", ["markers", "build", "--input", markerJob], {}],
+    ["unknown command", ["claims", "nope"], {}],
+    ["unknown flag", ["claims", "read", "--pr", String(PR), "--nope"], {}],
+    ["bad number", ["claims", "read", "--pr", "eight"], {}],
+    [
+      "release with a foreign run id",
+      [
+        "claims",
+        "release",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        "someone-else-1",
+      ],
+      {},
+    ],
+    ["contended claim", ["claims", "claim", "--pr", String(PR)], {}],
+  ];
+
+  for (const [name, argv, extra] of cases) {
+    const result = await context.run(argv, extra);
+    assert.equal(
+      result.documents.length,
+      1,
+      `${name} printed ${result.documents.length} documents on stdout`,
+    );
+    const document = result.document;
+    assert.equal(document.schema, "mento-issues-result:v1");
+    assert.equal(
+      document.exitCode,
+      result.exitCode,
+      `${name} exit code disagrees with its document`,
+    );
+    assert.equal(
+      STATUS_EXIT_CODES[document.status],
+      result.exitCode,
+      `${name} status ${document.status} disagrees with exit ${result.exitCode}`,
+    );
+    assert.ok(Array.isArray(document.warnings), `${name} lacks warnings`);
+    if (result.exitCode !== 0) {
+      assert.ok(document.error, `${name} lacks an error block`);
+      assert.equal(typeof document.error.advice, "string");
+    }
+  }
+
+  // The unknown-outcome path: the compare-and-swap lands and the
+  // acknowledgement is lost, then every reconciliation read fails.
+  const ambiguous = harness();
+  await claimOnce(ambiguous);
+  let reads = 0;
+  const flaky = {
+    ...ambiguous.server.operations,
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads > 2) throw new Error("read failed");
+      return ambiguous.server.operations.readClaimRef(...args);
+    },
+  };
+  // Two lost acknowledgements: the bootstrap's, which the second read still
+  // reconciles, and the acquire's, which no read can.
+  ambiguous.server.applyThenThrow("compareAndSwapRef", "response lost", 2);
+  const unknown = await ambiguous.run(["claims", "claim", "--pr", "880"], {
+    operations: { ...ambiguous.options.operations, claims: flaky },
+  });
+  assert.equal(unknown.documents.length, 1);
+  assert.equal(unknown.exitCode, 12);
+  assert.equal(unknown.document.status, "unknown-outcome");
+  assert.equal(unknown.document.error.recovery.doNotRetry, true);
+  assert.ok(unknown.document.error.recovery.candidate.oid);
+  assert.match(
+    unknown.document.next.adopt,
+    /claims adopt .*--from-state|--candidate/u,
+  );
+
+  // The candidate is recorded, so the documented recovery actually runs: the
+  // operation id that proves the commit is ours exists only in this process.
+  assert.ok(unknown.document.statePath, "the candidate is recorded");
+  const adopted = await ambiguous.run([
+    "claims",
+    "adopt",
+    "--pr",
+    "880",
+    "--from-state",
+  ]);
+  assert.equal(adopted.documents.length, 1);
+  assert.equal(adopted.exitCode, 0);
+  assert.equal(adopted.document.adopted, true);
+  assert.equal(
+    adopted.document.claim.token,
+    unknown.document.error.recovery.candidate.oid,
+  );
+
+  // Guard is the one exception: stdout belongs to the child, so guard's two
+  // documents go to stderr (AMENDMENTS §D).
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "summary-comment",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: recordingSpawn(0).spawn },
+  );
+  assert.equal(guarded.stdout, "", "guard writes nothing to stdout");
+  assert.equal(guarded.stderrDocuments.length, 2);
+  assert.equal(guarded.stderrDocuments[0].phase, "verdict");
+  assert.equal(guarded.stderrDocuments[1].phase, "final");
+  assert.equal(guarded.stderrDocuments[1].command, "claims.guard");
+});
+
+/**
+ * A spawn that records its calls and never starts a process.
+ *
+ * The stub child reports a `null` pid on purpose. Guard signals the child's
+ * process group with `process.kill(-pid, …)`, and a made-up pid on a stub
+ * would name some unrelated process group on the host.
+ */
+function recordingSpawn(exitCode = 0) {
+  const calls = [];
+  return {
+    calls,
+    spawn(command, args, options) {
+      calls.push({ command, args, options });
+      const child = new EventEmitter();
+      child.pid = null;
+      child.kill = () => true;
+      setImmediate(() => child.emit("exit", exitCode, null));
+      return child;
+    },
+  };
+}
+
+test("mutating commands refuse a missing or non-40-lowercase-hex token with exit 2 and zero operations", async () => {
+  const badTokens = [
+    "",
+    "0",
+    "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+    "claim-commit-1",
+    `${hexOid(1)}0`,
+    hexOid(1).slice(1),
+  ];
+  for (const token of badTokens) {
+    const context = harness();
+    const spawn = recordingSpawn(0);
+    for (const argv of [
+      [
+        "claims",
+        "renew",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+      [
+        "claims",
+        "release",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+      ["claims", "takeover", "--pr", String(PR), "--supersedes", token],
+      [
+        "claims",
+        "guard",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        RUN_ID,
+        "--gate",
+        "push",
+        "--",
+        "node",
+        "--version",
+      ],
+      [
+        "claims",
+        "family",
+        "release",
+        "--prs",
+        String(PR),
+        "--tokens",
+        token,
+        "--run-id",
+        RUN_ID,
+      ],
+    ]) {
+      const result = await context.run(argv, { spawn: spawn.spawn });
+      assert.equal(
+        result.exitCode,
+        2,
+        `${argv[1]} with token ${JSON.stringify(token)} must be exit 2`,
+      );
+      // Guard's documents go to stderr, refusals included: its stdout belongs
+      // to the child it did not spawn.
+      const document = result.document ?? result.stderrDocuments[0];
+      assert.equal(document.status, "usage");
+    }
+    assert.equal(context.server.calls.read.length, 0, "no read was issued");
+    assert.equal(context.server.calls.cas.length, 0, "no ref write was issued");
+    assert.equal(
+      context.server.calls.commit.length,
+      0,
+      "no commit was created",
+    );
+    assert.equal(spawn.calls.length, 0, "no child was spawned");
+  }
+
+  const missing = harness();
+  for (const argv of [
+    ["claims", "renew", "--pr", String(PR), "--run-id", RUN_ID],
+    ["claims", "release", "--pr", String(PR), "--run-id", RUN_ID],
+    ["claims", "takeover", "--pr", String(PR)],
+  ]) {
+    const result = await missing.run(argv);
+    assert.equal(result.exitCode, 2);
+    assert.match(result.document.error.message, /requires --/u);
+  }
+  assert.equal(missing.server.calls.read.length, 0);
+});
+
+test("the exit-code table matches the status table for every status and error class", async () => {
+  // Every claim code names a status, and every status names an exit code.
+  for (const [claimCode, status] of Object.entries(CLAIM_CODE_STATUSES)) {
+    assert.ok(
+      Object.hasOwn(STATUS_EXIT_CODES, status),
+      `${claimCode} names an unknown status ${status}`,
+    );
+  }
+  const classes = [
+    [new ClaimUsageError("usage"), 2, "usage"],
+    [new ClaimConfigError("config"), 3, "config"],
+    [new ClaimContendedError("contended"), 10, "contended"],
+    [new ClaimAlreadyHeldError("held"), 10, "already-held"],
+    [new ClaimNotExpiredError("live"), 10, "not-eligible"],
+    [new ClaimClockSkewError("skew"), 10, "clock-skew"],
+    [new ClaimExpiredError("expired"), 11, "expired"],
+    [new ClaimUnknownOutcomeError("unknown"), 12, "unknown-outcome"],
+    [new ClaimSupersededError("superseded"), 13, "superseded"],
+    [new ClaimNotHeldError("not held"), 14, "not-held"],
+    [new ClaimRenewRequiredError("renew"), 15, "renew-required"],
+    [new ClaimStaleError("stale"), 16, "stale"],
+    [new ClaimRefInvalidError("invalid"), 16, "stale"],
+    [new ClaimFamilyAbortedError("family"), 10, "family-aborted"],
+  ];
+  for (const [error, exitCode, status] of classes) {
+    assert.equal(statusForError(error), status, `${error.name} status`);
+    assert.equal(exitCodeForCliError(error), exitCode, `${error.name} exit`);
+    assert.equal(STATUS_EXIT_CODES[status], exitCode, `${status} table row`);
+  }
+
+  // A rollback release failure raises the family verdict from 10 to 16.
+  const partial = new ClaimFamilyAbortedError("family");
+  partial.partialClaim = true;
+  assert.equal(exitCodeForCliError(partial), 16);
+
+  // Transport and permission classes keep their own rows.
+  const transport = new Error("gh api timed out after 60000 ms");
+  transport.code = "GH_TIMEOUT";
+  assert.equal(statusForError(transport), "transport");
+  assert.equal(exitCodeForCliError(transport), 20);
+  const permission = new Error("HTTP 403");
+  permission.code = "GH_PERMISSION";
+  assert.equal(statusForError(permission), "permission");
+  assert.equal(exitCodeForCliError(permission), 21);
+
+  // And the live commands agree with the table.
+  const context = harness();
+  const acquired = await claimOnce(context);
+  assert.equal(acquired.exitCode, STATUS_EXIT_CODES[acquired.document.status]);
+  const token = acquired.document.claim.token;
+  const runId = acquired.document.claim.runId;
+
+  const contended = await claimOnce(context);
+  assert.equal(contended.exitCode, 10);
+  assert.equal(contended.document.status, "not-eligible");
+  assert.equal(contended.document.takeover.supersedes, token);
+
+  // Past `expiresAt` plus the configured grace, so the LOCK is takeable.
+  context.clock.advance(36 * MINUTE);
+  const expired = await claimOnce(context, ["--no-takeover"]);
+  assert.equal(expired.exitCode, 11);
+  assert.equal(expired.document.status, "expired");
+  assert.equal(expired.document.takeover.supersedes, token);
+
+  const takenOver = await claimOnce(context);
+  assert.equal(takenOver.exitCode, 0);
+  assert.equal(takenOver.document.status, "taken-over");
+
+  const superseded = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(superseded.exitCode, 13);
+  assert.equal(superseded.document.status, "superseded");
+});
+
+test("identity precedence is flag over env over detected and a missing runtime is refused", async () => {
+  const detected = harness();
+  const byDetection = await claimOnce(detected);
+  assert.equal(byDetection.document.claim.runtime, "claude-code");
+  assert.match(byDetection.document.claim.runId, /^claude-code-/u);
+
+  const byEnvironment = harness();
+  const fromEnv = await byEnvironment.run(
+    ["claims", "claim", "--pr", String(PR)],
+    {
+      env: {
+        CLAUDECODE: "1",
+        MENTO_CLAIM_RUNTIME: "codex",
+        MENTO_CLAIM_HOST: "giskard",
+      },
+    },
+  );
+  assert.equal(fromEnv.document.claim.runtime, "codex");
+  assert.equal(fromEnv.document.claim.host, "giskard");
+
+  const byFlag = harness();
+  const fromFlag = await byFlag.run(
+    [
+      "claims",
+      "claim",
+      "--pr",
+      String(PR),
+      "--runtime",
+      "openclaw",
+      "--host",
+      "molt",
+      "--login",
+      "chapati23",
+      "--agent",
+      "dependabot-prep",
+    ],
+    {
+      env: {
+        CLAUDECODE: "1",
+        MENTO_CLAIM_RUNTIME: "codex",
+        MENTO_CLAIM_HOST: "giskard",
+        MENTO_CLAIM_LOGIN: "someone-else",
+      },
+    },
+  );
+  assert.equal(fromFlag.document.claim.runtime, "openclaw");
+  assert.equal(fromFlag.document.claim.host, "molt");
+  assert.equal(fromFlag.document.claim.login, "chapati23");
+
+  // With no flag and no environment, the login is read once through gh.
+  let loginReads = 0;
+  const byGh = harness();
+  const fromGh = await byGh.run(["claims", "claim", "--pr", String(PR)], {
+    operations: {
+      ...byGh.options.operations,
+      gh: {
+        readViewerLogin: async () => {
+          loginReads += 1;
+          return "chapati23";
+        },
+      },
+    },
+  });
+  assert.equal(fromGh.document.claim.login, "chapati23");
+  assert.equal(loginReads, 1);
+
+  // C-1: a supplied run id is refused on every acquiring command, from either
+  // the flag or the environment, before anything is read.
+  const supplied = harness();
+  for (const [argv, env] of [
+    [
+      ["claims", "claim", "--pr", String(PR), "--run-id", RUN_ID],
+      { CLAUDECODE: "1" },
+    ],
+    [
+      ["claims", "claim", "--pr", String(PR)],
+      { CLAUDECODE: "1", MENTO_CLAIM_RUN_ID: RUN_ID },
+    ],
+    [
+      ["claims", "family", "claim", "--prs", "872,880", "--run-id", RUN_ID],
+      { CLAUDECODE: "1" },
+    ],
+    [
+      [
+        "claims",
+        "takeover",
+        "--pr",
+        String(PR),
+        "--supersedes",
+        hexOid(1),
+        "--run-id",
+        RUN_ID,
+      ],
+      { CLAUDECODE: "1" },
+    ],
+  ]) {
+    const result = await supplied.run(argv, { env });
+    assert.equal(result.exitCode, 2, `${argv.join(" ")} must be exit 2`);
+    assert.match(result.document.error.message, /generates its own run id/u);
+  }
+  assert.equal(supplied.server.calls.read.length, 0);
+
+  // A runtime that cannot be detected is refused rather than guessed.
+  const undetectable = harness();
+  const refused = await undetectable.run(
+    ["claims", "claim", "--pr", String(PR)],
+    {
+      env: {},
+    },
+  );
+  assert.equal(refused.exitCode, 3);
+  assert.match(
+    refused.document.error.message,
+    /runtime could not be detected/u,
+  );
+  assert.equal(undetectable.server.calls.cas.length, 0);
+
+  // The state file is the last identity guard: our run id under a different
+  // live process refuses the renew (C-1, defence in depth).
+  const guarded = harness();
+  const claimed = await claimOnce(guarded);
+  const statePath = claimed.document.statePath;
+  const entry = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(entry.schema, "mento-issues-lease:v1");
+  assert.equal(entry.runId, claimed.document.claim.runId);
+  writeFileSync(statePath, JSON.stringify({ ...entry, pid: process.pid + 1 }));
+  const duplicated = await guarded.run(
+    [
+      "claims",
+      "renew",
+      "--pr",
+      String(PR),
+      "--token",
+      claimed.document.claim.token,
+      "--run-id",
+      claimed.document.claim.runId,
+    ],
+    { isProcessAlive: () => true },
+  );
+  assert.equal(duplicated.exitCode, 3);
+  assert.match(duplicated.document.error.message, /under live process/u);
+});
+
+test("two contexts with one login and different run ids contend", async () => {
+  const shared = harness();
+  const first = await shared.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--login",
+    "chapati23",
+    "--host",
+    "mac",
+    "--runtime",
+    "claude-code",
+  ]);
+  assert.equal(first.exitCode, 0);
+  assert.equal(first.document.claim.login, "chapati23");
+
+  const second = await shared.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--login",
+    "chapati23",
+    "--host",
+    "giskard",
+    "--runtime",
+    "openclaw",
+  ]);
+  assert.equal(second.exitCode, 10, "one login, two runs, still contended");
+  assert.equal(second.document.status, "not-eligible");
+  assert.notEqual(
+    second.document.error.details.owner,
+    first.document.claim.runId,
+  );
+  assert.equal(second.document.current.oid, first.document.claim.token);
+  // Ownership is decided by run id; the shared login decides nothing.
+  assert.equal(
+    second.document.error.details.holder.login,
+    first.document.claim.login,
+  );
+  assert.equal(
+    shared.server.casLedger.filter((entry) => entry.applied).length,
+    2,
+  );
+});
+
+test("doctor reports a measured clock offset and warns above half the budget", async () => {
+  const context = harness();
+  const budgetMs = 5 * MINUTE + 360_000;
+
+  const inBudget = await context.run(["claims", "doctor"], {
+    operations: {
+      ...context.options.operations,
+      gh: {
+        // GitHub's clock reads one minute behind this host's.
+        readServerDate: async () => context.clock.now() - MINUTE,
+        readTokenScopes: async () => ({
+          scopes: ["repo", "workflow"],
+          error: null,
+        }),
+      },
+    },
+  });
+  assert.equal(inBudget.exitCode, 0);
+  assert.equal(inBudget.document.clock.offsetMs, MINUTE);
+  assert.equal(inBudget.document.clock.budgetMs, budgetMs);
+  assert.equal(inBudget.document.clock.warn, false);
+  assert.equal(inBudget.document.clock.measured, true);
+  assert.deepEqual(inBudget.document.scopes, ["repo", "workflow"]);
+  assert.equal(inBudget.document.version, "0.1.0");
+  assert.match(inBudget.document.exitCodes.rule, /^0 proceed; 10\/11\/14\/15/u);
+  assert.deepEqual(inBudget.document.warnings, []);
+
+  const overHalf = await context.run(["claims", "doctor"], {
+    operations: {
+      ...context.options.operations,
+      gh: {
+        readServerDate: async () => context.clock.now() - (budgetMs / 2 + 1000),
+        readTokenScopes: async () => ({ scopes: [], error: null }),
+      },
+    },
+  });
+  assert.equal(
+    overHalf.exitCode,
+    0,
+    "a skewed clock reports, it does not refuse",
+  );
+  assert.equal(overHalf.document.clock.warn, true);
+  assert.equal(
+    overHalf.document.warnings.some((warning) =>
+      /check NTP before writing claims/u.test(warning.message),
+    ),
+    true,
+  );
+
+  // A measurement that cannot be taken is a warning, never a refusal.
+  const unmeasurable = await context.run(["claims", "doctor"], {
+    operations: {
+      ...context.options.operations,
+      gh: {
+        readServerDate: async () => {
+          throw new Error("gh api --include rate_limit failed");
+        },
+        readTokenScopes: async () => ({ scopes: null, error: "no credential" }),
+      },
+    },
+  });
+  assert.equal(unmeasurable.exitCode, 0);
+  assert.equal(unmeasurable.document.clock.measured, false);
+  assert.equal(unmeasurable.document.clock.offsetMs, null);
+  assert.equal(unmeasurable.document.warnings.length, 2);
+});
+
+test("a claim with no injected gh reader still reaches the production login read, after the environment refusals", async () => {
+  // With no `operations.gh` the CLI defaults to the memoized
+  // `gh api user --jq .login`, so a real claim records a login instead of the
+  // `null` an unwired reader produced. The read runs under the CLI's own
+  // environment, which here points `gh` at a host the pins refuse, so the
+  // attempt is proved without a subprocess ever reaching GitHub.
+  const context = harness({ gh: null });
+  const claimed = await context.run(["claims", "claim", "--pr", String(PR)], {
+    env: { CLAUDECODE: "1", GH_HOST: "ghe.example.com" },
+  });
+  assert.equal(claimed.exitCode, 0, "a login is recorded, never required");
+  assert.equal(claimed.document.claim.login, null);
+  const attempted = claimed.document.warnings.find(
+    (warning) => warning.stage === "read-login",
+  );
+  assert.ok(attempted, "the production reader ran and reported why it failed");
+  assert.equal(attempted.code, "GH_ENV");
+
+  // And the environment refusals still precede it: under GITHUB_ACTIONS the
+  // command exits 3 with no login read at all.
+  let loginReads = 0;
+  const refused = harness({
+    gh: {
+      readViewerLogin: async () => {
+        loginReads += 1;
+        return "chapati23";
+      },
+    },
+  });
+  const inActions = await refused.run(["claims", "claim", "--pr", String(PR)], {
+    env: { CLAUDECODE: "1", GITHUB_ACTIONS: "true" },
+  });
+  assert.equal(inActions.exitCode, 3);
+  assert.equal(loginReads, 0, "no gh call before the environment refusal");
+  assert.equal(refused.server.calls.cas.length, 0);
+
+  // An injected reader is recorded on the claim, which is the ordinary path.
+  const wired = harness();
+  const withLogin = await claimOnce(wired);
+  assert.equal(withLogin.document.claim.login, "chapati23");
+});
+
+test("a second live guard under one run id exits 3 and guard follows its own rotated token", async () => {
+  // Guard is the publish gate, so two invocations under one run id and token
+  // would each verify held and each spawn a publishing child; the reference
+  // cannot tell them apart, and their renew ticks merely contend as
+  // `owner-renewed`. `renew` has carried this defence since C-1; guard needs
+  // it more.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const guardArgv = (childArgv) => [
+    "claims",
+    "guard",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "push",
+    "--",
+    ...childArgv,
+  ];
+
+  const first = await context.run(guardArgv(["node", "--version"]), {
+    spawn: recordingSpawn(0).spawn,
+  });
+  assert.equal(first.exitCode, 0);
+
+  // The state entry guard wrote names this process; a *different* live process
+  // holding the same run id is the refusal.
+  const statePath = context.options.stateRoot;
+  assert.ok(statePath.length > 0);
+  const entryPath = claimed.document.statePath;
+  const entry = JSON.parse(readFileSync(entryPath, "utf8"));
+  assert.equal(entry.runId, runId);
+  writeFileSync(entryPath, JSON.stringify({ ...entry, pid: process.pid + 1 }));
+
+  const spawned = recordingSpawn(0);
+  const duplicate = await context.run(guardArgv(["node", "--version"]), {
+    spawn: spawned.spawn,
+    isProcessAlive: () => true,
+  });
+  assert.equal(duplicate.exitCode, 3);
+  assert.equal(spawned.calls.length, 0, "the second guard never spawned");
+  assert.match(
+    duplicate.stderrDocuments.at(-1).error.message,
+    /under live process/u,
+  );
+
+  // A guard renew rotates the token, and the state file has to follow it: an
+  // `adopt --from-state` after a crash would otherwise read the acquire's
+  // candidate, find this run's own newer LOCK, and report exit 13.
+  const fresh = harness();
+  const acquired = await claimOnce(fresh);
+  const acquireToken = acquired.document.claim.token;
+  fresh.clock.advance(25 * MINUTE);
+  const renewing = await fresh.run(
+    guardArgv(["node", "--version"]).map((word) =>
+      word === token
+        ? acquireToken
+        : word === runId
+          ? acquired.document.claim.runId
+          : word,
+    ),
+    { spawn: recordingSpawn(0).spawn },
+  );
+  assert.equal(renewing.exitCode, 0);
+  const rotated = renewing.stderrDocuments.at(-1).renews.at(-1).token;
+  assert.notEqual(rotated, acquireToken, "the guarded renew rotated the token");
+  const followed = JSON.parse(
+    readFileSync(acquired.document.statePath, "utf8"),
+  );
+  assert.equal(followed.token, rotated, "the state file followed the head");
+  assert.equal(followed.runId, acquired.document.claim.runId);
+});
+
+test("the policy's requiredBefore and advisoryBefore decide which gates are mandatory", async () => {
+  // Both keys were validated and then ignored: the split lived only in the
+  // module constant. The fail-open direction is the dangerous one — an
+  // operator who promotes a purpose to mandatory in policy got no gate and no
+  // warning while believing the policy was the control surface.
+  const promoted = harness({
+    claims: {
+      requiredBefore: ["branch-push", "review-request", "summary-comment"],
+      advisoryBefore: ["inline-reply", "long-wait"],
+    },
+  });
+  const claimed = await claimOnce(promoted);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  await promoted.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ]);
+
+  const spawned = recordingSpawn(0);
+  const refused = await promoted.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "summary-comment",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: spawned.spawn },
+  );
+  assert.equal(refused.exitCode, 14, "summary-comment now gates the write");
+  assert.equal(spawned.calls.length, 0);
+  assert.equal(refused.stderrDocuments.at(-1).gate, "mandatory");
+
+  // `claims verify` reads the same table, so `--advisory` is refused on the
+  // promoted purpose exactly as it is on a built-in mandatory one.
+  const verified = await promoted.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "summary-comment",
+    "--advisory",
+  ]);
+  assert.equal(verified.exitCode, 2);
+  assert.match(
+    verified.document.error.message,
+    /--advisory is refused with the mandatory gate summary-comment/u,
+  );
+
+  // Demoting works the same way, in the other direction.
+  const demoted = harness({
+    claims: {
+      requiredBefore: ["review-request"],
+      advisoryBefore: [
+        "branch-push",
+        "summary-comment",
+        "inline-reply",
+        "long-wait",
+      ],
+    },
+  });
+  const demotedClaim = await claimOnce(demoted);
+  await demoted.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    demotedClaim.document.claim.token,
+    "--run-id",
+    demotedClaim.document.claim.runId,
+  ]);
+  const ran = recordingSpawn(0);
+  const spawnedAnyway = await demoted.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      demotedClaim.document.claim.token,
+      "--run-id",
+      demotedClaim.document.claim.runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: ran.spawn },
+  );
+  assert.equal(spawnedAnyway.exitCode, 0);
+  assert.equal(ran.calls.length, 1, "an advisory push spawns anyway");
+  assert.equal(spawnedAnyway.stderrDocuments[0].gate, "advisory");
+
+  // A list that leaves a purpose with no kind at all is a refusal: the two
+  // lists are the control surface, so they must be complete.
+  assert.throws(
+    () =>
+      normalizeConfigDocument(
+        packageDocument({ advisoryBefore: ["inline-reply"] }),
+      ),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.match(error.message, /missing: summary-comment, long-wait/u);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      normalizeConfigDocument(
+        packageDocument({
+          requiredBefore: ["branch-push", "review-request", "long-wait"],
+        }),
+      ),
+    /both as required and as advisory/u,
+  );
+});
+
+test("the loader refuses the issue-board profile, a foreign markerRevision and a repository that is not owner/name", async () => {
+  // `issue-board`'s canonical scope needs a Project owner and number that no
+  // command line supplies, so a config selecting it used to validate and then
+  // fail every claims command with an unactionable exit 2.
+  assert.throws(
+    () => normalizeConfigDocument(packageDocument({ profile: "issue-board" })),
+    (error) => {
+      assert.equal(error.code, "CLAIM_CONFIG_PROFILE_UNSUPPORTED");
+      assert.match(error.message, /library drop-in profile/u);
+      return true;
+    },
+  );
+  // And it refuses the overrides it cannot honour rather than dropping them.
+  assert.throws(
+    () => claimProfile("issue-board", { namespace: "refs/elsewhere/v1" }),
+    /honours no overrides/u,
+  );
+
+  // `markerRevision` selected the marker grammar in name only: any string
+  // loaded, and nothing read the value.
+  for (const revision of ["banana", "v3", "V2", 2]) {
+    assert.throws(
+      () =>
+        normalizeConfigDocument(packageDocument({ markerRevision: revision })),
+      /markerRevision must be one of v1, v2/u,
+      `markerRevision ${JSON.stringify(revision)} must be refused`,
+    );
+  }
+
+  // The repository is spliced into a gh path unencoded, so `.` and `..` are
+  // refused as either half.
+  for (const repository of ["../..", "./x", "owner/..", "../name", ".."]) {
+    assert.throws(
+      () =>
+        normalizeConfigDocument({
+          ...packageDocument(),
+          repository,
+        }),
+      /repository as owner\/name/u,
+      `repository ${repository} must be refused`,
+    );
+  }
+  assert.equal(
+    normalizeConfigDocument(packageDocument()).repository,
+    REPOSITORY,
+  );
+});
+
+test("gh.timeoutSeconds is the default --timeout-seconds overrides, and markers honours the pinned revision", async () => {
+  const context = harness({
+    document: { ...packageDocument(), gh: { timeoutSeconds: 7 } },
+  });
+  const seen = [];
+  const observing = {
+    ...context.server.operations,
+    async readClaimRef(ctx, refName, scope) {
+      seen.push(ctx.options.timeoutMs);
+      return context.server.operations.readClaimRef(ctx, refName, scope);
+    },
+  };
+  await context.run(["claims", "read", "--pr", String(PR)], {
+    operations: { ...context.options.operations, claims: observing },
+  });
+  assert.deepEqual(seen, [7_000], "the config supplies the default");
+
+  seen.length = 0;
+  await context.run(
+    ["claims", "read", "--pr", String(PR), "--timeout-seconds", "11"],
+    { operations: { ...context.options.operations, claims: observing } },
+  );
+  assert.deepEqual(seen, [11_000], "the flag wins");
+
+  // `markers` takes no config of its own, but `--config` is a global flag and
+  // was accepted and ignored. A repository pinning v1 markers must not get v2
+  // bytes because a job file asked for them.
+  const directory = temporaryDirectory();
+  const v1Config = writeJson(
+    directory,
+    "v1.json",
+    packageDocument({ markerRevision: "v1" }),
+  );
+  const job = writeJson(directory, "job.json", {
+    markerSchema: "dependabot-prep-comment:v2",
+    root: { restDatabaseId: 1, body: "root" },
+    operator: { id: 42, login: "chapati23", type: "User" },
+    visibleBody: "body",
+    head: "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22",
+    decision: "fixed",
+    claim: "0123456789abcdef0123456789abcdef01234567",
+  });
+  const clash = await invoke([
+    "markers",
+    "build",
+    "--input",
+    job,
+    "--config",
+    v1Config,
+  ]);
+  assert.equal(clash.exitCode, 3);
+  assert.equal(clash.document.status, "config");
+  assert.equal(clash.document.error.code, "CLAIM_CONFIG_MARKER_REVISION");
+
+  const agreeing = await invoke([
+    "markers",
+    "build",
+    "--input",
+    job,
+    "--config",
+    writeJson(directory, "v2.json", packageDocument()),
+  ]);
+  assert.equal(agreeing.exitCode, 0);
+});
+
+test("the state file is stamped from the injected clock", async () => {
+  // The one artefact the CLI persists was stamped from `new Date()`, the only
+  // real-clock read in `src` outside a default-clock factory, so `--now` and
+  // the fake clock did not reach it.
+  const context = harness({ now: "2026-09-09T09:58:12.004Z" });
+  const claimed = await claimOnce(context);
+  const entry = JSON.parse(readFileSync(claimed.document.statePath, "utf8"));
+  assert.equal(entry.updatedAt, "2026-09-09T09:58:12.004Z");
+
+  context.clock.advance(11 * MINUTE);
+  await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    claimed.document.claim.token,
+    "--run-id",
+    claimed.document.claim.runId,
+  ]);
+  const renewed = JSON.parse(readFileSync(claimed.document.statePath, "utf8"));
+  assert.equal(renewed.updatedAt, "2026-09-09T10:09:12.004Z");
+});
+
+test("the printed adopt recovery for an unknown outcome runs verbatim and adopts", async () => {
+  // The exit-12 document's `next.adopt` is the whole self-service recovery, so
+  // it is asserted by running the exact string the CLI printed. Without
+  // `--run-id` that line adopts as `runId: null`, which no LOCK can match, and
+  // the landed candidate comes back as exit 13 — "treat work in flight as
+  // forfeit" — for a claim this run actually holds.
+  const context = harness();
+  await claimOnce(context);
+
+  let reads = 0;
+  const flaky = {
+    ...context.server.operations,
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads > 2) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+  context.server.applyThenThrow("compareAndSwapRef", "response lost", 2);
+  const unknown = await context.run(["claims", "claim", "--pr", "880"], {
+    operations: { ...context.options.operations, claims: flaky },
+  });
+  assert.equal(unknown.exitCode, 12);
+  const printed = unknown.document.next.adopt;
+  const candidate = unknown.document.error.recovery.candidate;
+  assert.match(printed, /--run-id [^\s]+/u, "the line carries the run id");
+
+  const argv = printed.split(/\s+/u).slice(1);
+  const adopted = await invoke(argv, context.options);
+  assert.equal(adopted.exitCode, 0, printed);
+  assert.equal(adopted.document.adopted, true);
+  assert.equal(adopted.document.reason, "landed");
+  assert.equal(adopted.document.claim.token, candidate.oid);
+
+  // The same line with the run id removed, on a host that never recorded the
+  // candidate, refuses with exit 2 — fix the command — instead of answering
+  // exit 13 about a claim nobody proved was lost.
+  const withoutRunId = argv.filter(
+    (item, index) => item !== "--run-id" && argv[index - 1] !== "--run-id",
+  );
+  const elsewhere = await invoke(withoutRunId, {
+    ...context.options,
+    stateRoot: join(context.directory, "another-host"),
+  });
+  assert.equal(elsewhere.exitCode, 2);
+  assert.equal(elsewhere.document.status, "usage");
+  assert.match(elsewhere.document.error.message, /without a run id/u);
+
+  // On the host that created the candidate the state file supplies it, so a
+  // line pasted without the flag still recovers rather than refusing.
+  const fromRecord = await invoke(withoutRunId, context.options);
+  assert.equal(fromRecord.exitCode, 0);
+  assert.equal(fromRecord.document.adopted, true);
+});
+
+test("--now is refused on guard and on a mandatory verify gate", async () => {
+  // `--now` freezes the runtime clock, and guard reads that clock for both
+  // halves of its job: the fence proof's `remainingMs` and the `--if-due`
+  // renew that keeps the proof true. A frozen instant forges the fence and
+  // silently disables the renew timer, which is the same lie
+  // `requireFencedWrite` already refuses for `--dry-run`.
+  const context = harness({ claims: { allowOverrides: true } });
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const env = { CLAUDECODE: "1", MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE: "1" };
+  const frozen = "2026-09-09T09:59:12.004Z";
+  const spawned = recordingSpawn(0);
+
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--now",
+      frozen,
+      "--",
+      "node",
+      "--version",
+    ],
+    { env, spawn: spawned.spawn },
+  );
+  assert.equal(guarded.exitCode, 2);
+  assert.equal(spawned.calls.length, 0, "no child under a supplied clock");
+  assert.match(
+    guarded.stderrDocuments.at(-1).error.message,
+    /A supplied clock proves no fence, so claims guard refuses --now/u,
+  );
+
+  const fenced = await context.run(
+    [
+      "claims",
+      "verify",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--now",
+      frozen,
+    ],
+    { env },
+  );
+  assert.equal(fenced.exitCode, 2);
+  assert.match(
+    fenced.document.error.message,
+    /the mandatory gate push refuses --now/u,
+  );
+
+  // An advisory gate and every read keep the flag: there it is a test
+  // affordance, not a forged fence.
+  const advisory = await context.run(
+    [
+      "claims",
+      "verify",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "wait",
+      "--now",
+      frozen,
+    ],
+    { env },
+  );
+  assert.equal(advisory.exitCode, 0);
+
+  const read = await context.run(
+    ["claims", "read", "--pr", String(PR), "--now", frozen],
+    { env },
+  );
+  assert.equal(read.exitCode, 0);
+});
