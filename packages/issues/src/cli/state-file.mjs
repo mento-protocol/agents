@@ -16,7 +16,7 @@
  * store that can fail a claim would be worse than no store at all.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -215,15 +215,25 @@ export function createStateStore(input) {
      * reclaim is the part that has to be exclusive too. Removing the slot and
      * creating it again is two steps: two guards that both read the same dead
      * holder would both remove and both create, and the second removal deletes
-     * the first guard's *fresh* slot rather than the stale one it read. Three
+     * the first guard's *fresh* slot rather than the stale one it read. Five
      * things close that:
      *
      * 1. a `.reclaim` lock, created with `wx`, so only one guard reclaims;
-     * 2. a second liveness check under that lock, so a guard that reclaimed
+     * 2. an abandoned lock taken over by one atomic `renameSync` and a fresh
+     *    `wx` create, never by proceeding while it is left where it lies:
+     *    ignoring it put two guards inside the reclaim body owning nothing,
+     *    which is the whole race back again;
+     * 3. a second liveness check under that lock, so a guard that reclaimed
      *    first and is now running is seen;
-     * 3. `renameSync` rather than `rmSync` for the stale slot itself, which
+     * 4. `renameSync` rather than `rmSync` for the stale slot itself, which
      *    exactly one guard can win — every loser gets `ENOENT` instead of
-     *    silently deleting a slot somebody else owns.
+     *    silently deleting a slot somebody else owns;
+     * 5. an identity check on both sides of that rename. The rename is atomic
+     *    but says nothing about *which* file it moved, so the moved file is
+     *    compared with the slot this reservation inspected under the lock, and
+     *    the slot created in its place is read back and checked for this
+     *    reservation's own `nonce`. A mismatch is refused, and a slot moved by
+     *    mistake is put back.
      *
      * The reclaim lock is advisory over a slot file that is itself only
      * host-local defence in depth. The reference is the mutual-exclusion
@@ -240,6 +250,10 @@ export function createStateStore(input) {
     reserveGuardSlot(number, runId) {
       const path = guardSlotPathFor(number, runId);
       const reclaimPath = `${path}.reclaim`;
+      // This reservation's identity, written into every file it creates. It is
+      // what makes "the slot I now hold" answerable after a rename that only
+      // ever reported *that* it moved a file, never which one.
+      const nonce = randomUUID();
       const release = () => {
         try {
           rmSync(path, { force: true });
@@ -253,6 +267,7 @@ export function createStateStore(input) {
         number,
         runId,
         pid,
+        nonce,
         reservedAt: new Date(clock.now()).toISOString(),
       };
       const create = (target) => {
@@ -269,10 +284,28 @@ export function createStateStore(input) {
           return null;
         }
       };
-      const readSlot = () => {
-        const parsed = readDocument(path);
+      const readSlotAt = (target) => {
+        const parsed = readDocument(target);
         return parsed?.schema === GUARD_SLOT_SCHEMA ? parsed : null;
       };
+      const readSlot = () => readSlotAt(path);
+      /**
+       * A slot's identity, for comparing one read with a later one.
+       *
+       * `nonce` alone answers it for every slot this version writes; the rest
+       * keeps a slot written by an older build comparable rather than equal to
+       * everything else. `null` for an absent or unreadable slot, and never
+       * equal to another `null`: the caller checks for it explicitly.
+       */
+      const slotIdentity = (slot) =>
+        slot == null
+          ? null
+          : JSON.stringify([
+              slot.nonce ?? null,
+              slot.pid ?? null,
+              slot.runId ?? null,
+              slot.reservedAt ?? null,
+            ]);
       const refuse = (message, holder = null) => ({
         path,
         reserved: false,
@@ -328,9 +361,24 @@ export function createStateStore(input) {
           );
         }
         // A reclaim is a handful of syscalls, so a lock older than the maximum
-        // age was abandoned by a guard that died holding it. Taking it needs no
-        // second exclusive create: the rename below is what decides the winner,
-        // and this guard simply does not own the lock file it found.
+        // age was abandoned by a guard that died holding it. Taking it over is
+        // itself exclusive: `renameSync` moves it aside for exactly one guard,
+        // every loser gets `ENOENT`, and the winner then creates its own lock
+        // with `wx`. Ignoring the abandoned file and proceeding put two guards
+        // inside the reclaim body at once, each owning nothing — the very race
+        // the lock exists to prevent.
+        const takenLock = `${reclaimPath}.abandoned.${pid}.${nonce}`;
+        try {
+          renameSync(reclaimPath, takenLock);
+          rmSync(takenLock, { force: true });
+          create(reclaimPath);
+          holdsReclaimLock = true;
+        } catch (takeoverError) {
+          return refuse(
+            `The abandoned reclaim lock ${reclaimPath} could not be taken over: ${firstLine(takeoverError)}`,
+            holder,
+          );
+        }
       }
 
       try {
@@ -344,12 +392,45 @@ export function createStateStore(input) {
             current,
           );
         }
+        const inspected = slotIdentity(current);
+        if (inspected == null) {
+          // Gone or unreadable under the lock. Neither is evidence that this
+          // reservation may take the slot, and there is nothing left to
+          // compare the rename against.
+          return refuse(
+            `The guard slot ${path} could not be read under the reclaim lock ${reclaimPath}`,
+            holder,
+          );
+        }
         // Exactly one guard can rename the stale slot away; every other one
         // fails with `ENOENT` rather than deleting a fresh slot it never read.
-        const taken = `${path}.stale.${pid}`;
+        const taken = `${path}.stale.${pid}.${nonce}`;
         renameSync(path, taken);
+        if (slotIdentity(readSlotAt(taken)) !== inspected) {
+          // The rename moved a file this reservation never inspected, so its
+          // owner still believes it holds the slot. Put it back and refuse.
+          if (!existsSync(path)) {
+            try {
+              renameSync(taken, path);
+            } catch {
+              // Left where it lies rather than deleted: a slot that may still
+              // be somebody's is never removed on this path.
+            }
+          }
+          return refuse(
+            `The guard slot ${path} changed under the reclaim lock and was left to its owner`,
+            holder,
+          );
+        }
         rmSync(taken, { force: true });
         create(path);
+        const owned = readSlot();
+        if (owned?.nonce !== nonce) {
+          return refuse(
+            `The reclaimed guard slot ${path} does not carry this reservation's nonce`,
+            owned,
+          );
+        }
         return { path, reserved: true, holder, message: null, release };
       } catch (error) {
         return refuse(

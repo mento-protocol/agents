@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -95,7 +95,9 @@ test("every JS entry point loads", async () => {
       );
       continue;
     }
-    const module = await import(packagePath(target));
+    // A file URL, not a path: an absolute Windows path is read as the `c:`
+    // URL scheme and refused with `ERR_UNSUPPORTED_ESM_URL_SCHEME`.
+    const module = await import(pathToFileURL(packagePath(target)).href);
     assert.ok(
       Object.keys(module).length > 0,
       `${subpath} exports nothing at all`,

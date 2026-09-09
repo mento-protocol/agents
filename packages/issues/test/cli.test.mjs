@@ -2746,6 +2746,152 @@ test("two guards reclaiming one stale slot interleave through the reclaim lock",
   const abandoned = inFlight.reserveGuardSlot(PR, runId);
   assert.equal(abandoned.reserved, true);
   assert.equal(JSON.parse(readFileSync(slotPath, "utf8")).pid, process.pid);
+  assert.equal(
+    existsSync(`${slotPath}.reclaim`),
+    false,
+    "the taken-over lock is released too",
+  );
+});
+
+test("an abandoned reclaim lock is taken over exclusively, never merely ignored", () => {
+  // The hole an expired lock opened. Two guards that both read the same
+  // abandoned `.reclaim` file both proceeded owning nothing, so both ran the
+  // reclaim body at once: C read the stale slot, B reclaimed it and created
+  // its FRESH slot, and C's rename then moved B's fresh slot aside and created
+  // its own. Both reserved and both would have spawned a publishing child.
+  //
+  // The seam is the liveness check *under* the reclaim lock, which fires
+  // exactly between C's second slot read and its rename — the instant the
+  // interleaving needs. No timing, no sleep.
+  const context = harness();
+  const runId = RUN_ID;
+  const stalePid = process.pid + 1;
+  const storeFor = (isProcessAlive) =>
+    createStateStore({
+      repository: REPOSITORY,
+      root: context.options.stateRoot,
+      clock: context.clock,
+      isProcessAlive,
+    });
+  const liveness = (candidate) => candidate !== stalePid;
+  const guardB = storeFor(liveness);
+  const slotPath = guardB.guardSlotPathFor(PR, runId);
+  const reclaimPath = `${slotPath}.reclaim`;
+  mkdirSync(dirname(slotPath), { recursive: true });
+  writeFileSync(
+    slotPath,
+    `${JSON.stringify({
+      schema: GUARD_SLOT_SCHEMA,
+      repository: REPOSITORY,
+      number: PR,
+      runId,
+      pid: stalePid,
+      reservedAt: "2026-09-09T09:00:00.000Z",
+    })}\n`,
+  );
+  // A lock its holder died with, older than the maximum age.
+  writeFileSync(
+    reclaimPath,
+    `${JSON.stringify({
+      schema: GUARD_SLOT_SCHEMA,
+      pid: stalePid,
+      reservedAt: new Date(
+        context.clock.now() - GUARD_RECLAIM_LOCK_MAX_AGE_MS - 1,
+      ).toISOString(),
+    })}\n`,
+  );
+
+  let reservedByB = null;
+  let livenessCalls = 0;
+  const guardC = storeFor((candidate) => {
+    livenessCalls += 1;
+    // The second call is the one under the reclaim lock.
+    if (livenessCalls === 2 && reservedByB === null) {
+      reservedByB = guardB.reserveGuardSlot(PR, runId);
+    }
+    return liveness(candidate);
+  });
+
+  const reservedByC = guardC.reserveGuardSlot(PR, runId);
+  assert.equal(
+    [reservedByB.reserved, reservedByC.reserved].filter(Boolean).length,
+    1,
+    "exactly one guard may hold the slot",
+  );
+  // C took the abandoned lock over atomically, so B met a lock that is now
+  // live rather than a lock nobody owned.
+  assert.equal(reservedByC.reserved, true);
+  assert.equal(reservedByB.reserved, false);
+  assert.match(reservedByB.message, /Another guard is reclaiming/u);
+  assert.equal(
+    existsSync(reclaimPath),
+    false,
+    "the winner releases the lock it took over",
+  );
+  assert.equal(JSON.parse(readFileSync(slotPath, "utf8")).pid, process.pid);
+});
+
+test("a guard slot that changes between the read and the rename is refused, not stolen", () => {
+  // Belt to the reclaim lock's braces: the rename is atomic but says nothing
+  // about *which* file it moved, so the slot is compared with the one this
+  // reservation inspected, and the slot it creates is read back and checked
+  // for its own nonce. Anything else fails closed rather than moving a guard's
+  // live slot out from under it.
+  const context = harness();
+  const runId = RUN_ID;
+  const stalePid = process.pid + 1;
+  const store0 = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store0.guardSlotPathFor(PR, runId);
+  mkdirSync(dirname(slotPath), { recursive: true });
+  writeFileSync(
+    slotPath,
+    `${JSON.stringify({
+      schema: GUARD_SLOT_SCHEMA,
+      repository: REPOSITORY,
+      number: PR,
+      runId,
+      pid: stalePid,
+      reservedAt: "2026-09-09T09:00:00.000Z",
+    })}\n`,
+  );
+  const foreign = {
+    schema: GUARD_SLOT_SCHEMA,
+    repository: REPOSITORY,
+    number: PR,
+    runId,
+    pid: stalePid,
+    nonce: "a-slot-this-reservation-never-read",
+    reservedAt: "2026-09-09T10:00:00.000Z",
+  };
+
+  let livenessCalls = 0;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+    isProcessAlive: (candidate) => {
+      livenessCalls += 1;
+      // Between the read under the lock and the rename that follows it.
+      if (livenessCalls === 2) {
+        writeFileSync(slotPath, `${JSON.stringify(foreign)}\n`);
+      }
+      return candidate !== stalePid;
+    },
+  });
+
+  const result = store.reserveGuardSlot(PR, runId);
+  assert.equal(result.reserved, false);
+  assert.match(result.message, /changed under the reclaim lock/u);
+  assert.deepEqual(
+    JSON.parse(readFileSync(slotPath, "utf8")),
+    foreign,
+    "the slot this reservation never read is put back",
+  );
+  assert.equal(existsSync(`${slotPath}.reclaim`), false);
 });
 
 test("releasing a claim twice is idempotent", async () => {

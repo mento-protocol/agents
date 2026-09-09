@@ -973,6 +973,98 @@ test("an Authorization value is redacted by position, whatever shape the credent
   assert.equal(redactSecrets(`candidate ${oid}`), `candidate ${oid}`);
 });
 
+test("the live stderr tap carries the Authorization context across chunks and the flush", async () => {
+  // Positional redaction needs the header and its value in one string, and the
+  // tap used to split them. It forwarded everything up to the trailing run of
+  // token characters, so `Authorization: token <40 hex>` in a single chunk with
+  // no trailing separator left as `Authorization: token ` now and the bare
+  // credential on the flush, where nothing named it a credential any more. A
+  // header and its value split across two chunks leaked the same way. The
+  // error message beside the tap was redacted throughout, which is what hid it.
+  // A 40-hex value in the one position that makes it a secret. Named for the
+  // position rather than for what it stands in for: `gitleaks` reads a
+  // credential-shaped identifier beside a high-entropy string as a finding.
+  const headerValue = "3f0a1b2c3d4e5f60718293a4b5c6d7e8f9012345";
+  const oid = "9f1c0d3a5b7e2408d6f1a3c5e7092b4d6f8a0c22";
+
+  /** Feed chunks to a live tap and return everything it received. */
+  const tap = async (chunks) => {
+    const sink = [];
+    const spawn = createFakeSpawn((child) => {
+      for (const chunk of chunks) child.stderr.emit("data", chunk);
+      child.emit("close", 1, null);
+    });
+    await runGh(["api", "user"], {
+      env: { PATH: "/usr/bin" },
+      spawn,
+      stderrSink: (chunk) => sink.push(chunk),
+    }).then(
+      () => assert.fail("a non-zero exit must reject"),
+      () => {},
+    );
+    const text = sink.join("");
+    assert.equal(text.includes(headerValue), false, `leaked: ${text}`);
+    return text;
+  };
+
+  // One chunk, no trailing separator: the credential is only ever flushed.
+  assert.equal(
+    await tap([`Authorization: token ${headerValue}`]),
+    "Authorization: token [redacted-github-token]",
+  );
+
+  // The header in one chunk, its value in the next. The token run at the end
+  // of `Authorization: token ` is empty, so the old filter held nothing back
+  // and forwarded the prefix on its own; `Bearer ` behaves the same way.
+  assert.equal(
+    await tap(["Authorization: token ", `${headerValue}\n`]),
+    "Authorization: token [redacted-github-token]\n",
+  );
+  assert.equal(
+    await tap(["Authorization: Bearer ", headerValue]),
+    "Authorization: Bearer [redacted-github-token]",
+  );
+
+  // A `Basic` value ends in `=`, which is not a token character either, so the
+  // old filter forwarded its second half the moment it arrived.
+  assert.equal(
+    await tap(["Authorization: Basic dXNl", "cjpwYXNzd29yZA==\n"]),
+    "Authorization: Basic [redacted-github-token]\n",
+  );
+
+  // Split anywhere, including inside the header word and mid-credential.
+  assert.equal(
+    await tap([
+      "gh: request\nAuthoriz",
+      "ation:  Bearer ",
+      headerValue.slice(0, 9),
+      `${headerValue.slice(9)} sent\n`,
+    ]),
+    "gh: request\nAuthorization:  Bearer [redacted-github-token] sent\n",
+  );
+
+  // A 40-hex oid in an ordinary position survives, flushed or not: redacting
+  // one would erase the package's central diagnostic.
+  assert.equal(
+    await tap([`fatal: bad object ${oid}\n`]),
+    `fatal: bad object ${oid}\n`,
+  );
+  assert.equal(await tap([`candidate ${oid}`]), `candidate ${oid}`);
+  assert.equal(
+    await tap(["candidate ", oid.slice(0, 7), oid.slice(7)]),
+    `candidate ${oid}`,
+  );
+
+  // An `Authorization` value longer than the hold-back cap is redacted with
+  // what has arrived and the rest of the run is dropped, never forwarded in
+  // clear. The line that follows it still reaches the tap.
+  const enormous = "z".repeat(900);
+  const dropped = await tap([`Authorization: token ${enormous}`, " tail\n"]);
+  assert.equal(dropped.includes("zzz"), false, `leaked: ${dropped}`);
+  assert.match(dropped, /^Authorization: token \[redacted-github-token\]/u);
+  assert.match(dropped, /tail\n$/u);
+});
+
 test("the repository splitter requires exactly two non-empty components", () => {
   assert.deepEqual(splitRepo("owner/name"), {
     owner: "owner",

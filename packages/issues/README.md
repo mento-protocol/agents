@@ -53,16 +53,16 @@ belongs to the child it spawns, so its own documents go to stderr.
 
 ### Global flags
 
-| Flag                                        | Meaning                                                                        |
-| ------------------------------------------- | ------------------------------------------------------------------------------ |
-| `--config <path>`                           | the policy or package config; required for every `claims` command              |
-| `--json`                                    | the only output mode; accepted for explicitness                                |
-| `--dry-run`                                 | plan and print; performs no write and no label call                            |
-| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                        |
-| `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                    |
-| `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                             |
-| `--state <path>`                            | state-file root                                                                |
-| `--run-id <id>`                             | required except on `claim`, `takeover` and `family claim`, which **reject** it |
+| Flag                                        | Meaning                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--config <path>`                           | the policy or package config; required for every `claims` command                                                                                                                                                                                                                                    |
+| `--json`                                    | the only output mode; accepted for explicitness                                                                                                                                                                                                                                                      |
+| `--dry-run`                                 | plan and print; performs no write and no label call                                                                                                                                                                                                                                                  |
+| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                                                                                                                                                                                                                                              |
+| `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                                                                                                                                                                                                                                          |
+| `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                   |
+| `--state <path>`                            | state-file root                                                                                                                                                                                                                                                                                      |
+| `--run-id <id>`                             | required by `renew`, `release`, `verify`, `guard` and `family release`; **rejected** by `claim`, `takeover` and `family claim`, which generate their own; `adopt` resolves it from the flag, from `--from-state` or from this host's state entry; `read`, `list`, `label` and `doctor` never need it |
 
 Gated flags need `allowOverrides: true` in the loaded config, or they exit 3:
 `--ttl-minutes`, `--grace-minutes`, `--min-remaining-seconds`, and `--now <iso>`

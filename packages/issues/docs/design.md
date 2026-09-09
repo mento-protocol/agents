@@ -796,8 +796,15 @@ the error message, `error.args` and the dry-run notice verbatim. Every
 diagnostic argv is redacted before it is quoted, so one choke point covers
 every message, hint and notice, and each error carries a redacted `safeArgv`
 alongside the raw argv the child was given. Live stderr is redacted before it
-reaches `stderrSink`, holding back a trailing run of token characters so a
-secret split across two chunks is rejoined rather than printed in halves.
+reaches `stderrSink`, holding back both a trailing run of token characters and
+an `Authorization` header whose value has not ended, so a secret split across
+two chunks is rejoined rather than printed in halves. Holding only the token
+run was not enough: positional redaction needs the header and its credential in
+one string, and `Authorization: token <40 hex>` with no trailing separator left
+as the prefix now and the bare credential on the flush, where nothing named it
+a credential any more. A value longer than the hold-back cap is redacted with
+what has arrived and the rest of its run dropped, rather than forwarded in
+clear.
 
 The token rules stay narrow — GitHub's own `gh[pousr]_` and `github_pat_`
 prefixes — because a rule wide enough for a classic 40-hex token would erase
@@ -1077,8 +1084,20 @@ starting together both read the previous, dead pid, both pass
 `assertNoLiveDuplicateRunId`, both overwrite the entry, and both spawn a
 publishing child. The slot is held for the child's lifetime and released on
 every exit path; a slot whose recorded pid is dead is reclaimed under an
-exclusive reclaim lock rather than wedging the host. It fails closed — a slot
-that cannot be created is not evidence that nobody is publishing. Like the
+exclusive reclaim lock rather than wedging the host.
+
+That reclaim is exclusive from end to end, the recovery from a lock a guard
+died holding included. An expired lock is **taken over** by one atomic
+`renameSync` and a fresh `wx` create, never by proceeding while the abandoned
+file lies where it is: two guards that both read the same expired lock both
+entered the reclaim body owning nothing, and the second one's rename then moved
+the first one's _fresh_ slot aside, so both reserved and both would have
+spawned. The rename of the stale slot is atomic but reports only _that_ it
+moved a file, so the file it moved is compared with the slot this reservation
+read under the lock, and the slot created in its place is read back and checked
+for this reservation's own `nonce`. Either mismatch refuses, and a slot moved
+by mistake is put back. It fails closed throughout — a slot that cannot be
+created, read or proved is not evidence that nobody is publishing. Like the
 state entry it is host-local defence in depth, and the reference remains the
 mutual-exclusion authority.
 

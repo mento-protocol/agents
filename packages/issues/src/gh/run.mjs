@@ -155,26 +155,54 @@ function writeToStderr(text) {
 /** The characters a GitHub token is made of, so a run of them may still be one. */
 const SECRET_TAIL_PATTERN = /[A-Za-z0-9_]*$/u;
 
+/**
+ * An `Authorization` header at the very end of the buffer, value or no value.
+ *
+ * `redactSecrets` redacts an `Authorization` value by **position**, so it needs
+ * the header word and the credential in one string. This is what recognizes a
+ * header whose credential has not arrived — or has not ended — yet, so the
+ * whole of it is held back rather than forwarded ahead of its own value.
+ */
+const PENDING_AUTHORIZATION_PATTERN =
+  /authorization[ \t]*:[ \t]*(?:(?:bearer|token|basic)[ \t]*)?\S*$/iu;
+
 /** Longest tail held back while the rest of a possible token is awaited. */
 const STDERR_SINK_HOLD_BACK_MAX_CHARS = 512;
 
 /**
- * Redact a live stderr tap without losing a token split across two chunks.
+ * Redact a live stderr tap without losing a credential split across chunks.
  *
  * `redactSecrets` matches a whole token, so redacting each chunk on its own
  * would miss one that straddles a chunk boundary. This filter forwards only the
- * redacted text up to the last character that cannot continue a token, and
- * holds the trailing run of token characters back until the next chunk or the
- * flush. The hold-back is capped at `STDERR_SINK_HOLD_BACK_MAX_CHARS`, so a
- * stream with no separator forwards its tail instead of growing without bound;
- * a single token longer than that cap is the one case this cannot rejoin, and
- * no GitHub token shape comes close to it.
+ * redacted text up to the last character that cannot belong to a credential,
+ * and holds the rest back until the next chunk or the flush. Two things are
+ * held:
+ *
+ *   - the trailing run of token characters, which is what rejoins a `ghp_…`
+ *     split across two chunks;
+ *   - an `Authorization` header at the end of the buffer together with as much
+ *     of its value as has arrived. Holding only the token run was the leak:
+ *     `Authorization: token <40 hex>` in one chunk with no trailing separator
+ *     forwarded `Authorization: token ` immediately and flushed the bare
+ *     credential afterwards, where positional redaction no longer had a header
+ *     to key on and no pattern matches a 40-hex string on purpose. The same
+ *     went for `Authorization: Bearer ` and its value in the next chunk, whose
+ *     token run is empty.
+ *
+ * The hold-back is capped at `STDERR_SINK_HOLD_BACK_MAX_CHARS`. A token run
+ * over the cap is forwarded rather than grown without bound, as before; an
+ * `Authorization` value over the cap is redacted with what has arrived and the
+ * rest of that run is dropped, because forwarding its tail in clear is the one
+ * thing this filter exists to prevent.
  *
  * @param {(chunk: string) => void} sink the caller's tap.
  * @returns {{write: (chunk: string) => void, flush: () => void}}
  */
 function createStderrSinkFilter(sink) {
   let pending = "";
+  // Set once an over-long `Authorization` value has been redacted: the rest of
+  // that credential is dropped, up to the whitespace that ends it.
+  let droppingCredential = false;
   const forward = (text) => {
     if (text.length === 0) return;
     try {
@@ -183,17 +211,46 @@ function createStderrSinkFilter(sink) {
       // A failing log sink never changes the command's outcome.
     }
   };
+  const consume = (isFinal) => {
+    if (droppingCredential) {
+      const end = /\s/u.exec(pending);
+      if (!end) {
+        pending = "";
+        return;
+      }
+      droppingCredential = false;
+      pending = pending.slice(end.index);
+    }
+    if (isFinal) {
+      forward(redactSecrets(pending));
+      pending = "";
+      return;
+    }
+    const header = PENDING_AUTHORIZATION_PATTERN.exec(pending);
+    const tail = SECRET_TAIL_PATTERN.exec(pending)[0];
+    let holdFrom = pending.length - tail.length;
+    if (header && header.index < holdFrom) holdFrom = header.index;
+    if (pending.length - holdFrom > STDERR_SINK_HOLD_BACK_MAX_CHARS) {
+      if (header && header.index === holdFrom) {
+        // Redact the header with the part of its value that has arrived, then
+        // drop the remainder of the run rather than print it.
+        forward(redactSecrets(pending));
+        pending = "";
+        droppingCredential = true;
+        return;
+      }
+      holdFrom = pending.length;
+    }
+    forward(redactSecrets(pending.slice(0, holdFrom)));
+    pending = pending.slice(holdFrom);
+  };
   return {
     write(chunk) {
       pending += chunk;
-      const tail = SECRET_TAIL_PATTERN.exec(pending)[0];
-      const held = tail.length > STDERR_SINK_HOLD_BACK_MAX_CHARS ? "" : tail;
-      forward(redactSecrets(pending.slice(0, pending.length - held.length)));
-      pending = held;
+      consume(false);
     },
     flush() {
-      forward(redactSecrets(pending));
-      pending = "";
+      consume(true);
     },
   };
 }
