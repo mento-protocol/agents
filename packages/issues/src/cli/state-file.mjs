@@ -19,6 +19,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -245,9 +246,28 @@ export function createStateStore(input) {
      * and never by age. Age was the second half of the same defect: a guard
      * merely slow, paused past some maximum, was treated as abandoned and lost
      * its exclusivity to a guard that arrived later, and both then reclaimed.
-     * A dead owner is displaced by one atomic `renameSync` plus a fresh `wx`
-     * create, so exactly one guard can take an abandoned lock over and the host
-     * is still never wedged by a file nobody owns.
+     *
+     * The takeover itself **moves the lock aside first and reads it after**.
+     * Reading first and renaming after left a window in which a newcomer took
+     * the same dead lock over, and the rename then moved that newcomer's
+     * *fresh* lock aside on the strength of a corpse's identity. So the moved
+     * file is the one that decides: if it is not exactly the dead owner that
+     * was inspected — same pid, same nonce — it is put straight back with
+     * `link` plus `unlink`, which fails with `EEXIST` rather than replacing a
+     * third guard's fresh lock the way `rename` silently would, and the
+     * reservation refuses. A file that cannot be put back is left where it is
+     * and named in the refusal: deleting a lock this reservation never owned is
+     * the worse outcome. Only the inspected corpse is removed and replaced by
+     * this reservation's own `wx` create, so the host is still never wedged by
+     * a file nobody owns.
+     *
+     * **Holding the lock is re-checked before every mutation and once after
+     * the slot is created**: the lock path must exist and carry this
+     * reservation's nonce. A reservation that lost its lock stops there, having
+     * touched nothing — no rename, no create, no restore — because by then
+     * another guard may legitimately own the slot, and moving its file aside is
+     * damage no later check can undo. A slot is reserved only when the check
+     * *after* the create passed and the created slot carries this nonce.
      *
      * Under that lock, the reclaim itself uses `renameSync` rather than
      * `rmSync` for the stale slot — exactly one caller can win it, and every
@@ -256,7 +276,9 @@ export function createStateStore(input) {
      * says nothing about *which* file it moved, so the moved file is compared
      * with the slot this reservation inspected, and the slot created in its
      * place is read back and checked for this reservation's own `nonce`. A
-     * mismatch is refused, and a slot moved by mistake is put back.
+     * mismatch is refused, and a slot moved by mistake is put back — while the
+     * lock is still held, and otherwise left where it is and named as the
+     * refusal's `orphan`.
      *
      * The lock is advisory over a slot file that is itself only host-local
      * defence in depth. The reference is the mutual-exclusion authority, here
@@ -325,10 +347,14 @@ export function createStateStore(input) {
               slot.runId ?? null,
               slot.reservedAt ?? null,
             ]);
-      const refuse = (message, holder = null) => ({
+      const refuse = (message, holder = null, orphan = null) => ({
         path,
         reserved: false,
         holder,
+        // A file this reservation moved aside and could not put back. It is
+        // named here and in the message so an operator can inspect it; nothing
+        // deletes a file whose owner cannot be proved.
+        orphan,
         message,
         release,
       });
@@ -349,49 +375,114 @@ export function createStateStore(input) {
       };
       const inFlight = (owned) =>
         `A reservation of the guard slot ${path} is in flight: process ${owned?.pid ?? "<unreadable>"} holds ${reservationLockPath}`;
+      const readLockAt = (target) => {
+        const parsed = readJsonDocument(target);
+        return parsed?.schema === GUARD_LOCK_SCHEMA ? parsed : null;
+      };
+      /** A lock's identity: which process took it, and which reservation. */
+      const lockIdentity = (owned) =>
+        owned == null
+          ? null
+          : JSON.stringify([
+              owned.pid ?? null,
+              owned.nonce ?? null,
+              owned.acquiredAt ?? null,
+            ]);
+      // Does this reservation still hold the mutex *right now*? Every slot
+      // mutation asks first, and one asks again afterwards. A holder whose
+      // mutex was taken from it must touch nothing: that is what stops a guard
+      // resuming into a world where another guard already owns the slot.
+      const holdsMutex = () => readLockAt(reservationLockPath)?.nonce === nonce;
+      const lostMutex = (orphan = null) =>
+        `This reservation no longer holds the reservation lock ${reservationLockPath}; it stopped without touching the guard slot ${path}${orphan ? ` and left ${orphan} for inspection` : ""}`;
       const takeReservationLock = () => {
         try {
           create(reservationLockPath, lockDocument);
-          return { held: true, message: null, holder: null };
+          return { held: true, message: null, holder: null, orphan: null };
         } catch (error) {
           if (error?.code !== "EEXIST") {
             return {
               held: false,
               holder: null,
+              orphan: null,
               message: `The reservation lock ${reservationLockPath} could not be created: ${firstLine(error)}`,
             };
           }
         }
-        const parsed = readJsonDocument(reservationLockPath);
-        const owned = parsed?.schema === GUARD_LOCK_SCHEMA ? parsed : null;
+        const owned = readLockAt(reservationLockPath);
         const ownerPid = owned?.pid ?? null;
         // Age never displaces an owner; only death does. A lock this store
         // cannot read has no owner to prove dead, so it is treated as held.
         if (ownerPid == null || isProcessAlive(ownerPid)) {
-          return { held: false, holder: owned, message: inFlight(owned) };
+          return {
+            held: false,
+            holder: owned,
+            orphan: null,
+            message: inFlight(owned),
+          };
         }
-        // The owner is gone. Exactly one guard may take the lock over: the
-        // rename decides which, and every loser gets `ENOENT`.
+        // The owner is gone — but "gone" was read a moment ago, and a newcomer
+        // can take the same lock over in between. So the lock is moved aside
+        // FIRST and read AFTER: whatever this reservation now holds is the
+        // file it will act on. Exactly one contender wins the rename, and
+        // every loser gets `ENOENT`.
+        const inspected = lockIdentity(owned);
         const abandoned = `${reservationLockPath}.abandoned.${pid}.${nonce}`;
+        onReserveStep("mutex-inspected");
         try {
           renameSync(reservationLockPath, abandoned);
-          rmSync(abandoned, { force: true });
-          create(reservationLockPath, lockDocument);
-          return { held: true, message: null, holder: null };
         } catch (error) {
           return {
             held: false,
             holder: owned,
+            orphan: null,
+            message: `The reservation lock ${reservationLockPath} of dead process ${ownerPid} could not be taken over: ${firstLine(error)}`,
+          };
+        }
+        onReserveStep("mutex-moved");
+        const moved = readLockAt(abandoned);
+        if (lockIdentity(moved) !== inspected) {
+          // Not the corpse this reservation inspected: a newcomer's live lock,
+          // moved by mistake. Put it straight back — with `link`, not
+          // `rename`, because `rename` replaces its destination silently and
+          // would delete a third guard's fresh lock.
+          try {
+            linkSync(abandoned, reservationLockPath);
+            rmSync(abandoned, { force: true });
+            return {
+              held: false,
+              holder: moved,
+              orphan: null,
+              message: `The reservation lock ${reservationLockPath} was replaced while it was being taken over, by process ${moved?.pid ?? "<unreadable>"}; it has been put back untouched`,
+            };
+          } catch (error) {
+            // The path is occupied again, so there is nowhere to put it back.
+            // Leaving the file is the lesser harm: deleting it would destroy a
+            // lock this reservation never owned.
+            return {
+              held: false,
+              holder: moved,
+              orphan: abandoned,
+              message: `The reservation lock ${reservationLockPath} was replaced while it was being taken over and could not be put back (${firstLine(error)}); ${abandoned} is left for inspection`,
+            };
+          }
+        }
+        try {
+          rmSync(abandoned, { force: true });
+          create(reservationLockPath, lockDocument);
+          return { held: true, message: null, holder: null, orphan: null };
+        } catch (error) {
+          return {
+            held: false,
+            holder: owned,
+            orphan: null,
             message: `The reservation lock ${reservationLockPath} of dead process ${ownerPid} could not be taken over: ${firstLine(error)}`,
           };
         }
       };
       const releaseReservationLock = () => {
         try {
-          const owned = readJsonDocument(reservationLockPath);
-          if (owned?.nonce === nonce) {
-            rmSync(reservationLockPath, { force: true });
-          }
+          if (holdsMutex()) rmSync(reservationLockPath, { force: true });
         } catch {
           // A lock left behind is taken over by the next guard, which proves
           // this process dead before it touches anything.
@@ -399,10 +490,12 @@ export function createStateStore(input) {
       };
 
       const lock = takeReservationLock();
-      if (!lock.held) return refuse(lock.message, lock.holder);
+      if (!lock.held) return refuse(lock.message, lock.holder, lock.orphan);
 
       let holder = null;
       try {
+        // Before the first mutation, as before every one of them.
+        if (!holdsMutex()) return refuse(lostMutex(), lock.holder);
         let created = false;
         try {
           create(path);
@@ -415,10 +508,14 @@ export function createStateStore(input) {
           }
         }
         if (created) {
-          if (readSlot()?.nonce !== nonce) {
+          // And once after it: a slot is reserved only when the mutex that
+          // authorized creating it was still this reservation's afterwards.
+          if (!holdsMutex()) return refuse(lostMutex(path));
+          const owned = readSlot();
+          if (owned?.nonce !== nonce) {
             return refuse(
               `The guard slot ${path} does not carry this reservation's nonce`,
-              readSlot(),
+              owned,
             );
           }
           return { path, reserved: true, holder: null, message: null, release };
@@ -437,6 +534,11 @@ export function createStateStore(input) {
 
         const inspected = slotIdentity(holder);
         onReserveStep("slot-inspected");
+        // The reclaim's first mutation. A reservation that was paused here
+        // long enough to lose its mutex renames nothing: by now another guard
+        // may own this very path, and moving its slot aside is exactly the
+        // damage no later check can undo.
+        if (!holdsMutex()) return refuse(lostMutex(), holder);
         // Exactly one guard can rename the stale slot away; every other one
         // fails with `ENOENT` rather than deleting a fresh slot it never read.
         const taken = `${path}.stale.${pid}.${nonce}`;
@@ -444,22 +546,30 @@ export function createStateStore(input) {
         onReserveStep("slot-renamed");
         if (slotIdentity(readSlotAt(taken)) !== inspected) {
           // The rename moved a file this reservation never inspected, so its
-          // owner still believes it holds the slot. Put it back and refuse.
-          if (!existsSync(path)) {
+          // owner still believes it holds the slot. Put it back — but only
+          // while the mutex is still ours, since restoring is a mutation too.
+          if (holdsMutex() && !existsSync(path)) {
             try {
               renameSync(taken, path);
+              return refuse(
+                `The guard slot ${path} changed under the reservation lock and was put back for its owner`,
+                holder,
+              );
             } catch {
               // Left where it lies rather than deleted: a slot that may still
               // be somebody's is never removed on this path.
             }
           }
           return refuse(
-            `The guard slot ${path} changed under the reservation lock and was left to its owner`,
+            `The guard slot ${path} changed under the reservation lock and could not be put back; ${taken} is left for inspection`,
             holder,
+            taken,
           );
         }
+        if (!holdsMutex()) return refuse(lostMutex(taken), holder, taken);
         rmSync(taken, { force: true });
         create(path);
+        if (!holdsMutex()) return refuse(lostMutex(path), holder);
         const owned = readSlot();
         if (owned?.nonce !== nonce) {
           return refuse(

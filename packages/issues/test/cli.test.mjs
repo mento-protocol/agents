@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2702,17 +2703,24 @@ function guardSlotFixture(context) {
     );
     return slotPath;
   };
-  const seedReservationLock = (pid, acquiredAt) => {
+  const lockDocumentFor = (pid, acquiredAt, nonce = `nonce-of-${pid}`) => ({
+    schema: GUARD_LOCK_SCHEMA,
+    repository: REPOSITORY,
+    number: PR,
+    runId,
+    pid,
+    nonce,
+    acquiredAt,
+  });
+  const seedReservationLock = (pid, acquiredAt, nonce) => {
     mkdirSync(dirname(slotPath), { recursive: true });
+    const document = lockDocumentFor(pid, acquiredAt, nonce);
     writeFileSync(
       paths.reservationLockPath,
-      `${JSON.stringify({
-        schema: GUARD_LOCK_SCHEMA,
-        repository: REPOSITORY,
-        pid,
-        acquiredAt,
-      })}\n`,
+      `${JSON.stringify(document)}\n`,
+      {},
     );
+    return document;
   };
   return {
     runId,
@@ -2720,8 +2728,11 @@ function guardSlotFixture(context) {
     storeFor,
     slotPath,
     lockPath: paths.reservationLockPath,
+    lockDocumentFor,
     seedStaleSlot,
     seedReservationLock,
+    lockDocument: () =>
+      JSON.parse(readFileSync(paths.reservationLockPath, "utf8")),
     slotDocument: () => JSON.parse(readFileSync(slotPath, "utf8")),
   };
 }
@@ -2878,6 +2889,166 @@ test("a live reservation lock is never taken over by age, and a dead one always 
   assert.equal(takenOver.reserved, true, "a dead owner never wedges the host");
   assert.equal(fixture.slotDocument().pid, process.pid + 7);
   assert.equal(existsSync(fixture.lockPath), false);
+});
+
+test("a mutex takeover that moves a newcomer's lock puts it straight back and refuses", () => {
+  // The takeover read the owner and *then* renamed the lock, so a newcomer
+  // that took the same dead lock over in between had its FRESH lock renamed
+  // aside by a contender that had inspected a corpse. The order is inverted:
+  // move first, read the moved file, and proceed only when it is exactly the
+  // dead owner that was inspected — same pid and same nonce.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId } = fixture;
+  fixture.seedStaleSlot();
+  fixture.seedReservationLock(fixture.dead, "2026-09-09T09:00:00.000Z");
+
+  const newcomerPid = process.pid + 9;
+  let newcomer = null;
+  const store = fixture.storeFor(process.pid + 10, {
+    onReserveStep: (step) => {
+      // The newcomer takes the dead lock over while this reservation is
+      // between its read and its rename.
+      if (step === "mutex-inspected" && newcomer === null) {
+        newcomer = fixture.seedReservationLock(
+          newcomerPid,
+          new Date(context.clock.now()).toISOString(),
+        );
+      }
+    },
+  });
+
+  const refused = store.reserveGuardSlot(PR, runId);
+  assert.equal(refused.reserved, false, "a corpse's identity buys nothing");
+  assert.match(refused.message, /replaced while it was being taken over/u);
+  assert.deepEqual(
+    fixture.lockDocument(),
+    newcomer,
+    "the newcomer's lock is put back exactly as it was",
+  );
+  assert.equal(
+    fixture.slotDocument().pid,
+    fixture.dead,
+    "the stale slot is untouched: no mutation without the mutex",
+  );
+});
+
+test("a mutex that cannot be put back is left as a named orphan, never dropped", () => {
+  // The put-back is `link` plus `unlink`, not `rename`: POSIX `rename`
+  // replaces its destination silently, which would delete the very lock a
+  // third guard had just created. `link` fails with `EEXIST` instead, and the
+  // moved file is then left where it is and named in the refusal, because
+  // deleting a lock this reservation never owned is the worse of the two.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId } = fixture;
+  fixture.seedStaleSlot();
+  fixture.seedReservationLock(fixture.dead, "2026-09-09T09:00:00.000Z");
+
+  let fresh = null;
+  const store = fixture.storeFor(process.pid + 11, {
+    onReserveStep: (step) => {
+      if (step === "mutex-inspected" && fresh === null) {
+        // A newcomer takes the dead lock over …
+        fixture.seedReservationLock(
+          process.pid + 12,
+          new Date(context.clock.now()).toISOString(),
+        );
+      }
+      if (step === "mutex-moved" && fresh === null) {
+        // … and a third guard creates a fresh lock in the path this
+        // reservation is about to put the moved file back into.
+        fresh = fixture.seedReservationLock(
+          process.pid + 13,
+          new Date(context.clock.now()).toISOString(),
+        );
+      }
+    },
+  });
+
+  const refused = store.reserveGuardSlot(PR, runId);
+  assert.equal(refused.reserved, false);
+  assert.ok(refused.orphan, "the refusal names the file it could not put back");
+  assert.match(
+    refused.message,
+    new RegExp(refused.orphan.replaceAll(".", "\\."), "u"),
+  );
+  assert.equal(
+    existsSync(refused.orphan),
+    true,
+    "the orphan is left to look at",
+  );
+  assert.deepEqual(
+    fixture.lockDocument(),
+    fresh,
+    "the fresh lock of the third guard is untouched",
+  );
+  assert.equal(fixture.slotDocument().pid, fixture.dead);
+});
+
+test("a holder whose mutex was taken from it mutates nothing: the six-step replay", () => {
+  // Codex's sequence, end to end:
+  //   1. A reads the dead mutex owner and pauses before renaming it.
+  //   2. B takes the mutex over and pauses after inspecting the stale slot.
+  //   3. A resumes, renames B's FRESH mutex aside, reserves the slot, releases.
+  //   4. B resumes and renames A's fresh slot aside.
+  //   5. D reserves the now-empty path.
+  //   6. B sees the mismatch, refuses, and cannot put A's slot back.
+  // Observed A=true, D=true — two live reservations.
+  //
+  // Step 1-3 are pinned by the two tests above, which is where a fixed A now
+  // refuses. This replays 2-6 from B's side: the hook performs the one effect
+  // step 3 has on B — B's mutex is gone from the path — and then runs a real A
+  // and, in the window B's rename would open, a real D. B must notice that its
+  // mutex is no longer its own and stop *before* touching a single file.
+  const context = harness();
+  const fixture = guardSlotFixture(context);
+  const { runId } = fixture;
+  fixture.seedStaleSlot();
+
+  const pidA = process.pid + 14;
+  const pidB = process.pid + 15;
+  const pidD = process.pid + 16;
+  const guardA = fixture.storeFor(pidA);
+  const guardD = fixture.storeFor(pidD);
+  let reservedByA = null;
+  let reservedByD = null;
+  const guardB = fixture.storeFor(pidB, {
+    onReserveStep: (step) => {
+      if (step === "slot-inspected" && reservedByA === null) {
+        // Step 3, from B's point of view: its mutex is no longer in the path,
+        // and A reserves the slot under a mutex of its own.
+        rmSync(fixture.lockPath, { force: true });
+        reservedByA = guardA.reserveGuardSlot(PR, runId);
+      }
+      if (step === "slot-renamed" && reservedByD === null) {
+        // Step 5. Reached only if B mutated the slot without its mutex.
+        reservedByD = guardD.reserveGuardSlot(PR, runId);
+      }
+    },
+  });
+
+  const reservedByB = guardB.reserveGuardSlot(PR, runId);
+  assert.equal(reservedByA?.reserved, true, "A reserved under its own mutex");
+  assert.equal(reservedByB.reserved, false, "B lost its mutex and must stop");
+  assert.match(reservedByB.message, /no longer holds the reservation lock/u);
+  assert.equal(
+    reservedByD,
+    null,
+    "B never renamed A's slot, so no window opened for D",
+  );
+  assert.equal(
+    [reservedByA, reservedByB, reservedByD].filter((one) => one?.reserved)
+      .length,
+    1,
+    "exactly one reservation",
+  );
+  assert.equal(fixture.slotDocument().pid, pidA, "A's slot is untouched");
+  assert.equal(
+    existsSync(`${fixture.slotPath}.stale.${pidB}`),
+    false,
+    "B moved nothing aside",
+  );
 });
 
 test("a guard slot that changes between the read and the rename is refused, not stolen", () => {

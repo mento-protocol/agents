@@ -1110,11 +1110,31 @@ from creating one, and the sequence ended with two live reservations.
 `process.kill(pid, 0)` raising `ESRCH`, with `EPERM` counting as alive — and
 never by age. Age was the other half of the same defect: a guard that was merely
 slow, paused past some maximum, was treated as abandoned, lost its exclusivity
-to a guard that arrived later, and both then reclaimed the same slot. A dead
-owner is displaced by one atomic `renameSync` plus a fresh `wx` create, so
-exactly one guard can take an abandoned lock over and the host is still never
-wedged by a file nobody owns. A lock whose owner cannot be read has no owner to
-prove dead, so it is treated as held.
+to a guard that arrived later, and both then reclaimed the same slot. A lock
+whose owner cannot be read has no owner to prove dead, so it is treated as held.
+
+**The takeover moves the lock aside first and reads it after.** Reading first
+and renaming after left a window of its own: a newcomer took the same dead lock
+over in between, and the rename then moved that newcomer's _fresh_ lock aside on
+the strength of a corpse's identity, after which two guards reserved. So the
+moved file decides. If it is not exactly the dead owner that was inspected —
+same pid, same nonce — it is put straight back with `link` plus `unlink`, which
+fails with `EEXIST` rather than replacing a third guard's fresh lock the way
+`rename` silently would, and the reservation refuses. A file that cannot be put
+back is left where it is and named as the refusal's `orphan`, which `guard`
+carries into its error details: deleting a lock this reservation never owned is
+the worse outcome. Only the inspected corpse is removed and replaced by a fresh
+`wx` create, so exactly one guard takes an abandoned lock over and the host is
+still never wedged by a file nobody owns.
+
+**Holding the lock is re-checked before every mutation and once after the slot
+is created**: the lock path must exist and carry this reservation's nonce. A
+reservation that lost its lock — because its owner was proved dead, or because
+anything else removed it — stops there having touched nothing: no rename, no
+create, no restore. By then another guard may legitimately own the slot, and
+moving that guard's file aside is damage no later check can undo. A slot is
+reserved only when the check _after_ the create passed and the created slot
+carries this nonce.
 
 Under that lock the reclaim renames the stale slot rather than removing it —
 exactly one caller wins a rename, and every loser gets `ENOENT` instead of
@@ -1122,7 +1142,8 @@ deleting a slot somebody else owns — and checks identity on both sides of it.
 The rename is atomic but reports only _that_ it moved a file, so the file it
 moved is compared with the slot this reservation inspected, and the slot created
 in its place is read back and checked for this reservation's own `nonce`. Either
-mismatch refuses, and a slot moved by mistake is put back. It fails closed
+mismatch refuses, and a slot moved by mistake is put back while the lock is
+still held, or else left and named as the refusal's `orphan`. It fails closed
 throughout — a slot that cannot be created, read or proved is not evidence that
 nobody is publishing. Like the state entry it is host-local defence in depth,
 and the reference remains the mutual-exclusion authority.

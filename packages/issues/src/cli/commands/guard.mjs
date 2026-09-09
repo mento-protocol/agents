@@ -60,6 +60,9 @@ function reserveGuardSlots(runtime, pairs, runId) {
           number: pair.number,
           slot: slot.path,
           pid: slot.holder?.pid ?? null,
+          // A file the refused reservation moved aside and could not put back.
+          // Nothing deletes it, so the operator is told where it is.
+          orphan: slot.orphan ?? null,
         },
       });
     }
