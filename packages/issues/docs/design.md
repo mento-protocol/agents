@@ -1102,9 +1102,15 @@ A holder removes its own slot when the child exits, on every exit path, and only
 its own: `release` opens the file, reads the nonce back through that descriptor,
 and unlinks only when it is this reservation's. A slot carrying another nonce,
 or none that can be read, is left where it is and reported as a warning on
-guard's report line. A spawn that fails reaches the same release, and the only
-step that can fail a reservation after the exclusive open is the write itself,
-which removes the file it just created rather than leaving an empty one behind.
+guard's report line. A spawn that fails reaches the same release. After the
+exclusive open, three things can still fail a reservation — a write that errors,
+a write that reports **fewer bytes than the payload**, and an `fsync` that
+errors, which is where a delayed write-back failure surfaces and nowhere else —
+and each removes the file it just created rather than leaving a truncated or
+empty one behind. A short write is a failure, not a slower success: the payload
+is a few hundred bytes of a regular file, so anything less means a limit was
+hit, and a ten-byte `RLIMIT_FSIZE` once let guard spawn behind a slot holding
+ten bytes.
 
 Two windows are left, both narrow, both documented because closing either would
 need a rename or a second file — the constructs that made every earlier design
@@ -1112,11 +1118,12 @@ unsound:
 
 - **A kill between the open and the write.** `openSync(path, "wx")` and the
   `writeSync` that follows it are separate syscalls, so a guard killed between
-  them leaves a **zero-length slot**. It carries no pid, so `slot clear`
-  correctly refuses it as `unreadable`: there is nothing there to prove dead.
-  Recovery is manual — confirm that no guard of that run is alive, then delete
-  that empty file — and it is the one case where an operator removes a slot by
-  hand.
+  them leaves a zero-length file. More generally, **a slot whose document
+  cannot be parsed** — zero-length after a kill in that window, or otherwise
+  truncated or corrupted — carries no pid, so `slot clear` correctly refuses it
+  as `unreadable`: there is nothing there to prove dead. Recovery is manual —
+  confirm that no guard of that run is alive, then remove the file by hand —
+  and it is the one case where an operator removes a slot themselves.
 - **`release` is a read and then an unlink, not one operation.** "Removes only
   its own slot" holds while no `slot clear` runs beside it. A clear that removes
   the holder's slot between that read and that unlink lets a successor create a

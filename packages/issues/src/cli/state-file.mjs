@@ -113,14 +113,23 @@ export function probeProcessState(pid) {
 }
 
 /**
- * Render one value for a command line a human will copy.
+ * Render one value for a command line a human will copy into a shell.
+ *
+ * Single quotes, not `JSON.stringify`. A double-quoted argument is still
+ * expanded by every POSIX shell, so a state root holding
+ * `$ISSUES_REVIEW_UNSET` reached the CLI with that segment replaced by
+ * nothing, and the printed command answered `absent` while the slot it named
+ * stayed exactly where it was. A single-quoted one expands nothing at all, and
+ * the only character needing care is the single quote itself: closed, escaped,
+ * reopened.
  *
  * @param {string} value
  * @returns {string}
  */
 function quoteForCommand(value) {
   const text = String(value);
-  return /^[A-Za-z0-9_./:@=-]+$/u.test(text) ? text : JSON.stringify(text);
+  if (/^[A-Za-z0-9_./:@=-]+$/u.test(text)) return text;
+  return `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
 /**
@@ -142,6 +151,10 @@ export function createStateStore(input) {
     // The `--config` this invocation was given, so a refusal can print a
     // recovery command that runs as written rather than a placeholder.
     configPath = null,
+    // The two syscalls that put a reservation on disk, injectable so a test
+    // can produce a short write or a failing flush without a resource limit.
+    writeSlot = (descriptor, payload) => writeSync(descriptor, payload),
+    flushSlot = (descriptor) => fsyncSync(descriptor),
     pid = process.pid,
     // The context's clock, so the one artefact the CLI persists is stamped
     // from the same instant every document is. `Date.now` only when a caller
@@ -433,13 +446,30 @@ export function createStateStore(input) {
       }
       if (descriptor !== null) {
         try {
-          writeSync(descriptor, `${JSON.stringify(document, null, 2)}\n`);
-          fsyncSync(descriptor);
+          const payload = Buffer.from(
+            `${JSON.stringify(document, null, 2)}\n`,
+            "utf8",
+          );
+          const written = writeSlot(descriptor, payload);
+          // A short write is a failed reservation, not a slower one. This
+          // payload is a few hundred bytes of a regular file, so anything less
+          // than all of it means a limit was hit — an `RLIMIT_FSIZE` of ten
+          // bytes wrote ten and returned, and guard spawned behind a truncated
+          // slot that no later `slot clear` could prove anything about.
+          if (written !== payload.byteLength) {
+            throw new Error(
+              `only ${written} of ${payload.byteLength} bytes could be written`,
+            );
+          }
+          // `fsync` can fail on its own — a delayed write-back error surfaces
+          // here and nowhere else — so it is inside the same guard.
+          flushSlot(descriptor);
           return { path, reserved: true, holder: null, message: null, release };
         } catch (error) {
           // The exclusive open made this file this reservation's a moment ago,
-          // so removing it removes its own; leaving an empty slot would wedge
-          // the run behind a file no `slot clear` can prove anything about.
+          // so removing it removes its own; leaving a truncated or empty slot
+          // would wedge the run behind a file no `slot clear` can prove
+          // anything about.
           try {
             rmSync(path, { force: true });
           } catch {

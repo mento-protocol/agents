@@ -217,11 +217,15 @@ else's nonce is left alone with a warning. That "only its own" holds while no
 clear in between lets a successor create a slot the departing holder then
 removes. Same residual as `slot clear` below, and it closes the same way.
 
-The exclusive create and the write are two syscalls as well, so a guard killed
-between them leaves a **zero-length slot**. `slot clear` refuses that one as
-`unreadable` — there is no pid in it to prove anything about — and it is the
-single case an operator handles by hand: confirm that no guard of that run is
-alive, then delete the empty file.
+The reservation itself is all-or-nothing: a write that errors, a write that
+reports fewer bytes than the document, or a failing `fsync` each remove the file
+they just created and refuse, so guard never spawns behind a half-written slot.
+What no code can cover is a kill between the exclusive create and the write,
+which leaves a zero-length file. **A slot whose document cannot be parsed** —
+zero-length from that window, or otherwise truncated or corrupted — is refused
+by `slot clear` as `unreadable`, because there is no pid in it to prove anything
+about. That is the single case an operator handles by hand: confirm that no
+guard of that run is alive, then remove the file.
 
 **Guard never takes a slot over**, so a guard that was killed outright leaves a
 slot that refuses every later guard of that run, whatever state the recorded

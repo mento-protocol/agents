@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   existsSync,
@@ -2800,6 +2801,213 @@ test("a slot left behind refuses every later guard, and slot clear is the only r
   const after = await context.run(guardArgv, { spawn: recovered.spawn });
   assert.equal(after.exitCode, 0);
   assert.equal(recovered.calls.length, 1, "the cleared slot is reservable");
+});
+
+test("the printed recovery command survives a real shell, hostile path and all", async () => {
+  // `JSON.stringify` is double-quoting, and a double-quoted argument is still
+  // expanded by every POSIX shell: a state root holding `$ISSUES_REVIEW_UNSET`
+  // reached the CLI with that segment replaced by nothing, so the printed
+  // command cleared nothing and answered `absent` with exit 0. The line is
+  // single-quoted now, and this runs it through a real `sh -c` to prove it.
+  const context = harness();
+  const runId = RUN_ID;
+  // A root with the three characters that break naive quoting: an unset
+  // variable reference, a space, and a single quote.
+  const root = join(
+    context.directory,
+    "state $ISSUES_REVIEW_UNSET dir it's here",
+  );
+  mkdirSync(root, { recursive: true });
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root,
+    clock: context.clock,
+    configPath: context.configPath,
+  });
+
+  // A pid that is genuinely gone: this child has exited and been reaped, so
+  // the real probe answers ESRCH. No injection reaches the subprocess below.
+  const departed = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(departed.status, 0);
+  const seed = (number) => {
+    const path = store.guardSlotPathFor(number, runId);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        schema: GUARD_SLOT_SCHEMA,
+        repository: REPOSITORY,
+        number,
+        runId,
+        pid: departed.pid,
+        nonce: `nonce-of-${number}`,
+        reservedAt: "2026-09-09T09:00:00.000Z",
+      })}\n`,
+    );
+    return path;
+  };
+  const target = seed(PR);
+  const sibling = seed(880);
+
+  const refused = store.reserveGuardSlot(PR, runId);
+  assert.equal(refused.reserved, false);
+  const printed = refused.message.slice(
+    refused.message.indexOf("mento-issues claims slot clear"),
+  );
+  assert.ok(
+    printed.includes("--state '") && printed.includes("$ISSUES_REVIEW_UNSET"),
+    `the root is single-quoted: ${printed}`,
+  );
+  assert.ok(
+    printed.includes(`it'\\''s`),
+    `and its own quote is closed, escaped and reopened: ${printed}`,
+  );
+
+  // Run exactly that line, with only `mento-issues` resolved to this checkout's
+  // bin, in a shell that would expand anything expandable.
+  const quote = (value) => `'${value.replaceAll("'", `'\\''`)}'`;
+  const bin = fileURLToPath(
+    new URL("../bin/mento-issues.mjs", import.meta.url),
+  );
+  const command = printed.replace(
+    /^mento-issues/u,
+    `${quote(process.execPath)} ${quote(bin)}`,
+  );
+  const environment = { ...process.env };
+  delete environment.ISSUES_REVIEW_UNSET;
+  const cleared = spawnSync("sh", ["-c", command], {
+    encoding: "utf8",
+    env: environment,
+  });
+  assert.equal(cleared.status, 0, `${cleared.stdout}${cleared.stderr}`);
+  const document = JSON.parse(cleared.stdout.trim().split("\n").at(-1));
+  assert.equal(document.status, "ok");
+  assert.equal(document.slot.status, "cleared");
+  assert.equal(document.slot.path, target);
+  assert.equal(existsSync(target), false, "the named slot is gone");
+  assert.equal(existsSync(sibling), true, "and only the named one");
+});
+
+test("a reservation whose write is short or unflushed refuses and leaves no file", () => {
+  // A short write used to count as a success: under a ten-byte `RLIMIT_FSIZE`
+  // the reservation wrote ten bytes, guard spawned, and the truncated slot it
+  // left behind was one no `slot clear` could prove anything about. The
+  // payload is a few hundred bytes of a regular file, so anything less than
+  // all of it means a limit was hit, and that is a failed reservation.
+  const context = harness();
+  const runId = RUN_ID;
+  const storeWith = (extra) =>
+    createStateStore({
+      repository: REPOSITORY,
+      root: context.options.stateRoot,
+      clock: context.clock,
+      ...extra,
+    });
+  const slotPath = storeWith({}).guardSlotPathFor(PR, runId);
+
+  const short = storeWith({ writeSlot: () => 3 }).reserveGuardSlot(PR, runId);
+  assert.equal(short.reserved, false);
+  assert.match(short.message, /could not be written: only 3 of \d+ bytes/u);
+  assert.equal(existsSync(slotPath), false, "no truncated slot is left");
+
+  // `fsync` fails on its own too — a delayed write-back error surfaces there
+  // and nowhere else — and it is inside the same guard.
+  const unflushed = storeWith({
+    flushSlot: () => {
+      throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" });
+    },
+  }).reserveGuardSlot(PR, runId);
+  assert.equal(unflushed.reserved, false);
+  assert.match(unflushed.message, /could not be written: EIO/u);
+  assert.equal(existsSync(slotPath), false, "nor an unflushed one");
+
+  // The same store with neither injection reserves normally, which is what
+  // makes the two refusals above the write's doing and not the path's.
+  const reserved = storeWith({}).reserveGuardSlot(PR, runId);
+  assert.equal(reserved.reserved, true);
+  assert.equal(
+    JSON.parse(readFileSync(slotPath, "utf8")).runId,
+    runId,
+    "a complete document, or none at all",
+  );
+  reserved.release();
+});
+
+test("a slot a refusal could not give back is named in that refusal", async () => {
+  // `releaseSlots()` returns a warning for every slot it declined to remove —
+  // a foreign nonce, a failed unlink — and those used to be dropped on the
+  // floor when the duplicate-run-id check refused right after them. The next
+  // guard of that run then met a slot with no record of why it was there.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const otherPid = process.pid + 1;
+  // A state entry naming this run id under another process, which is what
+  // `assertNoLiveDuplicateRunId` refuses on.
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+    pid: otherPid,
+  });
+  store.writeEntry(PR, { runId, token, status: "guarding" });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+  const foreign = {
+    schema: GUARD_SLOT_SCHEMA,
+    repository: REPOSITORY,
+    number: PR,
+    runId,
+    pid: otherPid,
+    nonce: "a-slot-this-guard-never-created",
+    reservedAt: "2026-09-09T10:00:00.000Z",
+  };
+
+  const spawned = recordingSpawn(0);
+  const refused = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    {
+      spawn: spawned.spawn,
+      // The liveness check runs between this guard's reservation and its
+      // release, so it is where the slot becomes somebody else's.
+      isProcessAlive: (pid) => {
+        writeFileSync(slotPath, `${JSON.stringify(foreign)}\n`);
+        return pid === otherPid;
+      },
+    },
+  );
+
+  assert.equal(refused.exitCode, 3);
+  assert.equal(spawned.calls.length, 0, "nothing was spawned");
+  const error = refused.stderrDocuments.at(-1).error;
+  assert.match(error.message, /already recorded for/u);
+  assert.deepEqual(
+    error.details.slotWarnings.map((warning) => warning.stage),
+    ["release-guard-slot"],
+  );
+  assert.match(
+    error.details.slotWarnings[0].message,
+    /another reservation's nonce/u,
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(slotPath, "utf8")),
+    foreign,
+    "and the slot it could not give back is still there",
+  );
 });
 
 test("no takeover path exists: a paused guard keeps its slot and every other refuses", () => {

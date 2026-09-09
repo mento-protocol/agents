@@ -66,7 +66,10 @@ function reserveGuardSlots(runtime, pairs, runId) {
   for (const pair of pairs) {
     const slot = store.reserveGuardSlot(pair.number, runId);
     if (!slot.reserved) {
-      releaseAll();
+      // A slot an earlier pair could not give back — a foreign nonce, a failed
+      // unlink — blocks the next guard of this run, so the refusal that
+      // discards it must say so. It used to be dropped on the floor here.
+      const leftover = releaseAll();
       throw new ClaimConfigError(slot.message, {
         details: {
           runId,
@@ -75,6 +78,7 @@ function reserveGuardSlots(runtime, pairs, runId) {
           pid: slot.holder?.pid ?? null,
           reservedAt: slot.holder?.reservedAt ?? null,
           clear: store.clearGuardSlotCommand(pair.number, runId),
+          ...(leftover.length > 0 ? { slotWarnings: leftover } : {}),
         },
       });
     }
@@ -152,7 +156,13 @@ export async function runGuard(runtime) {
       assertNoLiveDuplicateRunId(ctx, pair.number, runId);
     }
   } catch (error) {
-    releaseSlots();
+    // Same rule as the reservation loop: a slot this refusal could not give
+    // back is what the next guard of this run will meet, so it travels with
+    // the refusal instead of being discarded.
+    const leftover = releaseSlots();
+    if (leftover.length > 0 && error?.details) {
+      error.details.slotWarnings = leftover;
+    }
     throw error;
   }
   const stateWarnings = pairs.flatMap((pair) =>
