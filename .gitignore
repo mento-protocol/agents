@@ -1,0 +1,15 @@
+node_modules
+.trunk/out
+.trunk/logs
+.trunk/actions
+.trunk/notifications
+.trunk/plugins
+.trunk/tools
+*.log
+.DS_Store
+coverage
+
+# Throwaway probes a review or fix round leaves in a package's test directory.
+# `pnpm test` runs `test/*.test.mjs`, so these never run and nothing keeps them
+# compiling; ignoring them stops the next round's debris reaching a commit.
+packages/*/test/tmp-*
