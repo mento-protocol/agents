@@ -253,13 +253,14 @@ It removes a slot **only on positive proof of death**: `kill(pid, 0)` answering
 `ESRCH`, and nothing else. Every other outcome exits 3 under a status that says
 which:
 
-| Status        | Meaning                                                            |
-| ------------- | ------------------------------------------------------------------ |
-| `held`        | the signal succeeded, or `EPERM` — the process exists              |
-| `invalid-pid` | the document's pid is not a positive safe integer; never probed    |
-| `unprovable`  | any other errno: the host could neither reach it nor prove it dead |
-| `unreadable`  | the document cannot be parsed, so there is no pid to probe         |
-| `absent`      | there is no slot; exit 0                                           |
+| Status        | Meaning                                                             |
+| ------------- | ------------------------------------------------------------------- |
+| `held`        | the signal succeeded, or `EPERM` — the process exists               |
+| `invalid-pid` | the document's pid is not a positive safe integer; never probed     |
+| `unprovable`  | any other errno: the host could neither reach it nor prove it dead  |
+| `unreadable`  | the document cannot be parsed, so there is no pid to probe          |
+| `failed`      | the holder is dead but the unlink itself failed; the error is named |
+| `absent`      | there is no slot; exit 0                                            |
 
 "Not alive" is not proof of death, and this is the one place where the
 difference decides whether a file is deleted. `--dry-run` reports what it would
