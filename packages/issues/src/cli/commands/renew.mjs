@@ -63,6 +63,10 @@ export async function runRenew(runtime) {
   // run id would otherwise renew the same claim and become a co-publisher.
   assertNoLiveDuplicateRunId(ctx, number, runId);
 
+  // Every deterministic refusal is behind us; the write may now spend a round
+  // trip on the login it records.
+  await runtime.ensureLogin();
+
   const lease = await hydrateClaimLease(ctx, number, { token, runId });
   // `renewClaim` updates the lease in place and returns it, so the expiry the
   // warning is about has to be read before the call. And a `--if-due` renew

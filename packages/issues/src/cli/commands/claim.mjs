@@ -56,6 +56,11 @@ export async function runClaim(runtime) {
     };
   }
 
+  // The inputs are checked, so the write may now spend a round trip on the
+  // login it records. Before this it was resolved while the runtime was built,
+  // where a transport failure masked every deterministic refusal above.
+  await runtime.ensureLogin();
+
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     present: true,
     run: () =>

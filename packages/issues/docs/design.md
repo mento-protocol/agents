@@ -484,7 +484,8 @@ carry no meaning in production.
 | any             | reference absent                                                      | `ClaimSupersededError{ref-absent}` (13)              |
 | any             | unparseable, foreign kind, or a non-commit target                     | `ClaimRefInvalidError` (16)                          |
 | release         | UNLOCK, `parentLock === lease.token`                                  | success, `already-released` (0)                      |
-| release         | LOCK, `ownerRunId ===` ours and a lineage not naming our token        | success, `already-released` (0)                      |
+| release         | LOCK, `ownerRunId ===` ours, acquired (`parentUnlock`), not our token | success, `already-released` (0)                      |
+| release         | LOCK, `ownerRunId ===` ours, renewed (`parentLock`), not our token    | `ClaimStaleError` (16), naming the current token     |
 | release         | LOCK, `priorLockOid === lease.token` or `ownerRunId ≠` ours           | `ClaimSupersededError{taken-over}` (13)              |
 | release         | UNLOCK, `parentLock ≠ lease.token`                                    | `ClaimSupersededError{superseded-and-released}` (13) |
 | release         | anything else                                                         | `ClaimStaleError` (16), with recovery text           |
@@ -494,10 +495,20 @@ work of its own: for `action === "takeover"` every "another run owns it now"
 head is contention (exit 10, skip this item this run), not forfeiture. Exit 13
 means "you had a token and lost it", which only a holder can experience.
 
-**Our own later LOCK proves the release landed.** If the head is a LOCK owned by
-our run id whose lineage does not name our token, the release we were retrying
-already applied and we have since re-acquired; that is exit 0
-`already-released`, not exit 16.
+**Our own later LOCK proves the release landed — but only one lineage does.**
+A LOCK owned by our run id whose lineage does not name our token can exist for
+two reasons, and the payload says which. One carries `parentUnlock`: it was
+**acquired**, from an UNLOCK only a completed release could have written, so
+the release we were retrying already applied and we have since re-acquired —
+exit 0 `already-released`. The other carries `parentLock`: it was **renewed**,
+so nothing was ever released and the token given is simply one or more
+renewals old. Reading the second as `already-released` reported exit 0 for a
+reference still at LOCK, and the CLI removed the label and cleared the state
+entry on the strength of it: `A → B → C` under one run id was enough, because
+releasing `A` sees `C`, whose `parentLock` is `B`. That case is exit 16
+`stale`, and the message names the head to release with. The CLI raises the
+classification rather than letting `hydrateClaimLease` answer `not-held` (14)
+about a reference this run may still hold.
 
 ## Recovery
 
@@ -642,9 +653,20 @@ its statement.
    `spawn`: Node's own support signals the direct child pid and nothing else,
    so the detached grandchild survived the abort and kept publishing, the
    renew timer was never cancelled, and the report called a child that had run
-   `spawn-failed`.
+   `spawn-failed`. The signal is read before anything happens as well as
+   during: an already-aborted signal verifies nothing, spawns nothing and
+   writes nothing, returning that same report with `spawned: false`, and one
+   that arrives while the claims are being verified stops in the same place.
 9. Otherwise forward the child's exit code, unchanged — unless `--advisory` is
    set, which forces exit 0 and is refused outright on a mandatory gate.
+
+Every renew refreshes the **report**, not only the token: `remainingMs`, the
+expiry and `renewCount` on a claim line come from the last renewal, so the
+final report never pairs a rotated token with the lease it replaced. And a
+caller that records the rotation — the CLI writes it to the state file —
+returns its warnings from `onRenew`, which puts them on the report: a renewal
+the host could not record is exactly what the next `adopt --from-state` needs
+to know about.
 
 `--gate wait` is **advisory**: guard always spawns the child, renews while the
 claim is held, and — if the claim is not held at start — prints the verdict and
@@ -887,17 +909,34 @@ straight through them. `assertObjectId`, `parseIntegerValue`,
 unexpected-argument branch all report through it, in `details` as well as in
 the message, because the details are copied into the failure document verbatim.
 
-What the caller typed where this CLI's own **vocabulary** belongs is different,
-because a misspelling has to stay readable or the refusal cannot be acted on. A
-flag name, a command word and an outcome slug go through `describeGrammarWord`,
-which keeps a word of lowercase letters and dashes — every flag and command in
-this CLI is one — and describes anything else. A command is judged word by
+What the caller typed where this CLI's own **vocabulary** belongs is judged
+against that vocabulary, never against a shape. `describeGrammarWord` echoes a
+word only when it is in the relevant allowlist — the command words for an
+unknown command, the flags this command declares for an unknown flag, the
+outcome slugs for `--outcome`, the profile's keys for `--set` — and describes
+every other word. Shape is not evidence: `correct-horse-battery` is lowercase
+letters and dashes, exactly like a flag name. What keeps the refusal actionable
+is the vocabulary itself — the message lists it — plus a suggestion: a word
+within edit distance 2 of a real one is named, `did you mean --dry-run?`, so a
+typo is answered without repeating what was typed. A command is judged word by
 word, so `claims <secret>` keeps the half that names a real command. An
 `--flag=value` refusal reports only the name; the inline value never reaches
-the document. And `writeDocument` runs one last `redactSecrets` pass over every
-document it writes — over the tree, never over the serialized JSON, since
-positional redaction of a finished string can eat the closing quote of the
-value it rewrites.
+the document.
+
+Identifiers are refused outright rather than described, because they are stored
+rather than merely printed. The claim-id grammar accepts `ghp_…`, so a token
+pasted into `--run-id` was a perfectly valid run id: recorded in the payload
+every later reader trusts, written into the host-local state entry, and printed
+by guard's own report path. `--run-id` (from the flag or `MENTO_CLAIM_RUN_ID`),
+`--run-id-prefix`, `--host`, `--login`, `--agent` and every `--set` value go
+through `containsSecret` where they are resolved, and the refusal names the
+source, never the value.
+
+Both output paths then run one last `redactDocument` pass: the CLI's
+`writeDocument`, and guard's own report sink, which does not go through the CLI
+at all. It walks the tree, never the serialized JSON, since positional
+redaction of a finished string can eat the closing quote of the value it
+rewrites.
 
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,

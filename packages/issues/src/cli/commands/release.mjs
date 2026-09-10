@@ -54,6 +54,11 @@ export async function runRelease(runtime) {
     };
   }
 
+  // The inputs are checked; the write may now spend a round trip on the login
+  // it records. It is resolved before the classifying read so that a release
+  // that goes on to write does exactly what it did before.
+  await runtime.ensureLogin();
+
   // Classify the head before a live lease is required, so repeating a release
   // that already landed is idempotent. `hydrateClaimLease` refuses an UNLOCK
   // head — the release's own result — and answered exit 14 for the very state
@@ -107,6 +112,14 @@ export async function runRelease(runtime) {
       },
     };
   }
+
+  // A stale verdict is the answer, not an input to a second guess, and it is
+  // the better-informed one: it read the head's own lineage, where
+  // `hydrateClaimLease` sees only that the token is not the head and answers
+  // `not-held` — exit 14, "renew with the printed token" — for a reference
+  // this run may still hold under a newer token. Exit 16 stops and reports,
+  // and the message names the head to release with.
+  if (verdict.status === "stale" && verdict.error) throw verdict.error;
 
   const lease = await hydrateClaimLease(ctx, number, {
     token,

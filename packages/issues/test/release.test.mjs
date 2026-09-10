@@ -161,11 +161,11 @@ test("release after the taker also released is superseded, not stale", async () 
   assert.equal(headPayload(server, lease.refName).parentLock, taken.token);
 });
 
-test("release finding our own later LOCK returns already-released", async () => {
+test("release finding our own later LOCK reads its lineage before it answers", async () => {
   const { ctx, server, lease } = await heldLease();
   const refName = claimRefName(ctx, PR);
-  // C-8: this run holds the ref again, under a lineage that does not name the
-  // token being released, which can only happen once that release landed.
+  // C-8, and the whole rule is the lineage. This LOCK was **acquired**, so it
+  // carries the UNLOCK it came from — and only a completed release writes one.
   const later = seedRef(
     server,
     refName,
@@ -173,7 +173,7 @@ test("release finding our own later LOCK returns already-released", async () => 
       ownerRunId: lease.owner.runId,
       ownerHost: "chapati-mbp",
       ownerRuntime: "claude-code",
-      parentLock: "0123456789012345678901234567890123456789",
+      parentUnlock: "0123456789012345678901234567890123456789",
     }),
   );
   const commitsBefore = server.calls.commit.length;
@@ -185,6 +185,41 @@ test("release finding our own later LOCK returns already-released", async () => 
   assert.equal(result.unlock.oid, later.oid);
   assert.equal(server.calls.commit.length, commitsBefore, "no commit");
   assert.equal(server.getRefOid(refName), later.oid);
+});
+
+test("release finding our own renewed LOCK is stale, and names the current token", async () => {
+  const { ctx, server, lease } = await heldLease();
+  const refName = claimRefName(ctx, PR);
+  // The same shape with the other lineage: a LOCK this run **renewed** to
+  // carries the LOCK it replaced. Nothing was released, so answering
+  // `already-released` reported exit 0 — and the CLI removed the label and
+  // cleared the state entry — for a reference still at LOCK.
+  const renewed = seedRef(
+    server,
+    refName,
+    buildTestLock(ctx, PR, {
+      ownerRunId: lease.owner.runId,
+      ownerHost: "chapati-mbp",
+      ownerRuntime: "claude-code",
+      operation: "renew",
+      parentLock: "0123456789012345678901234567890123456789",
+    }),
+  );
+  const commitsBefore = server.calls.commit.length;
+
+  await assert.rejects(
+    () => releaseClaim(lease),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_STALE");
+      assert.ok(
+        error.message.includes(renewed.oid),
+        `the current token is named: ${error.message}`,
+      );
+      return true;
+    },
+  );
+  assert.equal(server.calls.commit.length, commitsBefore, "no commit");
+  assert.equal(server.getRefOid(refName), renewed.oid, "still locked");
 });
 
 test("release finding an unparseable head is stale with recovery text", async () => {

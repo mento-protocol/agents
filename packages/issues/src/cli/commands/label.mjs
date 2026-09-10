@@ -18,6 +18,10 @@ import { markFailureContext } from "./common.mjs";
  */
 export async function runLabelEnsure(runtime) {
   const { ctx, flags } = runtime;
+  // A label write records no login, but this command is a write and resolves
+  // the same identity every other write does — after the grammar has accepted
+  // the command line, not while the runtime is being built.
+  await runtime.ensureLogin();
   const result = await ensureClaimLabel(ctx, {
     color: flags.color,
     description: flags.description,
@@ -46,6 +50,9 @@ export async function runLabelReconcile(runtime) {
   const { ctx, flags } = runtime;
   const number = flags.pr;
   const { scope, ref } = markFailureContext(runtime, number);
+  // Only `--apply` makes this a write, and `ensureLogin` is a no-op for the
+  // read-only form: the report costs no round trip it does not need.
+  await runtime.ensureLogin();
   const result = await reconcileClaimLabel(ctx, number, {
     apply: flags.apply === true,
   });

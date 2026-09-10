@@ -9,7 +9,7 @@
 
 import { ClaimUsageError } from "../claims/verify.mjs";
 import { CLAIM_OUTCOMES } from "../claims/constants.mjs";
-import { REDACTION, redactSecrets } from "../gh/redact.mjs";
+import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
 
 /** Flags every command accepts. */
 export const GLOBAL_FLAGS = Object.freeze({
@@ -297,9 +297,6 @@ const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
  * 32 characters — is not a flag name anybody meant to type, and a credential
  * pasted where a flag name belongs looks exactly like that.
  */
-const GRAMMAR_WORD_PATTERN = /^[a-z][a-z-]*$/u;
-const GRAMMAR_WORD_MAX_LENGTH = 32;
-
 function usage(message, details = {}) {
   return new ClaimUsageError(message, { details });
 }
@@ -319,44 +316,101 @@ function usage(message, details = {}) {
  * @param {unknown} value the rejected value.
  * @returns {string} a description safe to print.
  */
-function describeRejectedValue(value) {
-  if (typeof value !== "string") {
-    return value === null || value === undefined
-      ? String(value)
-      : `<${typeof value}>`;
+const describeRejectedValue = describeRedactedValue;
+
+/** The edit distance at which a rejected word is called a typo of a known one. */
+const SUGGESTION_MAX_DISTANCE = 2;
+
+/**
+ * Levenshtein distance, bounded by the shorter comparisons it is used for.
+ *
+ * @param {string} left
+ * @param {string} right
+ * @returns {number}
+ */
+function editDistance(left, right) {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitution =
+        previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1);
+      current[column] = Math.min(
+        previous[column] + 1,
+        current[column - 1] + 1,
+        substitution,
+      );
+    }
+    previous = current;
   }
-  if (value.length === 0) return "<empty>";
-  if (redactSecrets(value) !== value) {
-    return `${REDACTION} (${value.length} characters)`;
-  }
-  return `<string, ${value.length} characters>`;
+  return previous[right.length];
 }
 
 /**
- * Describe a rejected grammar word — a flag name, a command word, a slug.
+ * The known word a rejected one is closest to, when it is close enough.
  *
- * These are not values: they are what the caller typed where this CLI's own
- * vocabulary belongs, so a misspelling has to be readable or the refusal
- * cannot be acted on. One that could be a word of that vocabulary is kept;
- * every other one is described like any rejected value. A multi-word command
- * is judged word by word, so `claims <secret>` keeps the half that names a
- * real command.
+ * This is what keeps a refusal actionable now that an unknown word is never
+ * echoed: naming a word from the CLI's own vocabulary reveals nothing about
+ * what was typed, and it is the half of "unknown flag --dry-runn" that a
+ * caller actually needs.
  *
  * @param {unknown} word the rejected word.
+ * @param {Iterable<string>} known the vocabulary it was judged against.
+ * @returns {string|null} the closest known word, or null.
+ */
+function suggestKnownWord(word, known) {
+  if (typeof word !== "string" || word.length === 0) return null;
+  let best = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const distance = editDistance(word.toLowerCase(), candidate.toLowerCase());
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return bestDistance <= SUGGESTION_MAX_DISTANCE ? best : null;
+}
+
+/** `; did you mean X?`, or nothing at all. */
+function suggestion(word, known, render = (value) => value) {
+  const candidate = suggestKnownWord(word, known);
+  return candidate === null ? "" : `; did you mean ${render(candidate)}?`;
+}
+
+/**
+ * Describe a rejected grammar word against the vocabulary it belongs to.
+ *
+ * These are not values: they are what the caller typed where this CLI's own
+ * vocabulary belongs. A word **from that vocabulary** is echoed, because a
+ * command like `claims frobnicate` has to be able to say which half it
+ * recognized. Every other word is described like any rejected value: shape
+ * alone is not evidence, and a passphrase of lowercase letters and dashes is
+ * exactly the shape a flag name has. A multi-word command is judged word by
+ * word.
+ *
+ * @param {unknown} word the rejected word.
+ * @param {Iterable<string>} [known] the vocabulary it was judged against.
  * @returns {string} a description safe to print.
  */
-function describeGrammarWord(word) {
+function describeGrammarWord(word, known = []) {
   if (typeof word !== "string" || word.length === 0) {
     return describeRejectedValue(word);
   }
+  const vocabulary = known instanceof Set ? known : new Set(known);
   return word
     .split(" ")
-    .map((part) =>
-      GRAMMAR_WORD_PATTERN.test(part) && part.length <= GRAMMAR_WORD_MAX_LENGTH
-        ? part
-        : describeRejectedValue(part),
-    )
+    .map((part) => (vocabulary.has(part) ? part : describeRejectedValue(part)))
     .join(" ");
+}
+
+/** Every word that appears in a command key, for judging an unknown command. */
+function knownCommandWords() {
+  const words = new Set();
+  for (const key of Object.keys(COMMAND_SPECS)) {
+    for (const word of key.split(" ")) words.add(word);
+  }
+  return words;
 }
 
 // Every refusal below describes the value it rejected rather than repeating
@@ -449,13 +503,16 @@ export function resolveCommand(head) {
     }
   }
   const attempted = words.join(" ");
-  // Described word by word: `claims` survives, and anything in the position of
-  // a command word that is not shaped like one does not.
-  const described = describeGrammarWord(attempted);
+  // Judged word by word against this CLI's own vocabulary: `claims` is one of
+  // its words and survives; a word that is not is described, whatever shape it
+  // has. The whole command list is in the message and in `known`, so a refusal
+  // stays actionable without repeating what was typed.
+  const vocabulary = knownCommandWords();
+  const described = describeGrammarWord(attempted, vocabulary);
   throw usage(
     attempted.length === 0
       ? `mento-issues needs a command; expected one of: ${Object.keys(COMMAND_SPECS).join(", ")}`
-      : `Unknown command: ${described}`,
+      : `Unknown command: ${described}${suggestion(words.at(-1), vocabulary)}; expected one of: ${Object.keys(COMMAND_SPECS).join(", ")}`,
     {
       command: attempted.length === 0 ? null : described,
       known: Object.keys(COMMAND_SPECS),
@@ -531,14 +588,24 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
     const inline = equals === -1 ? null : token.slice(equals + 1);
     const declared = grammar[name];
     if (!declared) {
-      // The name only, and only when it is shaped like a flag name. An inline
-      // `--flag=value` never reaches this message: the value is the half that
-      // can be a credential, and naming the flag is what the caller needs.
-      const described = describeGrammarWord(name);
-      throw usage(`Unknown flag --${described} for ${key}`, {
-        command: key,
-        flag: described,
-      });
+      // The name only, never an inline `--flag=value`: the value is the half
+      // that can be a credential. And the name is echoed only when this
+      // command declares it — an unknown one is described, because a
+      // passphrase has the same shape a flag name has. The closest flag this
+      // command does declare is named instead, which is what a typo needs.
+      const declaredNames = Object.keys(grammar);
+      const described = describeGrammarWord(name, declaredNames);
+      throw usage(
+        `Unknown flag --${described} for ${key}${suggestion(
+          name,
+          declaredNames,
+          (candidate) => `--${candidate}`,
+        )}`,
+        {
+          command: key,
+          flag: described,
+        },
+      );
     }
     if (Object.hasOwn(GATED_FLAGS, name) && !gated.includes(name)) {
       gated.push(name);
@@ -729,9 +796,20 @@ export function collectSetFlags(entries, allowed) {
   const values = {};
   for (const entry of entries ?? []) {
     if (!allowed.includes(entry.key)) {
+      // The key is described, not echoed: `--set <secret>=x` puts an arbitrary
+      // string here, and this profile's real keys are already in the message.
+      const described = describeGrammarWord(entry.key, allowed);
       throw usage(
-        `--set ${entry.key} is not a metadata key; this profile records ${allowed.join(", ")}`,
-        { key: entry.key, allowed },
+        `--set ${described} is not a metadata key; this profile records ${allowed.join(", ")}${suggestion(entry.key, allowed)}`,
+        { key: described, allowed },
+      );
+    }
+    // A metadata value is written into the payload and printed in every
+    // document built from it, so it is never a credential.
+    if (containsSecret(entry.value)) {
+      throw usage(
+        `--set ${entry.key} looks like a credential; claim metadata is recorded in the payload and printed in reports`,
+        { key: entry.key, value: describeRejectedValue(entry.value) },
       );
     }
     values[entry.key] = entry.value === "null" ? null : entry.value;
@@ -748,11 +826,11 @@ export function collectSetFlags(entries, allowed) {
 export function assertOutcome(outcome) {
   if (outcome === undefined) return "completed";
   if (!CLAIM_OUTCOMES.includes(outcome)) {
-    // A slug from a closed vocabulary, so a misspelling is printed back and
-    // anything not shaped like one of those words is described instead.
-    const described = describeGrammarWord(outcome);
+    // A slug from a closed vocabulary: one of those words is echoed, anything
+    // else is described, and the closest real outcome is named instead.
+    const described = describeGrammarWord(outcome, CLAIM_OUTCOMES);
     throw usage(
-      `--outcome must be one of ${CLAIM_OUTCOMES.join(", ")}, got: ${described}`,
+      `--outcome must be one of ${CLAIM_OUTCOMES.join(", ")}, got: ${described}${suggestion(outcome, CLAIM_OUTCOMES)}`,
       { outcome: described },
     );
   }

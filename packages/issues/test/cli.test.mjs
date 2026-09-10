@@ -4437,18 +4437,80 @@ test("no grammar refusal echoes the value it rejected", async () => {
   assert.equal(pasted.exitCode, 2);
   assert.match(pasted.document.error.message, /\[redacted-github-token\]/u);
 
-  // And an ordinary typo of a flag or a command is still readable, because a
-  // grammar word — lowercase letters and dashes — is not a credential shape.
-  const misspelled = await context.run([
+  // A word this CLI does not know is described, whatever shape it has: a
+  // passphrase of lowercase letters and dashes looks exactly like a flag name,
+  // and nothing but the vocabulary itself can tell them apart.
+  const passphrase = "correct-horse-battery";
+  for (const argv of [
+    ["claims", "read", "--pr", String(PR), `--${passphrase}`],
+    ["claims", passphrase],
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      hexOid(3),
+      "--run-id",
+      RUN_ID,
+      "--outcome",
+      passphrase,
+    ],
+    ["claims", "claim", "--pr", String(PR), "--set", `${passphrase}=x`],
+  ]) {
+    const refused = await context.run(argv);
+    assert.equal(refused.exitCode, 2, argv.join(" "));
+    assert.ok(
+      !refused.stdout.includes(passphrase),
+      `an unknown word is described, not echoed: ${refused.stdout}`,
+    );
+  }
+
+  // The refusal stays actionable: the word this CLI does know is kept, the
+  // vocabulary is listed, and a near miss is named from that vocabulary.
+  const unknownCommand = await context.run(["claims", passphrase]);
+  assert.match(
+    unknownCommand.document.error.message,
+    /^Unknown command: claims /u,
+  );
+  assert.match(unknownCommand.document.error.message, /expected one of: /u);
+  assert.ok(
+    unknownCommand.document.error.details.known.includes("claims read"),
+  );
+
+  const nearMiss = await context.run([
     "claims",
     "read",
     "--pr",
     String(PR),
-    "--not-a-flag",
+    "--dry-runn",
   ]);
-  assert.match(misspelled.document.error.message, /--not-a-flag/u);
-  const unknownCommand = await context.run(["claims", "frobnicate"]);
-  assert.match(unknownCommand.document.error.message, /claims frobnicate/u);
+  assert.match(nearMiss.document.error.message, /did you mean --dry-run\?/u);
+  const nearOutcome = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(3),
+    "--run-id",
+    RUN_ID,
+    "--outcome",
+    "complete",
+  ]);
+  assert.match(nearOutcome.document.error.message, /did you mean completed\?/u);
+  const nearKey = await context.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--set",
+    "lastPushedHeed=x",
+  ]);
+  assert.match(
+    nearKey.document.error.message,
+    /did you mean lastPushedHead\?/u,
+  );
 });
 
 test("a state write that throws still releases the guard slots it reserved", async () => {
@@ -4717,7 +4779,10 @@ test("a guard command line the grammar refuses still reports on stderr", async (
   const document = refused.stderrDocuments.at(-1);
   assert.equal(document.command, "claims.guard");
   assert.equal(document.status, "usage");
-  assert.match(document.error.message, /--not-a-flag/u);
+  // The command is named; the unknown flag is described rather than echoed,
+  // because a word this CLI does not declare is not evidence of anything.
+  assert.match(document.error.message, /^Unknown flag .* for claims guard/u);
+  assert.match(document.error.message, /<string, 10 characters>/u);
 
   // Every other command keeps reporting on stdout, including one refused by
   // the same parser.
@@ -4971,4 +5036,374 @@ test("a host label the run-id grammar cannot carry is encoded before it is used"
   ]);
   assert.equal(refused.exitCode, 3);
   assert.match(refused.document.error.message, /host/iu);
+});
+
+test("an identifier that is a credential is refused before anything records it", async () => {
+  // The claim-id grammar accepts `ghp_…`, so a token pasted into `--run-id`
+  // was a valid run id: written verbatim into the state entry, into the
+  // payload, and out through guard's own report path, which does not go
+  // through `writeDocument`'s redaction.
+  const context = harness();
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const pat = `github_pat_${"1a2b3c4d5e6f7g8h9i0j".repeat(2)}`;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+
+  const cases = [
+    [
+      "--run-id",
+      [
+        "claims",
+        "renew",
+        "--pr",
+        String(PR),
+        "--token",
+        hexOid(1),
+        "--run-id",
+        secret,
+      ],
+      2,
+    ],
+    [
+      "--run-id-prefix",
+      ["claims", "claim", "--pr", String(PR), "--run-id-prefix", pat],
+      2,
+    ],
+    ["--host", ["claims", "claim", "--pr", String(PR), "--host", secret], 3],
+    ["--agent", ["claims", "claim", "--pr", String(PR), "--agent", pat], 3],
+    [
+      "--set",
+      [
+        "claims",
+        "claim",
+        "--pr",
+        String(PR),
+        "--set",
+        `lastPushedHead=${secret}`,
+      ],
+      2,
+    ],
+    [
+      "guard --run-id",
+      [
+        "claims",
+        "guard",
+        "--pr",
+        String(PR),
+        "--token",
+        hexOid(1),
+        "--run-id",
+        secret,
+        "--gate",
+        "push",
+        "--",
+        "node",
+        "--version",
+      ],
+      2,
+    ],
+  ];
+
+  for (const [label, argv, exitCode] of cases) {
+    const refused = await context.run(argv, { spawn: recordingSpawn(0).spawn });
+    assert.equal(refused.exitCode, exitCode, label);
+    assert.ok(
+      !refused.stdout.includes(secret) && !refused.stderr.includes(secret),
+      `${label} echoes the credential`,
+    );
+    assert.ok(
+      !refused.stdout.includes(pat) && !refused.stderr.includes(pat),
+      `${label} echoes the credential`,
+    );
+    assert.equal(
+      existsSync(store.pathFor(PR)),
+      false,
+      `${label} recorded a state entry`,
+    );
+    assert.equal(context.server.calls.commit.length, 0, `${label} wrote`);
+  }
+
+  // The environment is the other source of a run id, and it is checked the
+  // same way.
+  const fromEnvironment = await context.run(
+    ["claims", "renew", "--pr", String(PR), "--token", hexOid(1)],
+    { env: { CLAUDECODE: "1", MENTO_CLAIM_RUN_ID: secret } },
+  );
+  assert.equal(fromEnvironment.exitCode, 2);
+  assert.ok(!fromEnvironment.stdout.includes(secret));
+
+  // A metadata value that is a credential is refused as one, and a value that
+  // is merely invalid is described rather than echoed — the same rule the
+  // object-id flags follow.
+  const metadata = await context.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--set",
+    `lastPushedHead=${secret}`,
+  ]);
+  assert.equal(metadata.exitCode, 2);
+  assert.match(metadata.document.error.message, /looks like a credential/u);
+  assert.ok(!JSON.stringify(metadata.document).includes(secret));
+
+  const invalid = await context.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--set",
+    "lastPushedHead=not-a-sha",
+  ]);
+  assert.equal(invalid.exitCode, 3);
+  assert.match(invalid.document.error.message, /<string, 9 characters>/u);
+  assert.equal(invalid.document.error.details.value, "<string, 9 characters>");
+});
+
+test("a bad input is refused before the viewer-login call it does not need", async () => {
+  // Every mutating command resolved the login — a `gh api user` round trip —
+  // while building the runtime, so a command its own handler refuses
+  // deterministically reported whatever that network call did. A flaky
+  // transport turned `--set lastPushedHead=not-a-sha` into exit 20.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+
+  let calls = 0;
+  const failing = {
+    readViewerLogin: async () => {
+      calls += 1;
+      const error = new Error("gh api user timed out after 60000 ms");
+      error.code = "GH_TIMEOUT";
+      throw error;
+    },
+  };
+  const withFailingLogin = {
+    operations: { ...context.options.operations, gh: failing },
+  };
+
+  for (const [label, argv] of [
+    [
+      "renew metadata",
+      [
+        "claims",
+        "renew",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--run-id",
+        runId,
+        "--set",
+        "lastPushedHead=not-a-sha",
+      ],
+    ],
+    [
+      "family membership",
+      ["claims", "family", "claim", "--prs", `${PR},${PR}`],
+    ],
+    [
+      "guard pairs",
+      [
+        "claims",
+        "guard",
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--pr",
+        "0",
+        "--token",
+        hexOid(7),
+        "--run-id",
+        runId,
+        "--gate",
+        "push",
+        "--",
+        "node",
+        "--version",
+      ],
+    ],
+  ]) {
+    const refused = await context.run(argv, {
+      ...withFailingLogin,
+      spawn: recordingSpawn(0).spawn,
+    });
+    assert.notEqual(refused.exitCode, 0, label);
+    assert.notEqual(refused.exitCode, 20, `${label} reported the transport`);
+    assert.equal(calls, 0, `${label} reached the network first`);
+  }
+
+  // The login is still resolved for a command that actually writes — once,
+  // and its failure is still only the warning it always was, because the field
+  // is recorded and never compared.
+  const writing = await context.run(
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ],
+    withFailingLogin,
+  );
+  assert.equal(calls, 1, "a write still resolves the login");
+  assert.equal(writing.exitCode, 0);
+  assert.ok(
+    writing.document.warnings.some((warning) => warning.stage === "read-login"),
+    "and says it could not read one",
+  );
+});
+
+test("a rotation the state store cannot record is a warning on guard's report", async () => {
+  // A guard renew rotates the token, and the callback that records it dropped
+  // a failed write on the floor: the report announced the renewal while
+  // `adopt --from-state` still pointed at the token before it.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const acquireToken = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  context.clock.advance(25 * MINUTE);
+
+  const spawned = recordingSpawn(0);
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      acquireToken,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    {
+      spawn: spawned.spawn,
+      createStateStore: (input) => {
+        const real = createStateStore(input);
+        let writes = 0;
+        return {
+          ...real,
+          // The guard's own entry is written; every write after it — the
+          // rotation — fails the way a full or read-only store fails.
+          writeEntry(number, entry) {
+            writes += 1;
+            if (writes === 1) return real.writeEntry(number, entry);
+            return {
+              path: real.pathFor(number),
+              written: false,
+              warning: {
+                stage: "write-state",
+                path: real.pathFor(number),
+                message: "the state store is unusable",
+              },
+            };
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(guarded.exitCode, 0);
+  const report = guarded.stderrDocuments.at(-1);
+  assert.ok(report.renews.length > 0, "the token really rotated");
+  const warned = report.warnings.find(
+    (warning) => warning.stage === "write-state",
+  );
+  assert.ok(warned, `the failed rotation write is reported: ${guarded.stderr}`);
+});
+
+test("releasing a token two renewals old is stale, not already-released", async () => {
+  // A→B→C, all renewals of one run. Releasing A found C, saw it was ours and
+  // that its lineage did not name A, and read that as "the release landed and
+  // this run re-acquired" — the C-8 rule, which only holds for a LOCK acquired
+  // from an UNLOCK. So the CLI answered exit 0, removed the label and cleared
+  // the state entry while the reference was still LOCK at C.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const first = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const renew = async (token) => {
+    context.clock.advance(11 * MINUTE);
+    const renewed = await context.run([
+      "claims",
+      "renew",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ]);
+    assert.equal(renewed.exitCode, 0);
+    return renewed.document.claim.token;
+  };
+  const second = await renew(first);
+  const third = await renew(second);
+  assert.notEqual(third, first);
+  const refName = "refs/mento-claims/v1/pr/872";
+  assert.equal(context.server.getRefOid(refName), third);
+
+  const stale = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    first,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(stale.exitCode, 16, "stop and report, never exit 0");
+  assert.equal(stale.document.status, "stale");
+  assert.ok(
+    stale.document.error.message.includes(third),
+    `the current token is named: ${stale.document.error.message}`,
+  );
+  assert.equal(refState(context.server, refName), "LOCK", "still locked");
+  assert.equal(context.server.getRefOid(refName), third);
+  assert.equal(
+    context.server.hasLabel(PR, "dependabot-prep:claimed"),
+    true,
+    "the label is untouched",
+  );
+
+  // The middle token is the same verdict, and the current one still releases.
+  const middle = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    second,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(middle.exitCode, 16);
+  const released = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    third,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(released.exitCode, 0);
+  assert.equal(released.document.status, "released");
+  assert.equal(refState(context.server, refName), "UNLOCK");
+  assert.equal(context.server.hasLabel(PR, "dependabot-prep:claimed"), false);
 });

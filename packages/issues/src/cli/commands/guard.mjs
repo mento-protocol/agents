@@ -172,6 +172,11 @@ export async function runGuard(runtime) {
   // written and before anything is spawned, and the slot is released if the
   // second check refuses, so a refusal on either path spawns nothing and
   // leaves nothing behind.
+  // The pairs are validated and the dry run is refused; the renews this guard
+  // performs may now spend a round trip on the login they record. It happens
+  // before the reservation so a login failure leaves no slot behind.
+  await runtime.ensureLogin();
+
   const releaseSlots = reserveGuardSlots(runtime, pairs, runId);
   let stateWarnings;
   try {
@@ -239,8 +244,13 @@ export async function runGuard(runtime) {
       // candidate, finds this run's own newer LOCK at the head, and reports the
       // claim superseded — exit 13, "treat work in flight as forfeit" — for a
       // claim this run still holds.
+      // The warnings it returns ride the report. A store that could not record
+      // a rotation used to be silent here, so the report announced a renewal
+      // while `adopt --from-state` still pointed at the token before it —
+      // exactly the mismatch this callback exists to prevent.
       onRenew: (entry) => {
-        if (entry.lease) recordLeaseState(runtime, entry.number, entry.lease);
+        if (!entry.lease) return [];
+        return recordLeaseState(runtime, entry.number, entry.lease).warnings;
       },
     });
   } finally {

@@ -22,6 +22,7 @@ import { ClaimConfigError } from "../claims/errors.mjs";
 import { ClaimUsageError } from "../claims/verify.mjs";
 import { detectRuntime, shortHostLabel } from "../claims/context.mjs";
 import { validateClaimId } from "../claims/payload.mjs";
+import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
 
 /** The environment variables identity reads. */
 export const IDENTITY_ENVIRONMENT_KEYS = Object.freeze({
@@ -54,15 +55,52 @@ export function resolveRunId(input) {
     fromFlag === undefined ? IDENTITY_ENVIRONMENT_KEYS.runId : "--run-id";
   const runId = fromFlag ?? env[IDENTITY_ENVIRONMENT_KEYS.runId] ?? null;
   if (runId === null) return null;
+  assertNotCredential(runId, source);
   try {
     validateClaimId(runId);
   } catch (error) {
+    // Described, never echoed: the value failed the grammar, so nothing has
+    // vouched for it, and this flag is one paste away from a credential.
     throw new ClaimUsageError(
       `${source} is not a valid run id: ${error.message}`,
-      { details: { runId, source }, cause: error },
+      {
+        details: { runId: describeRedactedValue(runId), source },
+        cause: error,
+      },
     );
   }
   return runId;
+}
+
+/**
+ * Refuse an identifier that is a credential.
+ *
+ * The claim-id grammar accepts `ghp_…` and `github_pat_…`, so a token pasted
+ * into `--run-id` was a perfectly valid run id: recorded in the payload every
+ * later reader trusts, written into the host-local state entry, and printed by
+ * guard's own report path. The same applies to every other identifier an
+ * operator can supply — a prefix, a host, a login, an agent — because all of
+ * them are stored and printed. None of them is ever a credential, so a value
+ * the detector recognizes is refused where it enters, and the refusal names
+ * the source rather than the value.
+ *
+ * @param {unknown} value the supplied identifier.
+ * @param {string} source the flag or variable it came from.
+ * @param {typeof ClaimUsageError|typeof ClaimConfigError} [ErrorClass] which
+ *   refusal to raise; identity fields are configuration, flags are usage.
+ * @returns {void}
+ * @throws {ClaimUsageError|ClaimConfigError} when the value is a credential.
+ */
+export function assertNotCredential(
+  value,
+  source,
+  ErrorClass = ClaimUsageError,
+) {
+  if (!containsSecret(value)) return;
+  throw new ErrorClass(
+    `${source} looks like a credential; it is recorded in the claim payload and printed in reports, so it must never be one`,
+    { details: { source, value: describeRedactedValue(value) } },
+  );
 }
 
 /**
@@ -109,6 +147,20 @@ export function resolveCliIdentity(input) {
     env[IDENTITY_ENVIRONMENT_KEYS.runtime] ??
     detectRuntime(env);
   const login = flags.login ?? env[IDENTITY_ENVIRONMENT_KEYS.login] ?? null;
+  const runIdPrefix = flags["run-id-prefix"] ?? null;
+
+  // Every identifier this function resolves is recorded in the payload and
+  // printed in the documents built from it, so none of them may be a
+  // credential. The host, the login and the agent are configuration, which is
+  // exit 3; the prefix is a flag this command line supplied, which is exit 2.
+  assertNotCredential(host, "The claim host", ClaimConfigError);
+  if (login != null) {
+    assertNotCredential(login, "The claim login", ClaimConfigError);
+  }
+  if (flags.agent != null) {
+    assertNotCredential(flags.agent, "The claim agent", ClaimConfigError);
+  }
+  if (runIdPrefix != null) assertNotCredential(runIdPrefix, "--run-id-prefix");
 
   return {
     runId,
@@ -116,7 +168,7 @@ export function resolveCliIdentity(input) {
     runtime,
     login,
     agent: flags.agent ?? null,
-    runIdPrefix: flags["run-id-prefix"] ?? null,
+    runIdPrefix,
   };
 }
 

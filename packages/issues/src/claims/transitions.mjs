@@ -30,6 +30,7 @@ import {
   staleError,
   unknownOutcomeError,
 } from "./errors.mjs";
+import { describeRedactedValue } from "../gh/redact.mjs";
 import {
   buildClaimPayload,
   leaseState,
@@ -81,9 +82,13 @@ function assertMetadataKeys(profile, values) {
     }
     const validator = profile.metadataValidators[key];
     if (validator && !validator(value)) {
+      // Described, never echoed: `--set lastPushedHead=<token>` is one paste
+      // away, and this refusal reaches a message, an `error.details` bag and
+      // every document built from it. Same rule as the object-id flags.
+      const described = describeRedactedValue(value);
       throw new ClaimConfigError(
-        `Metadata key ${key} has an invalid value: ${JSON.stringify(value)}`,
-        { details: { key, value } },
+        `Metadata key ${key} has an invalid value: ${described}`,
+        { details: { key, value: described } },
       );
     }
   }
@@ -321,13 +326,45 @@ export function classifyObservedHead(observed, context) {
       );
     }
     if (ours && payload.parentLock !== parentOid) {
-      // C-8: a later LOCK of our own whose lineage does not name our token can
-      // only exist because the release landed and this run re-acquired.
+      // C-8, and the whole rule is in the lineage. A later LOCK of our own can
+      // exist for two reasons, and only one of them means the release landed:
+      //
+      // * it was **acquired**, so it carries `parentUnlock` — the UNLOCK it
+      //   came from, which only a completed release could have written. That
+      //   is C-8: the release landed and this run re-acquired.
+      // * it was **renewed**, so it carries `parentLock` — the LOCK it
+      //   replaced. The claim was never released; the token given is simply
+      //   one or more renewals old.
+      //
+      // Reading the second as `already-released` answered exit 0 for a
+      // reference still at LOCK, and the CLI then removed the label and
+      // cleared the state entry on the strength of it. A→B→C is enough: the
+      // release of A sees C, whose `parentLock` is B.
+      if (typeof payload.parentUnlock === "string") {
+        return {
+          status: "already-released",
+          reason: "already-released",
+          observed,
+          error: null,
+        };
+      }
       return {
-        status: "already-released",
-        reason: "already-released",
+        status: "stale",
+        reason: "stale",
         observed,
-        error: null,
+        error: staleError(
+          profile,
+          `${profile.subject(scope)} claim ref ${refName} is at ${observed.oid}, which this run renewed to from ${payload.parentLock ?? "<none>"}; token ${parentOid} is stale, so release with ${observed.oid}`,
+          {
+            details: {
+              scope,
+              refName,
+              actual: observed,
+              current: observed.oid,
+            },
+            cause,
+          },
+        ),
       };
     }
     return {

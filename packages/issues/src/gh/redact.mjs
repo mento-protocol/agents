@@ -56,6 +56,88 @@ export function redactSecrets(text) {
 }
 
 /**
+ * Does this value carry a credential shape this module recognizes?
+ *
+ * The question every identifier check asks before it stores a value: a
+ * `ghp_…` satisfies the claim-id grammar, so nothing else in this package
+ * would have stopped one from becoming a run id written into a payload, a
+ * state file and a report.
+ *
+ * @param {unknown} value any value; non-strings are stringified.
+ * @returns {boolean}
+ */
+export function containsSecret(value) {
+  const text = String(value ?? "");
+  return text.length > 0 && redactSecrets(text) !== text;
+}
+
+/**
+ * Describe a rejected value without echoing it.
+ *
+ * Type and length, and nothing of the content — with a recognized credential
+ * named as one, because "you pasted a token here" is the useful half of a
+ * refusal and reveals nothing. The CLI grammar and the claims layer both
+ * report through this, so a refusal reads the same wherever it is raised.
+ *
+ * @param {unknown} value the rejected value.
+ * @returns {string} a description safe to print.
+ */
+export function describeRedactedValue(value) {
+  if (typeof value !== "string") {
+    return value === null || value === undefined
+      ? String(value)
+      : `<${typeof value}>`;
+  }
+  if (value.length === 0) return "<empty>";
+  if (containsSecret(value)) {
+    return `${REDACTION} (${value.length} characters)`;
+  }
+  return `<string, ${value.length} characters>`;
+}
+
+/** How deep the document redaction walks before it stops descending. */
+const REDACTION_MAX_DEPTH = 12;
+
+/**
+ * Redact credential shapes anywhere in a document, before it is written.
+ *
+ * The callers that can carry a secret each redact at their own source — a
+ * rejected `--token`, a `gh` argv, a captured stderr — and this is the last
+ * line rather than a substitute for any of them: one place where every string
+ * in every emitted document is checked once more. Both output paths use it:
+ * the CLI's `writeDocument`, and guard's own report sink, which does not go
+ * through the CLI at all.
+ *
+ * The walk is over the tree, never over the serialized JSON. Redacting the
+ * finished string can eat the closing quote of a value it rewrites — an
+ * `Authorization` header is redacted by position, and the position runs to the
+ * next whitespace — which would leave malformed JSON on stdout.
+ *
+ * Only plain objects and arrays are descended. Anything with a prototype of
+ * its own is left alone, because `JSON.stringify` may render it through a
+ * `toJSON` this walk cannot reproduce.
+ *
+ * @param {unknown} value any part of a document.
+ * @param {number} [depth] the current depth.
+ * @returns {unknown} the same shape, with credentials replaced.
+ */
+export function redactDocument(value, depth = 0) {
+  if (typeof value === "string") return redactSecrets(value);
+  if (depth >= REDACTION_MAX_DEPTH) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDocument(item, depth + 1));
+  }
+  if (value === null || typeof value !== "object") return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const redacted = {};
+  for (const [key, item] of Object.entries(value)) {
+    redacted[key] = redactDocument(item, depth + 1);
+  }
+  return redacted;
+}
+
+/**
  * Slice a buffer to at most `maxBytes` without splitting a UTF-8 sequence.
  *
  * @param {Buffer} buffer

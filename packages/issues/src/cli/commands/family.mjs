@@ -113,6 +113,10 @@ export async function runFamilyClaim(runtime) {
     return { status: "ok", body: { plan: plans } };
   }
 
+  // Membership and metadata are checked; the write may now spend a round trip
+  // on the login it records.
+  await runtime.ensureLogin();
+
   const family = await claimFamily(ctx, order, metadata, {
     overrides: { runIdPrefix: flags["run-id-prefix"] ?? null },
   });
@@ -188,6 +192,10 @@ export async function runFamilyRelease(runtime) {
     return { status: "ok", body: { plan: plans } };
   }
 
+  // The membership is checked; the writes below may now spend a round trip on
+  // the login they record.
+  await runtime.ensureLogin();
+
   // Each member is classified from one read before its lease is required, for
   // the two reasons the single release has. A member this run already released
   // is `already-released`, not a failure, so repeating a family release is
@@ -222,6 +230,11 @@ export async function runFamilyRelease(runtime) {
         done.push(number);
         continue;
       }
+      // And the same rule for a verdict this member cannot act on, exactly as
+      // the single release applies it: the classification read the head's
+      // lineage, and it is collected as this member's failure rather than
+      // replaced by `hydrateClaimLease`'s narrower `not-held`.
+      if (verdict.status === "stale" && verdict.error) throw verdict.error;
       const lease = await hydrateClaimLease(ctx, number, {
         token,
         runId,

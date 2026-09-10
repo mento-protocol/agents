@@ -30,7 +30,7 @@ import {
   ClaimRenewRequiredError,
   ClaimSupersededError,
 } from "./errors.mjs";
-import { redactSecrets } from "../gh/redact.mjs";
+import { redactDocument, redactSecrets } from "../gh/redact.mjs";
 import { leaseState, payloadOwnerRunId } from "./payload.mjs";
 import { claimRefName, readClaim } from "./ref.mjs";
 import { adoptClaim, renewClaim } from "./transitions.mjs";
@@ -690,8 +690,9 @@ function exitCodeForSignal(signalName) {
  *   spawn turns it off.
  * @param {number} [options.minRemainingMs] lease a mandatory purpose requires.
  * @param {object[]} [options.warnings] warnings the caller already collected.
- * @param {(entry: object) => void} [options.onRenew] called after every
- *   successful renew, so a caller can follow the rotated token.
+ * @param {(entry: object) => object[]|void} [options.onRenew] called after
+ *   every successful renew, so a caller can follow the rotated token. Warnings
+ *   it returns are added to the report; a throw becomes one.
  * @param {object} [options.overrides] operations overrides.
  * @returns {Promise<{exitCode: number, report: object}>}
  */
@@ -717,7 +718,12 @@ export async function guardChild(ctx, claims, options = {}) {
   const announceRenew = (entry) => {
     if (typeof onRenew !== "function") return;
     try {
-      onRenew(entry);
+      // A caller that records the rotation — the CLI writes it to the state
+      // file — reports a failure by returning warnings, and they belong on the
+      // report: a renewal the host could not record is exactly what the next
+      // `adopt --from-state` needs to know about.
+      const returned = onRenew(entry);
+      if (Array.isArray(returned)) warnings.push(...returned);
     } catch (error) {
       // Recording a renew is bookkeeping; failing it must not kill a child
       // whose claim the reference says is still held.
@@ -726,7 +732,12 @@ export async function guardChild(ctx, claims, options = {}) {
   };
   const emit = (report) => {
     try {
-      reportSink(JSON.stringify(report));
+      // Guard's reports never pass through the CLI's `writeDocument`, so the
+      // last-line redaction that covers every other document is applied here:
+      // a warning, an error detail or a claim line carrying a credential
+      // reached stderr and the `--report` file untouched. The argv is redacted
+      // at its own source; this covers everything else a report collects.
+      reportSink(JSON.stringify(redactDocument(report)));
     } catch {
       // A broken report sink must never take a publishing write down with it.
     }
@@ -805,6 +816,53 @@ export async function guardChild(ctx, claims, options = {}) {
   } catch (error) {
     if (error instanceof ClaimUsageError) return refuseUsage(error);
     throw error;
+  }
+
+  // An abort that arrived before this call did. Verifying and spawning first
+  // and only then acting on the signal let the child start publishing under a
+  // guard the caller had already withdrawn — and the abort's kill raced the
+  // spawn it was supposed to prevent. Nothing is verified, nothing is spawned,
+  // and the report says so.
+  const abortedReport = (entries = []) =>
+    draft({
+      phase: "verdict",
+      status: "guard-aborted",
+      exitCode: GUARD_SIGNALLED_EXIT_CODE,
+      purpose,
+      gate: mandatory ? "mandatory" : "advisory",
+      entries,
+      spawned: false,
+      killedBy: "guard-aborted",
+    });
+
+  if (signal?.aborted === true) {
+    const report = emit(abortedReport());
+    return { exitCode: GUARD_SIGNALLED_EXIT_CODE, report };
+  }
+
+  // From here the abort is guard's own to act on, and it is armed before the
+  // first verifying read: an abort that arrives while the claims are being
+  // verified must not be noticed only after the child has started publishing.
+  // The signal is never handed to `spawn`, where Node signals the direct child
+  // pid and nothing else: the detached grandchild this guard exists to stop —
+  // a pre-push hook's `trunk check --all` — outlived that, the renew timer was
+  // never cancelled, and the `error` listener reported `spawn-failed` for a
+  // child that had spawned and run.
+  let childStarted = false;
+  let abortedBeforeSpawn = false;
+  let abortListener = null;
+  const clearAbortListener = () => {
+    if (abortListener !== null) {
+      signal?.removeEventListener?.("abort", abortListener);
+      abortListener = null;
+    }
+  };
+  if (signal) {
+    abortListener = () => {
+      if (childStarted) killChild("guard-aborted");
+      else abortedBeforeSpawn = true;
+    };
+    signal.addEventListener?.("abort", abortListener, { once: true });
   }
 
   const minRemainingMs =
@@ -925,6 +983,7 @@ export async function guardChild(ctx, claims, options = {}) {
     ? entries.find((entry) => !entry.report.held)
     : null;
   if (blocked) {
+    clearAbortListener();
     const report = draft({
       phase: "verdict",
       status: blocked.report.reason,
@@ -939,6 +998,15 @@ export async function guardChild(ctx, claims, options = {}) {
     });
     emit(report);
     return { exitCode: report.exitCode, report };
+  }
+
+  // The last moment before anything is spawned. An abort delivered while the
+  // claims were being verified stops here, with the verdict it earned and no
+  // child at all.
+  if (abortedBeforeSpawn) {
+    clearAbortListener();
+    const report = emit(abortedReport(entries));
+    return { exitCode: GUARD_SIGNALLED_EXIT_CODE, report };
   }
 
   const allHeld = entries.every((entry) => entry.report.held);
@@ -971,6 +1039,7 @@ export async function guardChild(ctx, claims, options = {}) {
       detached,
     });
   } catch (error) {
+    clearAbortListener();
     const report = draft({
       phase: "final",
       status: "spawn-failed",
@@ -1071,29 +1140,10 @@ export async function guardChild(ctx, claims, options = {}) {
     }
   }
 
-  // An abort is a stop like any other, so it goes through the same path. It
-  // used to be handed to `spawn`, where Node signals the direct child pid and
-  // nothing else: the detached grandchild this guard exists to stop — a
-  // pre-push hook's `trunk check --all` — outlived the abort and kept
-  // publishing, the renew timer was never cancelled, and the `error` listener
-  // reported `spawn-failed` for a child that had spawned and run. Routed here
-  // it gets the group SIGTERM, the SIGKILL escalation after the grace, the
-  // cancelled renews and a verdict of its own.
-  let abortListener = null;
-  const clearAbortListener = () => {
-    if (abortListener !== null) {
-      signal?.removeEventListener?.("abort", abortListener);
-      abortListener = null;
-    }
-  };
-  if (signal) {
-    if (signal.aborted === true) {
-      killChild("guard-aborted");
-    } else {
-      abortListener = () => killChild("guard-aborted");
-      signal.addEventListener?.("abort", abortListener, { once: true });
-    }
-  }
+  childStarted = true;
+  // An abort that arrived while the claims were being verified: the child is
+  // running now, so it is stopped the way every other loss stops it.
+  if (signal?.aborted === true) killChild("guard-aborted");
 
   function killChild(reason) {
     if (killedBy != null || finished) return;
@@ -1214,6 +1264,28 @@ export async function guardChild(ctx, claims, options = {}) {
         if (Number.isFinite(result.remainingMs)) {
           entry.deadlineMs = attemptAtMs + result.remainingMs;
         }
+        // The report is what the claim line is rendered from, and only the
+        // token, the deadline and the verified instant used to be refreshed:
+        // the final report then paired a renewed token and expiry with the
+        // remaining lease and the renew count from before the child started.
+        entry.report = {
+          ...entry.report,
+          checkedAt: new Date(attemptAtMs).toISOString(),
+          ...(Number.isFinite(result.remainingMs)
+            ? { remainingMs: result.remainingMs }
+            : {}),
+          ...(result.renewed
+            ? {
+                token: entry.lease.token,
+                current: {
+                  ...(entry.report.current ?? {}),
+                  oid: entry.lease.token,
+                  state: "LOCK",
+                  payload: entry.lease.payload,
+                },
+              }
+            : {}),
+        };
         if (result.renewed) {
           entry.token = entry.lease.token;
           renews.push({

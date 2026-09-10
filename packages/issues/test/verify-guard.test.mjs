@@ -1287,6 +1287,156 @@ test("a renew failure guard cannot classify leaves the claim unverified, not hel
   assert.equal(result.report.warnings.at(-1).number, PR);
 });
 
+test("a renewed claim's report carries the renewal, not the spawn-time numbers", async () => {
+  // `claimLineOf` reads `remainingMs` and `renewCount` from the verdict-time
+  // report, and a child-time renew refreshed only the token, the local
+  // deadline and the verified instant. The final report therefore paired a
+  // token and an expiry from the last renewal with a remaining lease and a
+  // renew count from before the child started.
+  const { ctx, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+  });
+
+  await scheduler.registered;
+  const spawnLine = stderr.lines[0].claims[0];
+  assert.equal(spawnLine.renewCount, 0);
+  for (let renew = 0; renew < 2; renew += 1) {
+    clock.advance(11 * MINUTE);
+    await scheduler.tick();
+  }
+  spawned.finish();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.renews.length, 2);
+  const line = result.report.claims[0];
+  assert.equal(line.token, result.report.renews.at(-1).token);
+  assert.equal(line.renewCount, 2, "the count from the last renewal");
+  assert.equal(
+    Date.parse(line.expiresAt) - clock.now(),
+    line.remainingMs,
+    "the remaining lease agrees with the expiry beside it",
+  );
+});
+
+test("a report line carrying a credential is redacted on guard's own path", async () => {
+  // Guard's reports do not go through the CLI's `writeDocument`, so its
+  // redaction never covered them: a warning or a detail carrying a token
+  // reached stderr and the `--report` file verbatim.
+  const { ctx, lease } = await heldLease();
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const stderr = sink();
+  const spawned = recordingSpawn();
+
+  const result = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: exitingArgv(0),
+    spawn: spawned.spawn,
+    reportSink: stderr.write,
+    stdio: "ignore",
+    warnings: [{ stage: "handed-in", message: `token ${secret}` }],
+  });
+
+  assert.equal(result.exitCode, 0);
+  for (const line of stderr.lines) {
+    assert.ok(
+      !JSON.stringify(line).includes(secret),
+      "no emitted report line carries the credential",
+    );
+    const warned = line.warnings.find(
+      (warning) => warning.stage === "handed-in",
+    );
+    assert.match(warned.message, /\[redacted-github-token\]/u);
+  }
+});
+
+test("a renew the caller cannot record is a warning on the report", async () => {
+  // `onRenew` is how the CLI keeps its state file on the rotated token. Its
+  // return value was discarded, so a store that could not record the rotation
+  // left the report announcing a renewal the host had no record of.
+  const { ctx, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    onRenew: (entry) => [
+      { stage: "write-state", number: entry.number, message: "store is full" },
+    ],
+  });
+
+  await scheduler.registered;
+  clock.advance(11 * MINUTE);
+  await scheduler.tick();
+  spawned.finish();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.renews.length, 1);
+  const warned = result.report.warnings.find(
+    (warning) => warning.stage === "write-state",
+  );
+  assert.ok(warned, "the caller's own warning rides the report");
+  assert.equal(warned.number, PR);
+});
+
+test("a guard handed an already-aborted signal verifies nothing and spawns nothing", async () => {
+  // The abort was acted on only after the claims were verified and the child
+  // was spawned, so a caller that had already withdrawn the operation got a
+  // publishing child first and a kill afterwards.
+  const { ctx, server, lease } = await heldLease();
+  const controller = new AbortController();
+  controller.abort();
+  const spawned = recordingSpawn();
+  const stderr = sink();
+  const readsBefore = server.calls.read.length;
+
+  const result = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: exitingArgv(0),
+    spawn: spawned.spawn,
+    signal: controller.signal,
+    reportSink: stderr.write,
+    stdio: "ignore",
+  });
+
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.report.status, "guard-aborted");
+  assert.equal(result.report.killedBy, "guard-aborted");
+  assert.equal(result.report.spawned, false);
+  assert.deepEqual(result.report.claims, [], "nothing was verified");
+  assert.equal(spawned.calls.length, 0, "and nothing was spawned");
+  assert.equal(
+    server.calls.read.length,
+    readsBefore,
+    "not even the verifying read",
+  );
+  assert.deepEqual(
+    stderr.lines.map((line) => line.status),
+    ["guard-aborted"],
+  );
+});
+
 test("an aborted guard kills the child's whole group and says it was aborted", async () => {
   // `options.signal` went straight to `spawn`, so an abort took the one path
   // guard exists to avoid: Node signals the direct child pid and nothing else,

@@ -51,6 +51,10 @@ export async function runTakeover(runtime) {
     };
   }
 
+  // The inputs are checked; the write may now spend a round trip on the login
+  // it records.
+  await runtime.ensureLogin();
+
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     // C-21: the label tracks the ref, not the owner, so a takeover leaves it
     // present and reports `alreadyPresent` rather than changing anything.

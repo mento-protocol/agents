@@ -11,7 +11,11 @@
  * assertable: argument grammar first (exit 2), then flag values such as a
  * token's 40-hex shape (exit 2), then the config document (exit 3), then the
  * gated-flag and environment rules (exit 3), and only then anything that can
- * reach the network.
+ * reach the network. The viewer login is part of that last group: it is
+ * resolved by `runtime.ensureLogin()`, which every mutating handler calls
+ * after its own input checks and before its first write, so a command refused
+ * for a bad `--set`, an impossible family member or a malformed guard pair
+ * spends no round trip at all.
  */
 
 import { randomBytes, randomUUID as nodeRandomUuid } from "node:crypto";
@@ -382,22 +386,39 @@ async function createRuntime(parsed, options) {
   // A spec's `mutates` may be a predicate over the flags — `label reconcile`
   // writes only with `--apply` — and the environment rules below belong to the
   // write, not to the report that can precede it.
-  if (commandMutates(spec, flags)) {
+  const mutates = commandMutates(spec, flags);
+  if (mutates) {
     // Both refusals are environment rules rather than identity ones, so they
     // are checked against the built context and a read still works in both.
-    // They come BEFORE the login read: `resolveLogin` reaches the network, and
-    // this file's own rule is that every environment refusal precedes it.
+    // They are local: no network, so they stay here.
     assertMutationAllowed(ctx);
     assertRuntimeResolved(ctx);
-
-    const resolved = await resolveLogin(identity, {
-      readViewerLogin:
-        operations.gh?.readViewerLogin ?? defaultViewerLoginReader(ctx.options),
-    });
-    identity.login = resolved.login;
-    ctx.owner.login = resolved.login;
-    if (resolved.warning) warnings.push(resolved.warning);
   }
+
+  // The login costs a `gh api user` round trip, and it used to be spent here,
+  // before the handler had looked at its own arguments: a command refused
+  // deterministically for a bad `--set`, an impossible family member or a
+  // malformed guard pair reported whatever that network call did instead —
+  // exit 20 for an input error the CLI could have named offline. Every
+  // mutating handler calls this itself, once, after its own input checks and
+  // before its first write. It is memoized, so repeated calls cost nothing,
+  // and a non-mutating command never reaches the network at all.
+  let loginPromise = null;
+  runtime.ensureLogin = async () => {
+    if (!mutates) return ctx.owner.login;
+    loginPromise ??= (async () => {
+      const resolved = await resolveLogin(identity, {
+        readViewerLogin:
+          operations.gh?.readViewerLogin ??
+          defaultViewerLoginReader(ctx.options),
+      });
+      identity.login = resolved.login;
+      ctx.owner.login = resolved.login;
+      if (resolved.warning) warnings.push(resolved.warning);
+      return resolved.login;
+    })();
+    return loginPromise;
+  };
   return runtime;
 }
 
