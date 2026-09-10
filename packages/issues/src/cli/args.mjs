@@ -9,6 +9,7 @@
 
 import { ClaimUsageError } from "../claims/verify.mjs";
 import { CLAIM_OUTCOMES } from "../claims/constants.mjs";
+import { REDACTION, redactSecrets } from "../gh/redact.mjs";
 
 /** Flags every command accepts. */
 export const GLOBAL_FLAGS = Object.freeze({
@@ -397,6 +398,33 @@ export function parseCommandLine(argv) {
   }
   const { head, childArgv } = splitChildArgv(argv);
   const { key, spec, rest } = resolveCommand(head);
+  try {
+    return parseResolvedCommand({ key, spec, rest, childArgv });
+  } catch (error) {
+    // The command is resolved before a single flag is read, so a refusal from
+    // the grammar still knows which command it belongs to — and the caller
+    // needs that identity even though there is no parse result to carry it.
+    // `runCli` routes a failure document by the resolved command: `claims
+    // guard` prints on stderr, because its stdout belongs to the guarded
+    // child. A throw from the flag parser left no command at all, so guard's
+    // own refusal went out on the child's stream.
+    if (error !== null && typeof error === "object" && !("spec" in error)) {
+      error.spec = spec;
+      error.commandKey = key;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Parse the flags of a command whose spec is already resolved.
+ *
+ * @param {{key: string, spec: object, rest: string[],
+ *   childArgv: string[]|null}} input the resolved command line.
+ * @returns {{key: string, spec: object, flags: object, order: object[],
+ *   childArgv: string[]|null, gated: string[]}}
+ */
+function parseResolvedCommand({ key, spec, rest, childArgv }) {
   if (childArgv !== null && spec.childArgv !== true) {
     throw usage(`${key} takes no child command after --`, { command: key });
   }
@@ -511,6 +539,9 @@ export function pairClaimFlags(order) {
       pending = entry.value;
     } else if (entry.name === "token") {
       if (pending === null) {
+        // The value here is always a 40-hex object id: `assertObjectIdFlags`
+        // runs before any handler and refuses anything else, so this reports a
+        // commit oid rather than a credential.
         throw usage("--token must follow the --pr it belongs to", {
           token: entry.value,
         });
@@ -527,6 +558,36 @@ export function pairClaimFlags(order) {
   return pairs;
 }
 
+/** How much of a rejected value a refusal is allowed to print. */
+const REJECTED_VALUE_PREVIEW = 8;
+
+/**
+ * Describe a rejected flag value without reprinting a credential.
+ *
+ * `--token` is where a credential lands when an agent pastes the wrong
+ * variable, and a refusal is printed, logged and stored: it is the last place
+ * a secret should be copied to. So a value carrying a credential shape is
+ * replaced outright, and anything else is described rather than echoed — short
+ * values whole, because an ordinary typo has to stay readable, and longer ones
+ * by a preview and a length, because a secret this package has no pattern for
+ * is still a secret.
+ *
+ * @param {unknown} value the rejected value.
+ * @returns {string} a description safe to print.
+ */
+function describeRejectedValue(value) {
+  if (typeof value !== "string") {
+    return value === null || value === undefined
+      ? String(value)
+      : `<${typeof value}>`;
+  }
+  const redacted = redactSecrets(value);
+  if (redacted !== value) return `${REDACTION} (${value.length} characters)`;
+  if (value.length === 0) return "<empty>";
+  if (value.length <= REJECTED_VALUE_PREVIEW + 4) return value;
+  return `${value.slice(0, REJECTED_VALUE_PREVIEW)}… (${value.length} characters)`;
+}
+
 /**
  * Refuse a token that is not a 40-character lowercase object id.
  *
@@ -536,9 +597,17 @@ export function pairClaimFlags(order) {
  */
 export function assertObjectId(token, flag = "token") {
   if (typeof token !== "string" || !OBJECT_ID_PATTERN.test(token)) {
+    // The described value, in the message and in the details alike: the
+    // details are copied verbatim into the failure document, so echoing the
+    // raw value there put it on every surface the message was kept off.
+    const described = describeRejectedValue(token);
     throw usage(
-      `--${flag} must be 40 lowercase hex characters, got: ${String(token)}`,
-      { flag, value: token ?? null },
+      `--${flag} must be 40 lowercase hex characters, got: ${described}`,
+      {
+        flag,
+        value: described,
+        length: typeof token === "string" ? token.length : null,
+      },
     );
   }
   return token;

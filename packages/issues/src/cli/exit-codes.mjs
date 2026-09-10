@@ -146,7 +146,15 @@ export function statusForError(error) {
     return "transport";
   }
   const claimCode = error?.claimCode;
-  if (claimCode === "CLAIM_FAMILY_ABORTED") return "family-aborted";
+  if (claimCode === "CLAIM_FAMILY_ABORTED") {
+    // A rollback release that failed leaves a LOCK behind, so the family exits
+    // 16 rather than 10 (`exitCodeForError`). The status has to move with it:
+    // `family-aborted` is the exit-10 row of this table, and a document that
+    // printed it beside exit 16 contradicted the table an agent reads it from
+    // — "skip this family this run" next to the code that means "stop and
+    // report to the operator".
+    return error?.partialClaim === true ? "stale" : "family-aborted";
+  }
   const status = CLAIM_CODE_STATUSES[claimCode];
   if (status) return status;
   // A `MarkerError` and every unclassified throw are the caller's input problem

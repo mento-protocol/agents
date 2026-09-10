@@ -117,9 +117,18 @@ and every one of those restrictions applies.
 
 **A dry run refuses what the write would refuse.** `--dry-run` runs the
 transition's own input checks before it plans, so an unusable `--set` value or
-`--run-id-prefix` is the same refusal, with the same message, whether or not
-the run goes on to write. A plan that answered `ok` for an input the run would
-have rejected was worse than no plan.
+`--run-id-prefix` — on `claim`, `takeover`, `renew` or either `family`
+command — is the same refusal, with the same message, whether or not the run
+goes on to write. `family claim` validates membership first as well, so
+`--prs 872,872` refuses instead of printing two plans for one pull request. A
+plan that answered `ok` for an input the run would have rejected was worse than
+no plan.
+
+**A dry run leaves nothing behind.** No ref is written and no label call is
+made, and the host-local state file is not touched either: `guard --dry-run` is
+refused before it reserves a slot, records a `guarding` entry or replaces a
+`--report` file, and `adopt --dry-run` names the entry it would write without
+writing it.
 
 **`--set` writes claim metadata**, restricted to the profile's keys —
 `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl`. They survive both
@@ -219,8 +228,9 @@ each spawn a publishing child.
 #### The guard slot, and `claims slot clear`
 
 Before it spawns, guard creates one host-local file per guarded pair —
-`<state dir>/<owner>__<repo>/pr-<n>.guard-<digest of run id>.json` — with an
-**exclusive create**. That create is the whole reservation: exactly one of any
+`<state dir>/<owner>__<repo>/pr-<n>.guard-<digest of run id>.json`, with owner
+and repository lowercased so one repository has one directory however it is
+spelled — with an **exclusive create**. That create is the whole reservation: exactly one of any
 number of racing guards makes the file, and every other one exits 3. The holder
 removes it when the child exits, and only its own: the nonce inside is read
 back through a descriptor opened before the unlink, and a file carrying anyone
@@ -358,6 +368,18 @@ The coarse rule, which a calling agent can follow without the table:
 0 proceed; 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR
 and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 ```
+
+A family aborts with `family-aborted` at exit 10 — skip the family this run —
+except when the rollback left a LOCK behind: that is `stale` at exit 16, the
+operator's row, because only a compare-and-swap by hand clears it. A member
+whose LOCK compare-and-swap ended unknown is `unknown-outcome` at exit 12
+instead, and so is a `family release` in which any member's UNLOCK ended
+unknown: the family exits 12 with every ambiguous member listed under
+`unresolved`, each carrying the candidate, the state file it was recorded in
+and the `adopt` line that resolves it. Every other `family release` failure
+keeps the status and exit code the same failure would have on a single
+`release`, so a member this run does not hold is `not-held` at exit 14 either
+way. Members that did release are still listed in `released`.
 
 Exit 3 also covers two faults that are neither the command's nor the mutex's:
 `gh` missing from `PATH`, and a claim reference that reads as absent after three

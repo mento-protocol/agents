@@ -1279,10 +1279,18 @@ test("the exit-code table matches the status table for every status and error cl
     assert.equal(STATUS_EXIT_CODES[status], exitCode, `${status} table row`);
   }
 
-  // A rollback release failure raises the family verdict from 10 to 16.
+  // A rollback release failure raises the family verdict from 10 to 16, and
+  // the status has to move with it: `family-aborted` is the exit-10 row, so a
+  // document naming it beside exit 16 contradicted the table it is read from.
   const partial = new ClaimFamilyAbortedError("family");
   partial.partialClaim = true;
   assert.equal(exitCodeForCliError(partial), 16);
+  assert.equal(statusForError(partial), "stale");
+  assert.equal(
+    STATUS_EXIT_CODES[statusForError(partial)],
+    exitCodeForCliError(partial),
+    "a partial family abort names the status of the code it exits with",
+  );
 
   // Transport and permission classes keep their own rows.
   const transport = new Error("gh api timed out after 60000 ms");
@@ -2391,10 +2399,13 @@ test("family release plans under --dry-run and releases the members it can prove
   assert.equal(context.server.calls.cas.length, casBefore, "no CAS");
 
   // One member this run cannot prove no longer aborts the release of every
-  // other member: 880 is released and 872 is reported.
+  // other member: 880 is released and 872 is reported. The verdict is the one
+  // a single release gives that member — a token that is not the head is
+  // `not-held`, exit 14 — rather than the `stale` exit 16 every collected
+  // failure used to be flattened to.
   const released = await context.run(releaseArgv([hexOid(99), tokens[1]]));
-  assert.equal(released.exitCode, 16);
-  assert.equal(released.document.status, "stale");
+  assert.equal(released.exitCode, 14);
+  assert.equal(released.document.status, "not-held");
   assert.deepEqual(released.document.released, [880]);
   assert.deepEqual(released.document.failures, [872]);
   assert.equal(
@@ -3563,6 +3574,13 @@ test("a dry run refuses the inputs the write would refuse", async () => {
       "family claim prefix",
       ["claims", "family", "claim", "--prs", String(PR), ...badPrefix],
     ],
+    // Membership is `planFamilyClaims`'s job, and it ran after the plan: a
+    // family naming one member twice printed two identical plans and then
+    // refused the moment it was run for real.
+    [
+      "family claim membership",
+      ["claims", "family", "claim", "--prs", `${PR},${PR}`],
+    ],
   ]) {
     const planned = await context.run([...argv, "--dry-run"]);
     assert.notEqual(
@@ -3595,6 +3613,53 @@ test("a dry run refuses the inputs the write would refuse", async () => {
     String(PR),
     "--set",
     `lastPushedHead=${hexOid(5)}`,
+    "--dry-run",
+  ]);
+  assert.equal(fine.exitCode, 0);
+  assert.equal(fine.document.status, "ok");
+});
+
+test("a renew plan refuses the metadata the renew itself refuses", async () => {
+  // The same rule, for the one transition that was left out: `renew --set`
+  // metadata is checked inside `renewClaim`, so a plan happily described a
+  // renew that could not run.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const identity = [
+    "--token",
+    claimed.document.claim.token,
+    "--run-id",
+    claimed.document.claim.runId,
+  ];
+  const argv = [
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    ...identity,
+    "--set",
+    "lastPushedHead=not-a-sha",
+  ];
+
+  const planned = await context.run([...argv, "--dry-run"]);
+  assert.notEqual(planned.exitCode, 0, "the plan predicts execution");
+  const executed = await context.run(argv);
+  assert.equal(planned.exitCode, executed.exitCode);
+  assert.equal(
+    planned.document.error.message,
+    executed.document.error.message,
+    "the plan and the run refuse for the same reason",
+  );
+
+  // A metadata value this profile accepts still plans.
+  const fine = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    ...identity,
+    "--set",
+    `lastPushedHead=${hexOid(6)}`,
     "--dry-run",
   ]);
   assert.equal(fine.exitCode, 0);
@@ -4081,4 +4146,409 @@ test("the printed recovery for an unknown release outcome carries the parent LOC
   assert.equal(adopted.exitCode, 0, printed);
   assert.equal(adopted.document.adopted, true);
   assert.equal(adopted.document.reason, "landed");
+});
+
+test("guard refuses --dry-run before it reserves a slot, records state or writes a report", async () => {
+  // `guardChild` refuses a dry run, but it is reached last: the slot was
+  // already reserved, the state entry already said `guarding`, and the
+  // `--report` file was replaced on the way out. A planning run therefore left
+  // the next real guard of that run id refusing on a slot nobody was holding.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+  const reportPath = join(context.directory, "guard-report.json");
+  const spawned = recordingSpawn(0);
+
+  const planned = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--report",
+      reportPath,
+      "--dry-run",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: spawned.spawn },
+  );
+
+  assert.equal(planned.exitCode, 2);
+  assert.equal(spawned.calls.length, 0, "no child under --dry-run");
+  assert.equal(existsSync(slotPath), false, "no slot is reserved");
+  assert.equal(existsSync(reportPath), false, "no report file is written");
+  assert.notEqual(
+    store.readEntry(PR)?.status,
+    "guarding",
+    "the state entry still describes the claim, not a guard that never ran",
+  );
+  // Guard's stdout belongs to the child, so its refusal is on stderr.
+  assert.equal(planned.stdout, "");
+  const document = planned.stderrDocuments.at(-1);
+  assert.equal(document.command, "claims.guard");
+  assert.equal(document.status, "usage");
+  assert.equal(document.dryRun, true);
+  assert.match(document.error.message, /dry run proves no fence/u);
+
+  // And the real guard that follows still reserves the slot it needs.
+  const ran = recordingSpawn(0);
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: ran.spawn },
+  );
+  assert.equal(guarded.exitCode, 0);
+  assert.equal(ran.calls.length, 1, "the dry run left nothing in the way");
+});
+
+test("adopt under --dry-run writes no state entry", async () => {
+  // `adopt` is a read, except for the one write it makes when the candidate
+  // landed: it records the adopted lease for this host. Under `--dry-run` that
+  // write happened anyway, so a planning run replaced this host's record.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const operationId = claimed.document.claim.operationId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const statePath = store.pathFor(PR);
+  store.clearEntry(PR);
+  assert.equal(existsSync(statePath), false);
+
+  const planned = await context.run([
+    "claims",
+    "adopt",
+    "--pr",
+    String(PR),
+    "--candidate",
+    token,
+    "--operation-id",
+    operationId,
+    "--run-id",
+    runId,
+    "--dry-run",
+  ]);
+  assert.equal(planned.exitCode, 0);
+  assert.equal(planned.document.dryRun, true);
+  assert.equal(planned.document.adopted, true, "the LOCK is still ours");
+  assert.equal(existsSync(statePath), false, "a dry run records nothing");
+
+  // Without the flag the same command records it, which is what makes the
+  // recovery useful at all.
+  const adopted = await context.run([
+    "claims",
+    "adopt",
+    "--pr",
+    String(PR),
+    "--candidate",
+    token,
+    "--operation-id",
+    operationId,
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(adopted.exitCode, 0);
+  assert.equal(existsSync(statePath), true);
+  assert.equal(store.readEntry(PR).token, token);
+});
+
+test("a rejected object id is never echoed back verbatim", async () => {
+  // `--token` is where a credential lands when an agent pastes the wrong
+  // variable, and the refusal copied it into the message, into
+  // `error.details.value` and from there into the emitted document.
+  const context = harness();
+  const secrets = [
+    `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+    `github_pat_${"1a2b3c4d5e6f7g8h9i0j".repeat(2)}`,
+  ];
+  for (const secret of secrets) {
+    const refused = await context.run([
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      secret,
+      "--run-id",
+      RUN_ID,
+    ]);
+    assert.equal(refused.exitCode, 2);
+    assert.equal(refused.document.status, "usage");
+    assert.ok(
+      !refused.stdout.includes(secret) && !refused.stderr.includes(secret),
+      "no output surface carries the secret bytes",
+    );
+    assert.ok(
+      !JSON.stringify(refused.document).includes(secret),
+      "and neither does the emitted document",
+    );
+    assert.ok(!refused.document.error.message.includes(secret));
+    assert.ok(!String(refused.document.error.details.value).includes(secret));
+    assert.match(refused.document.error.message, /40 lowercase hex/u);
+  }
+
+  // A value that is not a credential is still described, so an ordinary typo
+  // is still readable: short values whole, long ones by preview and length.
+  const typo = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    "not-a-token",
+    "--run-id",
+    RUN_ID,
+  ]);
+  assert.equal(typo.exitCode, 2);
+  assert.match(typo.document.error.message, /not-a-token/u);
+  assert.equal(typo.document.error.details.value, "not-a-token");
+
+  const long = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    "z".repeat(64),
+    "--run-id",
+    RUN_ID,
+  ]);
+  assert.equal(long.exitCode, 2);
+  assert.ok(
+    !long.document.error.message.includes("z".repeat(64)),
+    "a long value is previewed, never reprinted whole",
+  );
+  assert.match(long.document.error.message, /64 characters/u);
+});
+
+test("a family release that ends unknown reports exit 12 and records its candidates", async () => {
+  // A member whose UNLOCK compare-and-swap loses its answer may hold a LOCK
+  // this run cannot name. Reporting it as `stale` exit 16 with the failure as
+  // a warning threw away the candidate, so `adopt --from-state` had nothing to
+  // read: the family verdict has to be exit 12, and the candidate has to be on
+  // disk.
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const runId = claimed.document.family.runId;
+  const tokens = claimed.document.family.members.map((member) => member.token);
+
+  // The first release compare-and-swap applies and then loses its answer, and
+  // every read after it fails, so the outcome cannot be reconciled.
+  let lost = false;
+  const flaky = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      await context.server.operations.compareAndSwapRef(...args);
+      lost = true;
+      throw new Error("response lost");
+    },
+    async readClaimRef(...args) {
+      if (lost) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+
+  const released = await context.run(
+    [
+      "claims",
+      "family",
+      "release",
+      "--prs",
+      "872,880",
+      "--tokens",
+      tokens.join(","),
+      "--run-id",
+      runId,
+    ],
+    { operations: { ...context.options.operations, claims: flaky } },
+  );
+
+  assert.equal(released.exitCode, 12, "do not retry; run adopt");
+  assert.equal(released.document.status, "unknown-outcome");
+  assert.equal(released.document.error.claimCode, "CLAIM_UNKNOWN_OUTCOME");
+  assert.equal(released.document.error.recovery.doNotRetry, true);
+  assert.ok(
+    Array.isArray(released.document.unresolved),
+    "every ambiguous member is listed",
+  );
+  assert.equal(released.document.unresolved.length, 1);
+  const [unresolved] = released.document.unresolved;
+  assert.equal(unresolved.number, 880, "the member whose release was lost");
+  assert.equal(typeof unresolved.candidate.oid, "string");
+  assert.match(unresolved.adopt, /claims adopt/u);
+  assert.match(unresolved.adopt, /--action release/u);
+
+  // The candidate is on disk under the member it belongs to, which is what
+  // `adopt --from-state` reads.
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const entry = store.readEntry(880);
+  assert.equal(entry.status, "unknown-outcome");
+  assert.equal(entry.candidate.oid, unresolved.candidate.oid);
+  assert.equal(unresolved.statePath, store.pathFor(880));
+});
+
+test("a family release failure keeps the classification a single release would give it", async () => {
+  // Every collected failure used to be flattened to `stale` exit 16. A member
+  // this run does not hold is `not-held` exit 14 when it is released on its
+  // own, and the family has to say the same thing.
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const runId = claimed.document.family.runId;
+  const tokens = claimed.document.family.members.map((member) => member.token);
+
+  const single = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    "872",
+    "--token",
+    hexOid(99),
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(single.exitCode, 14);
+  assert.equal(single.document.status, "not-held");
+
+  const family = await context.run([
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    "872,880",
+    "--tokens",
+    [hexOid(99), tokens[1]].join(","),
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(family.exitCode, single.exitCode);
+  assert.equal(family.document.status, single.document.status);
+  assert.deepEqual(family.document.released, [880]);
+  assert.deepEqual(family.document.failures, [872]);
+  assert.equal(family.document.error.claimCode, "CLAIM_NOT_HELD");
+  assert.equal(
+    STATUS_EXIT_CODES[family.document.status],
+    family.exitCode,
+    "the status and the exit code agree",
+  );
+});
+
+test("one repository, one state directory, whatever case it is spelled in", async () => {
+  // The claim scope is lowercased before it names a ref, so
+  // `Mento-Protocol/Frontend-Monorepo` and `mento-protocol/frontend-monorepo`
+  // are one claim. On a case-sensitive filesystem they were two state
+  // directories, so the same run could reserve the same guard slot twice —
+  // exactly what the slot exists to stop.
+  const root = temporaryDirectory();
+  const lower = createStateStore({ repository: REPOSITORY, root });
+  const upper = createStateStore({
+    repository: "Mento-Protocol/Frontend-Monorepo",
+    root,
+  });
+  assert.equal(upper.directory, lower.directory);
+  assert.equal(upper.pathFor(PR), lower.pathFor(PR));
+  assert.equal(
+    upper.guardSlotPathFor(PR, RUN_ID),
+    lower.guardSlotPathFor(PR, RUN_ID),
+  );
+
+  const first = lower.reserveGuardSlot(PR, RUN_ID);
+  assert.equal(first.reserved, true);
+  const second = upper.reserveGuardSlot(PR, RUN_ID);
+  assert.equal(second.reserved, false, "one slot, both spellings");
+  first.release();
+
+  lower.writeEntry(PR, { status: "held" });
+  assert.equal(upper.readEntry(PR).status, "held");
+});
+
+test("a guard command line the grammar refuses still reports on stderr", async () => {
+  // `failureStream` routes by the resolved command, and a throw from the flag
+  // parser left no resolved command at all: guard's refusal went to stdout,
+  // which belongs to the child it is supposed to be running.
+  const context = harness();
+  const refused = await context.run([
+    "claims",
+    "guard",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(1),
+    "--run-id",
+    RUN_ID,
+    "--gate",
+    "push",
+    "--not-a-flag",
+    "--",
+    "node",
+    "--version",
+  ]);
+  assert.equal(refused.exitCode, 2);
+  assert.equal(refused.stdout, "", "guard's stdout belongs to the child");
+  const document = refused.stderrDocuments.at(-1);
+  assert.equal(document.command, "claims.guard");
+  assert.equal(document.status, "usage");
+  assert.match(document.error.message, /--not-a-flag/u);
+
+  // Every other command keeps reporting on stdout, including one refused by
+  // the same parser.
+  const other = await context.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--not-a-flag",
+  ]);
+  assert.equal(other.exitCode, 2);
+  assert.equal(other.document.command, "claims.read");
+  assert.equal(other.stderr, "");
 });

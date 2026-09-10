@@ -15,7 +15,11 @@
  */
 
 import { ClaimUsageError, hydrateClaimLease } from "../../claims/verify.mjs";
-import { claimFamily, releaseFamily } from "../../claims/family.mjs";
+import {
+  claimFamily,
+  planFamilyClaims,
+  releaseFamily,
+} from "../../claims/family.mjs";
 import {
   assertTransitionInputs,
   classifyObservedHead,
@@ -24,8 +28,49 @@ import { projectClaimLabel } from "../../claims/label.mjs";
 import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome, collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
+import { exitCodeForCliError, statusForError } from "../exit-codes.mjs";
 import { buildNextCommands, claimBlock } from "../output.mjs";
-import { markFailureContext, recordLeaseState } from "./common.mjs";
+import {
+  markFailureContext,
+  recordLeaseState,
+  recordUnknownOutcome,
+} from "./common.mjs";
+
+/**
+ * Which collected release failure speaks for the whole family.
+ *
+ * Ordered by how strongly the exit code binds the caller, because a family
+ * returns one status for several members: an unresolved candidate first
+ * (12, do not retry), then the three that stop the run and fetch an operator
+ * (16, 21, 3), then the one that forfeits work in flight (13), then the
+ * retryable transport (20), then the races an agent acts on as printed
+ * (15, 14, 11, 10), and last a usage refusal (2). Ties keep the first member
+ * in the caller's own order, and every failure is in `warnings` regardless.
+ */
+const FAILURE_PRECEDENCE = Object.freeze([
+  12, 16, 21, 3, 13, 20, 15, 14, 11, 10, 2,
+]);
+
+/**
+ * @param {Array<{number: number, error: unknown}>} failures collected failures.
+ * @returns {{number: number, error: unknown}|null} the one that names the result.
+ */
+function familyFailure(failures) {
+  let chosen = null;
+  let rank = Number.POSITIVE_INFINITY;
+  for (const failure of failures) {
+    const index = FAILURE_PRECEDENCE.indexOf(
+      exitCodeForCliError(failure.error),
+    );
+    // An exit code the table does not list ranks after every one it does.
+    const position = index === -1 ? FAILURE_PRECEDENCE.length : index;
+    if (position < rank) {
+      rank = position;
+      chosen = failure;
+    }
+  }
+  return chosen;
+}
 
 function guardCommand(runtime, members) {
   // The globals every other printed line carries, from the one renderer that
@@ -54,16 +99,21 @@ export async function runFamilyClaim(runtime) {
     metadata,
     runIdPrefix: flags["run-id-prefix"] ?? null,
   });
+  // Membership is one of those checks. `claimFamily` orders and validates the
+  // members, and a plan that sorted the raw list itself skipped it: a family
+  // naming one member twice printed two identical plans and then refused the
+  // moment it was run. The plan is built from the order the run would use.
+  const order = planFamilyClaims(numbers);
 
   if (ctx.options.dryRun === true) {
     const plans = [];
-    for (const number of [...numbers].sort((left, right) => left - right)) {
+    for (const number of order) {
       plans.push(await planTransition(ctx, number, { action: "acquire" }));
     }
     return { status: "ok", body: { plan: plans } };
   }
 
-  const family = await claimFamily(ctx, numbers, metadata, {
+  const family = await claimFamily(ctx, order, metadata, {
     overrides: { runIdPrefix: flags["run-id-prefix"] ?? null },
   });
 
@@ -198,16 +248,41 @@ export async function runFamilyRelease(runtime) {
     });
   }
 
-  const failed = failures.length > 0;
+  // A member whose UNLOCK compare-and-swap ended unknown may hold a LOCK this
+  // run cannot name. That is not a warning, it is the family's verdict: the
+  // candidate is recorded under its own member — which is exactly what
+  // `adopt --from-state` reads — and the family exits 12, "do not retry; run
+  // adopt", however many other members released cleanly. It used to be exit 16
+  // with the candidate nowhere but in a one-line warning message.
+  const unresolved = [];
+  for (const failure of failures) {
+    if (failure.error?.claimCode !== "CLAIM_UNKNOWN_OUTCOME") continue;
+    const recovery = recordUnknownOutcome(runtime, failure.error, {
+      number: failure.number,
+    });
+    unresolved.push({
+      number: failure.number,
+      candidate: failure.error.details?.candidate ?? null,
+      statePath: recovery.statePath,
+      adopt: recovery.next?.adopt ?? null,
+    });
+  }
+
+  // Every other failure keeps the classification a single release gives it: a
+  // member this run does not hold is `not-held` exit 14 whether one command or
+  // a family reports it. Flattening every failure to `stale` exit 16 sent the
+  // caller to an operator for a race the exit table says to act on.
+  const verdict = familyFailure(failures);
   return {
-    status: failed ? "stale" : "released",
-    exitCode: failed ? 16 : 0,
+    status: verdict ? statusForError(verdict.error) : "released",
+    exitCode: verdict ? exitCodeForCliError(verdict.error) : 0,
     warnings,
-    error: failed ? failures[0].error : null,
+    error: verdict?.error ?? null,
     body: {
       outcome,
       released: releasedNumbers,
       failures: failures.map((failure) => failure.number),
+      ...(unresolved.length > 0 ? { unresolved } : {}),
       next: buildNextCommands({
         globals: runtime.commandGlobals ?? "",
         number: numbers[0],

@@ -91,3 +91,84 @@ export function recordLeaseState(runtime, number, lease) {
     warnings: written.warning ? [written.warning] : [],
   };
 }
+
+/**
+ * Record an unknown outcome's candidate so `adopt --from-state` can find it.
+ *
+ * This is the one moment the state file earns its keep: the process that
+ * created the candidate commit is the only one that knows its `operationId`,
+ * and without that pairing `adopt` cannot prove the commit is ours. The record
+ * is written after the failure and before the document, so a crashed run leaves
+ * either nothing or a complete candidate.
+ *
+ * A failed write is reported and nothing is promised. The recovery metadata is
+ * a pair — the state entry and the commands that read it — so printing a
+ * `statePath` for a file that does not exist would send the operator to a
+ * record no `adopt` can find. The warning says why, and the error block still
+ * carries the candidate and the operator text.
+ *
+ * It lives beside the other command helpers because two callers need it: the
+ * CLI's own failure path in `main.mjs`, and `family release`, which collects a
+ * member's unknown outcome instead of throwing it and would otherwise reduce a
+ * candidate nobody can account for to a warning.
+ *
+ * @param {object|null} runtime the CLI runtime, if it was built.
+ * @param {unknown} error the thrown value.
+ * @param {object} [options] `{ number }` — the member the candidate belongs to,
+ *   for a caller that collects failures rather than throwing them.
+ * @returns {{statePath: string|null, next: object|null}}
+ */
+export function recordUnknownOutcome(runtime, error, options = {}) {
+  const candidate = error?.details?.candidate ?? null;
+  if (
+    !runtime?.stateStore ||
+    error?.claimCode !== "CLAIM_UNKNOWN_OUTCOME" ||
+    typeof candidate?.oid !== "string"
+  ) {
+    return { statePath: null, next: null };
+  }
+  // A family records the member that failed, not the first one it claimed.
+  const number =
+    options.number ?? error.details?.failedAt ?? runtime.failureNumber;
+  if (number == null) return { statePath: null, next: null };
+  const lease = error.details?.lease ?? {};
+  const written = runtime.stateStore.writeEntry(number, {
+    refName: lease.refName ?? runtime.failureRef ?? null,
+    token: lease.token ?? null,
+    runId: lease.owner?.runId ?? null,
+    host: lease.owner?.host ?? null,
+    runtime: lease.owner?.runtime ?? null,
+    login: lease.owner?.login ?? null,
+    status: "unknown-outcome",
+    claimedAt: lease.claimedAt ?? null,
+    startedAt: lease.startedAt ?? null,
+    expiresAt: lease.expiresAt ?? null,
+    renewAfter: lease.renewAfter ?? null,
+    renewCount: lease.renewCount ?? 0,
+    operationId: candidate.operationId ?? null,
+    candidate,
+  });
+  if (written.written !== true) {
+    if (written.warning) runtime.warnings.push(written.warning);
+    return { statePath: null, next: null };
+  }
+  return {
+    statePath: written.path,
+    next: buildNextCommands({
+      globals: runtime.commandGlobals ?? "",
+      number,
+      numberFlag: runtime.ctx?.profile?.numberKey ?? "pr",
+      candidate: candidate.oid,
+      operationId: candidate.operationId ?? null,
+      // The run id the candidate was written under. Without it the printed
+      // `adopt` line judges the landed LOCK against `runId: null` and answers
+      // exit 13 for a claim this run holds.
+      runId: lease.owner?.runId ?? null,
+      action: candidate.action ?? null,
+      // The LOCK a candidate UNLOCK closes. `adoptRelease` compares it to the
+      // observed UNLOCK's `parentLock`, so a release line without it proves
+      // nothing and answers exit 13 for a release that landed.
+      parentLock: candidate.parentOid ?? null,
+    }),
+  };
+}

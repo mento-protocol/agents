@@ -133,9 +133,19 @@ export async function runAdopt(runtime) {
   }
 
   const adopted = await adoptClaim(ctx, number, { candidate, owner });
-  const state = adopted.lease
-    ? recordLeaseState(runtime, number, adopted.lease)
-    : { statePath: runtime.stateStore?.pathFor(number) ?? null, warnings: [] };
+  // `adopt` reads the ref, and this is the one write it makes: the adopted
+  // lease is recorded for this host, so a later `renew`, `guard` or
+  // `adopt --from-state` finds it. A dry run must not make it, and it did —
+  // planning an adoption replaced this host's record for the number whenever
+  // the candidate had landed. The path is still reported, because saying where
+  // the record would go is what a plan is for.
+  const state =
+    adopted.lease && ctx.options.dryRun !== true
+      ? recordLeaseState(runtime, number, adopted.lease)
+      : {
+          statePath: runtime.stateStore?.pathFor(number) ?? null,
+          warnings: [],
+        };
 
   return {
     status: "ok",

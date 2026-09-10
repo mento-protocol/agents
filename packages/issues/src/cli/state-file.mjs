@@ -151,7 +151,14 @@ export function createStateStore(input) {
   } = input;
   const { owner, name } = splitRepo(repository);
   const root = resolve(rawRoot);
-  const directory = join(root, `${owner}__${name}`);
+  // Lowercased, because the claim it records is. GitHub repository names are
+  // case-insensitive and `claimProfile` lowercases the scope before it names a
+  // ref, so `Mento-Protocol/Frontend-Monorepo` and
+  // `mento-protocol/frontend-monorepo` are one claim. On a case-sensitive
+  // filesystem they were two directories: two state entries for one claim, and
+  // — worse — two guard slots, so one run could reserve the same slot twice,
+  // which is the single thing the slot exists to stop.
+  const directory = join(root, `${owner.toLowerCase()}__${name.toLowerCase()}`);
   // The root this host would use with no `--state`, so the printed recovery
   // command carries the flag exactly when it is needed. Resolved as well, so
   // the comparison is between two paths of the same kind.

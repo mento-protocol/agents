@@ -684,7 +684,10 @@ On any failure the acquired members are released in reverse with
 `partialClaim` is true when a rollback release failed, and also when the failed
 member's own lock compare-and-swap ended unknown. That flag is what makes an
 ordinary contended family recoverable (exit 10) and a family whose rollback
-release failed an operator matter (exit 16).
+release failed an operator matter (exit 16). The status moves with the code:
+`statusForError` answers `family-aborted` for the first and `stale` for the
+second, because `family-aborted` is the exit-10 row of the table below, and a
+document printing it beside exit 16 contradicted the table it is read from.
 
 A member is recorded only after its `acquireClaim` returns, so an unknown
 outcome from a lock compare-and-swap can leave a LOCK the rollback never sees.
@@ -706,6 +709,22 @@ extend it.
 
 The configuration invariant `ttlMinutes >= 2 × renewMinutes` is what makes one
 timer safe for a whole family.
+
+`family release` is the mirror image and collects rather than aborts: every
+member is classified from one read, an already-released member is reported as
+released, and a member whose lease cannot be rebuilt no longer keeps the others
+locked until their leases expire. What it reports for those failures is decided
+in two steps. A member whose UNLOCK compare-and-swap ended unknown may hold a
+LOCK this run cannot name, so its candidate is recorded under **its own**
+number — the record `adopt --from-state` reads — and the family answers
+`unknown-outcome` exit 12 with every such member under `unresolved`, each
+carrying its candidate, `statePath` and `adopt` line. Otherwise the family
+answers exactly what a single `release` would answer for that failure, chosen
+by how strongly the exit code binds the caller: 12, then 16, 21 and 3, then 13,
+then 20, then 15, 14, 11 and 10, and last 2, with ties keeping the caller's own
+member order. Flattening every failure to `stale` exit 16 both sent an agent to
+an operator for a race the table says to act on, and reduced an ambiguous
+candidate to a one-line warning.
 
 ## Label projection
 
@@ -833,6 +852,20 @@ redacted by **position** rather than by shape, keeping only the scheme word,
 which is what covers a GitHub App JWT or a `Basic` credential handed to the
 exported `runGh`.
 
+The CLI's own inputs are the third surface. `--token`, `--supersedes`,
+`--candidate` and `--parent-lock` are where a credential lands when an agent
+pastes the wrong variable, and the refusal that rejects one is printed, logged
+and stored: `assertObjectId` therefore describes the value rather than echoing
+it. A credential shape is replaced outright and reported by length only; any
+other value is shown whole while it is short enough to be an ordinary typo, and
+by an eight-character preview plus its length beyond that, because a secret
+this package has no pattern for is still a secret. The description goes into
+`details.value` as well as the message, because the details are copied into the
+failure document verbatim. And `writeDocument` runs one last `redactSecrets`
+pass over every document it writes — over the tree, never over the serialized
+JSON, since positional redaction of a finished string can eat the closing quote
+of the value it rewrites.
+
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,
 `GhAbortError` and `GhOutputLimitError` all carry `outcomeUnknown: true`.
@@ -959,6 +992,17 @@ that keeps it true both read the runtime clock — so a supplied instant forges
 the fence and disables the renew timer in one move, which is the same lie
 `requireFencedWrite` already refuses for `--dry-run`. Reads, advisory gates and
 dry-run planning keep the flag.
+
+`--dry-run` predicts execution and leaves nothing behind, and both halves are
+checked before the plan is built rather than inside the write path. Every
+planning command runs `assertTransitionInputs` first — metadata values and
+`--run-id-prefix` on `claim`, `takeover`, `renew` and both `family` commands —
+and `family claim` runs `planFamilyClaims` too, so a duplicate member refuses
+instead of yielding two plans for one item. The host-local state file is left
+alone as well: `guard` refuses a dry run before it reserves a slot, writes its
+`guarding` entry or replaces `--report`, where it used to refuse only inside
+`guardChild`, after all three; and `adopt` reports the entry it would write
+without writing it.
 
 | Command                                                                   | Required flags                                                                                             | Writes                             |
 | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -1102,7 +1146,12 @@ Both revision directions fail closed:
 The state file lives at
 `${XDG_STATE_HOME:-$HOME/.local/state}/mento-issues/<owner>__<repo>/pr-<n>.json`
 (on macOS, under `~/Library/Application Support/mento-issues/…`), schema
-`mento-issues-lease:v1`. It is host-local convenience plus the `adopt`
+`mento-issues-lease:v1`. `<owner>` and `<repo>` are lowercased, because the
+claim they record is: GitHub repository names are case-insensitive and the
+canonical scope is lowercased before it names a ref. Without that,
+`Mento-Protocol/Frontend-Monorepo` and `mento-protocol/frontend-monorepo` got
+two directories on a case-sensitive filesystem — two entries for one claim, and
+two guard slots, so one run could reserve the same slot twice. It is host-local convenience plus the `adopt`
 candidate record. It is **never** an authority and **never** a `--token`
 source. `claim` and `renew` exit 3 when it names the same run id under a
 different live pid — defence in depth behind the un-suppliable run id.

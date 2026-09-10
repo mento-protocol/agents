@@ -12,7 +12,10 @@
 
 import { assertNoLiveDuplicateRunId } from "../../claims/context.mjs";
 import { hydrateClaimLease } from "../../claims/verify.mjs";
-import { renewClaim } from "../../claims/transitions.mjs";
+import {
+  assertTransitionInputs,
+  renewClaim,
+} from "../../claims/transitions.mjs";
 import { collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { claimBlock } from "../output.mjs";
@@ -34,6 +37,11 @@ export async function runRenew(runtime) {
   const ifDue = flags["if-due"] === true;
   const { scope, ref } = markFailureContext(runtime, number);
   const set = collectSetFlags(flags.set, ctx.profile.metadataKeys);
+  // The plan predicts execution, so it is refused by the same input checks.
+  // `renewClaim` validates the metadata values itself, which a plan never
+  // reaches: `renew --dry-run --set lastPushedHead=not-a-sha` described a
+  // renew that could not run.
+  assertTransitionInputs(ctx, { metadata: set });
 
   if (ctx.options.dryRun === true) {
     return {

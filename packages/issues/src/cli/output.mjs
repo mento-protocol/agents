@@ -10,6 +10,7 @@
 
 import { RESULT_SCHEMA } from "../claims/verify.mjs";
 import { isRecoverableClaimRaceError } from "../claims/errors.mjs";
+import { redactSecrets } from "../gh/redact.mjs";
 import { quoteForCommand } from "../shared/text.mjs";
 import {
   COARSE_EXIT_RULE,
@@ -315,6 +316,46 @@ export function buildFailure(input) {
   return { document, exitCode };
 }
 
+/** How deep the redaction pass walks before it stops descending. */
+const REDACTION_MAX_DEPTH = 12;
+
+/**
+ * Redact credential shapes anywhere in a document, before it is written.
+ *
+ * The callers that can carry a secret each redact at their own source — a
+ * rejected `--token`, a `gh` argv, a captured stderr — and this is the last
+ * line rather than a substitute for any of them: one place where every string
+ * in every document, from any error's `details` bag, is checked once more.
+ *
+ * The walk is over the tree, never over the serialized JSON. Redacting the
+ * finished string can eat the closing quote of a value it rewrites — an
+ * `Authorization` header is redacted by position, and the position runs to the
+ * next whitespace — which would leave malformed JSON on stdout.
+ *
+ * Only plain objects and arrays are descended. Anything with a prototype of
+ * its own is left alone, because `JSON.stringify` may render it through a
+ * `toJSON` this walk cannot reproduce.
+ *
+ * @param {unknown} value any part of a document.
+ * @param {number} [depth] the current depth.
+ * @returns {unknown} the same shape, with credentials replaced.
+ */
+function redactDocument(value, depth = 0) {
+  if (typeof value === "string") return redactSecrets(value);
+  if (depth >= REDACTION_MAX_DEPTH) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDocument(item, depth + 1));
+  }
+  if (value === null || typeof value !== "object") return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const redacted = {};
+  for (const [key, item] of Object.entries(value)) {
+    redacted[key] = redactDocument(item, depth + 1);
+  }
+  return redacted;
+}
+
 /**
  * Write one JSON document and nothing else.
  *
@@ -323,5 +364,5 @@ export function buildFailure(input) {
  * @returns {void}
  */
 export function writeDocument(stream, document) {
-  stream.write(`${JSON.stringify(document)}\n`);
+  stream.write(`${JSON.stringify(redactDocument(document))}\n`);
 }

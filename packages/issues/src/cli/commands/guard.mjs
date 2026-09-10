@@ -20,7 +20,11 @@ import { writeFileSync } from "node:fs";
 import { assertNoLiveDuplicateRunId } from "../../claims/context.mjs";
 import { ClaimConfigError } from "../../claims/errors.mjs";
 import { claimRefName } from "../../claims/ref.mjs";
-import { canonicalFencePurpose, guardChild } from "../../claims/verify.mjs";
+import {
+  ClaimUsageError,
+  canonicalFencePurpose,
+  guardChild,
+} from "../../claims/verify.mjs";
 import { pairClaimFlags } from "../args.mjs";
 import { markFailureContext, recordLeaseState } from "./common.mjs";
 
@@ -136,6 +140,19 @@ export async function runGuard(runtime) {
   const purpose = canonicalFencePurpose(flags.gate);
   const runId = flags["run-id"];
   markFailureContext(runtime, pairs[0].number);
+
+  // A dry run proves no fence, and the refusal belongs here rather than three
+  // side effects later. `guardChild` refuses it too, but it is reached after
+  // the slot has been reserved and the state entry has been written, and its
+  // refusal then travels back through the `--report` write: a planning run left
+  // a `guarding` record, a report describing a child it never spawned, and a
+  // slot the next real guard of that run id refused on.
+  if (ctx.options.dryRun === true) {
+    throw new ClaimUsageError(
+      "A dry run proves no fence, so guard refuses to run a child under --dry-run",
+      { details: { gate: purpose, runId: runId ?? null } },
+    );
+  }
 
   // The slot comes first, and the order is load-bearing for the diagnostic
   // rather than for the safety. Both checks refuse a second guard under one
