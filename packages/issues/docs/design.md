@@ -658,7 +658,12 @@ its statement.
    writes nothing, returning that same report with `spawned: false`, and one
    that arrives while the claims are being verified stops in the same place.
 9. Otherwise forward the child's exit code, unchanged — unless `--advisory` is
-   set, which forces exit 0 and is refused outright on a mandatory gate.
+   set, which forces exit 0 and is refused outright on a mandatory gate. That
+   override covers the **child's** outcome and a verdict this gate does not
+   enforce, never a guard that was terminated: an abort or a forwarded signal
+   stays exit 3 with `--advisory` exactly as without it, because a publishing
+   command stopped mid-flight did not finish, and the pre-spawn abort already
+   answers 3.
 
 Every renew refreshes the **report**, not only the token: `remainingMs`, the
 expiry and `renewCount` on a claim line come from the last renewal, so the
@@ -930,9 +935,18 @@ here" is the useful half of the message and reveals nothing. Reporting short
 values verbatim was not safe: the patterns recognize GitHub's own token shapes
 and nothing else, so a credential of any other shape, or a short one, went
 straight through them. `assertObjectId`, `parseIntegerValue`,
-`parseNumberValue`, `parseKeyValue`, `assertOutcome` and the
-unexpected-argument branch all report through it, in `details` as well as in
-the message, because the details are copied into the failure document verbatim.
+`parseNumberValue`, `parseKeyValue`, `assertOutcome`, the `--now` instant and
+the unexpected-argument branch all report through it, in `details` as well as
+in the message, because the details are copied into the failure document
+verbatim.
+
+Every one of those tables is read with `Object.hasOwn`, never with a bare index
+or `in`. A flag named after an `Object.prototype` member — `--constructor`,
+`--toString` — found an inherited function and was accepted as a declared flag
+whose `type` was `undefined`; the same hazard is closed in the fence-purpose
+aliases and in the claim-code-to-exit-code and claim-code-to-status tables,
+where an error carrying such a `claimCode` would have produced a function where
+an exit code or a status slug belongs.
 
 What the caller typed where this CLI's own **vocabulary** belongs is judged
 against that vocabulary, never against a shape. `describeGrammarWord` echoes a
@@ -1103,6 +1117,14 @@ alone as well: `guard` refuses a dry run before it reserves a slot, writes its
 `guarding` entry or replaces `--report`, where it used to refuse only inside
 `guardChild`, after all three; and `adopt` reports the entry it would write
 without writing it.
+
+Predicting execution includes predicting a success that writes nothing. The
+plan's LOCK-only check is right for a renew and wrong for one release head: the
+UNLOCK whose `parentLock` is the supplied token is the release's own result, so
+running it answers `already-released` at exit 0 while the plan called it a
+refusal. That shape is planned as `status: "already-released"` and
+`would: "nothing: this token's release already landed"`, on the single release
+and on each member of a family release.
 
 | Command                                                                   | Required flags                                                                                             | Writes                             |
 | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |

@@ -220,7 +220,12 @@ export function exitCodeForError(error) {
   if (claimCode === "CLAIM_FAMILY_ABORTED") {
     return error?.partialClaim === true ? 16 : 10;
   }
-  return CLAIM_EXIT_CODES[claimCode] ?? 1;
+  // Own properties only. A foreign error carrying `claimCode: "constructor"`
+  // would otherwise be answered with a function where an exit code belongs.
+  return typeof claimCode === "string" &&
+    Object.hasOwn(CLAIM_EXIT_CODES, claimCode)
+    ? CLAIM_EXIT_CODES[claimCode]
+    : 1;
 }
 
 /**

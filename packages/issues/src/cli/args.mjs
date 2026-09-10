@@ -586,7 +586,11 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
     const equals = token.indexOf("=");
     const name = equals === -1 ? token.slice(2) : token.slice(2, equals);
     const inline = equals === -1 ? null : token.slice(equals + 1);
-    const declared = grammar[name];
+    // Own properties only. The grammar is an object literal, so `--constructor`
+    // and `--toString` found an inherited function and passed as declared
+    // flags, with a `declared.type` of `undefined` steering the rest of the
+    // loop.
+    const declared = Object.hasOwn(grammar, name) ? grammar[name] : undefined;
     if (!declared) {
       // The name only, never an inline `--flag=value`: the value is the half
       // that can be a credential. And the name is echoed only when this

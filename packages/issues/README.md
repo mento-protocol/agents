@@ -151,6 +151,12 @@ writing it. Reads still happen, and one of them is a label read:
 `label reconcile` lists the pull request's labels to report the difference it
 would apply. Nothing under `--dry-run` mutates a label.
 
+**A plan predicts the run's answer, including exit 0.** Planning a release
+whose UNLOCK is already at the head reports `status: "already-released"` and
+what it would do — nothing — rather than a refusal, because that is exactly
+what running it answers, and repeating a release is the case its idempotence
+exists for.
+
 **`--set` writes claim metadata**, restricted to the profile's keys —
 `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl`. They survive both
 renew and takeover, which is what stops a new owner from re-pushing or
@@ -238,7 +244,9 @@ really does gate the write.
 Guard writes its report to **stderr** as one JSON line before spawning and one
 after the child exits; `--report <path>` also writes the final one to a file.
 It forwards the child's exit code unchanged, unless `--advisory` is set, which
-forces exit 0 (and is refused on a mandatory gate). For the `git` and `gh`
+forces exit 0 (and is refused on a mandatory gate). `--advisory` covers the
+child's outcome, never a guard that was terminated: an abort or a forwarded
+`SIGINT`/`SIGTERM`/`SIGHUP` is exit 3 with it exactly as without it. For the `git` and `gh`
 commands this package is designed to guard, exit codes 10–16 are never the
 child's, so a guard exit in that range is guard's own verdict; guard will run
 any argv, though, so for an arbitrary command read `status` and `killedBy` from

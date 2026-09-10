@@ -135,8 +135,16 @@ export class ClaimUsageError extends ClaimConfigError {
  * @throws {ClaimUsageError} for an unknown purpose.
  */
 export function canonicalFencePurpose(purpose) {
-  const canonical = FENCE_PURPOSE_ALIASES[purpose] ?? purpose;
-  if (typeof canonical !== "string" || !(canonical in FENCE_PURPOSES)) {
+  // Own properties only, in both tables: `--gate constructor` finds a function
+  // on `Object.prototype`, and `in` walks the prototype chain as well.
+  const canonical =
+    typeof purpose === "string" && Object.hasOwn(FENCE_PURPOSE_ALIASES, purpose)
+      ? FENCE_PURPOSE_ALIASES[purpose]
+      : purpose;
+  if (
+    typeof canonical !== "string" ||
+    !Object.hasOwn(FENCE_PURPOSES, canonical)
+  ) {
     throw new ClaimUsageError(
       `Unknown fence purpose ${JSON.stringify(purpose)}; expected one of ${Object.keys(
         FENCE_PURPOSES,
@@ -1410,7 +1418,12 @@ export async function guardChild(ctx, claims, options = {}) {
     exitCode = exitCodeForSignal(result.signal);
     status = "child-signalled";
   }
-  if (advisory) exitCode = 0;
+  // `--advisory` forces exit 0 for what the *child* did and for a verdict this
+  // gate does not enforce. It must not cover a guard that was **terminated**: a
+  // Ctrl-C, an operator `kill` or a caller's abort stopped a publishing command
+  // mid-flight, and answering 0 told the caller the work had finished. Exit 3
+  // either way, which is what the pre-spawn abort path already answers.
+  if (advisory && killedBy === null) exitCode = 0;
 
   const report = draft({
     phase: "final",

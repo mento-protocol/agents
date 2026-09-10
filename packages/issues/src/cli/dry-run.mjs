@@ -55,6 +55,9 @@ export async function planTransition(ctx, number, input = {}) {
     beforeOid: state?.oid ?? null,
     would: null,
     refusal: null,
+    // The status the run would report, when it is not the ordinary one. Only
+    // the already-landed release sets it today.
+    status: null,
     eligibleAt:
       view?.eligibleAtMs == null
         ? null
@@ -82,6 +85,21 @@ export async function planTransition(ctx, number, input = {}) {
         ? `the lease is live until ${plan.eligibleAt}`
         : "the LOCK records no expiry, so it is never takeable";
     }
+    return plan;
+  }
+
+  // The one head a release succeeds on without holding a LOCK: the UNLOCK its
+  // own release wrote. `releaseClaim` answers `already-released` and exits 0
+  // there — repeating a release is exactly the case that idempotence is for —
+  // so the shared LOCK-only check called the plan a refusal and predicted the
+  // opposite of what the run does.
+  if (
+    input.action === "release" &&
+    state?.state === "UNLOCK" &&
+    state.payload?.parentLock === input.token
+  ) {
+    plan.would = "nothing: this token's release already landed";
+    plan.status = "already-released";
     return plan;
   }
 

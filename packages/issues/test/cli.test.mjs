@@ -5862,3 +5862,132 @@ test("a runtime that is a credential is refused like every other identifier", as
   assert.equal(unknown.exitCode, 3);
   assert.match(unknown.document.error.message, /must be one of/u);
 });
+
+test("an unparseable --now is described like every other rejected value", async () => {
+  // `--now` is gated twice over, but a caller that holds both permissions is
+  // still a caller pasting a value: the refusal echoed it into the message and
+  // into `details.now`.
+  const context = harness({ claims: { allowOverrides: true } });
+  const passphrase = "correct-horse-battery";
+  const refused = await context.run(
+    ["claims", "read", "--pr", String(PR), "--now", passphrase],
+    {
+      env: { CLAUDECODE: "1", MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE: "1" },
+    },
+  );
+
+  assert.equal(refused.exitCode, 2);
+  assert.ok(
+    !refused.stdout.includes(passphrase),
+    `the value is described, not echoed: ${refused.stdout}`,
+  );
+  assert.match(refused.document.error.message, /<string, 21 characters>/u);
+  assert.equal(refused.document.error.details.now, "<string, 21 characters>");
+
+  // A parseable instant still works, which is what the flag is for.
+  const accepted = await context.run(
+    ["claims", "read", "--pr", String(PR), "--now", "2026-09-09T10:00:00.000Z"],
+    { env: { CLAUDECODE: "1", MENTO_ISSUES_ALLOW_CLOCK_OVERRIDE: "1" } },
+  );
+  assert.equal(accepted.exitCode, 0);
+});
+
+test("a release plan predicts already-released instead of calling it a refusal", async () => {
+  // The plan applied the shared LOCK-only check, so replanning a release that
+  // had already landed reported a refusal for a command that exits 0
+  // `already-released` when it is run — the opposite of what a plan is for.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const releaseArgv = [
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+  ];
+  assert.equal((await context.run(releaseArgv)).exitCode, 0);
+
+  const planned = await context.run([...releaseArgv, "--dry-run"]);
+  assert.equal(planned.exitCode, 0);
+  assert.equal(planned.document.plan.refusal, null, "it is not a refusal");
+  assert.equal(planned.document.plan.status, "already-released");
+  assert.match(planned.document.plan.would, /already landed/u);
+
+  // And the run it predicts answers exactly that.
+  const executed = await context.run(releaseArgv);
+  assert.equal(executed.exitCode, 0);
+  assert.equal(executed.document.status, "already-released");
+
+  // The family plan reads the same head through the same planner.
+  const family = await context.run([
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    String(PR),
+    "--tokens",
+    token,
+    "--run-id",
+    runId,
+    "--dry-run",
+  ]);
+  assert.equal(family.exitCode, 0);
+  assert.equal(family.document.plan[0].status, "already-released");
+  assert.equal(family.document.plan[0].refusal, null);
+
+  // A token that never held the claim is still a refusal.
+  const bogus = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(88),
+    "--run-id",
+    runId,
+    "--dry-run",
+  ]);
+  assert.equal(bogus.document.plan.status, null);
+  assert.match(bogus.document.plan.refusal, /not this run's LOCK/u);
+});
+
+test("a flag named after an Object.prototype member is an unknown flag", async () => {
+  // The grammar is an object literal, so `grammar["constructor"]` returned an
+  // inherited function and the flag was accepted as declared — with a
+  // `declared.type` of `undefined` steering everything after it.
+  const context = harness();
+  for (const argv of [
+    ["claims", "read", "--pr", String(PR), "--constructor", "ignored"],
+    ["claims", "read", "--pr", String(PR), "--__proto__", "x"],
+    ["claims", "read", "--pr", String(PR), "--toString"],
+    ["claims", "read", "--pr", String(PR), "--hasOwnProperty=x"],
+  ]) {
+    const refused = await context.run(argv);
+    assert.equal(refused.exitCode, 2, argv.join(" "));
+    assert.equal(refused.document.status, "usage", argv.join(" "));
+    assert.match(refused.document.error.message, /^Unknown flag /u);
+    assert.equal(context.server.calls.commit.length, 0, "nothing was written");
+  }
+
+  // A gate named the same way is refused by its own vocabulary, not accepted
+  // through the prototype chain.
+  const gated = await context.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(1),
+    "--run-id",
+    RUN_ID,
+    "--gate",
+    "constructor",
+  ]);
+  assert.equal(gated.exitCode, 2);
+  assert.match(gated.document.error.message, /fence purpose/u);
+});

@@ -33,6 +33,7 @@ import {
   createClaimContext,
 } from "../claims/context.mjs";
 import { defaultOperations } from "../claims/ref.mjs";
+import { describeRedactedValue } from "../gh/redact.mjs";
 import {
   assertObjectId,
   assertTimeoutSeconds,
@@ -163,10 +164,13 @@ function buildClock(flags, env, injected) {
   }
   const parsed = Date.parse(flags.now);
   if (!Number.isFinite(parsed)) {
+    // Described, never echoed, like every other rejected value: this flag is
+    // gated rather than rare, and a refusal is printed, logged and stored.
+    const described = describeRedactedValue(flags.now);
     throw new ClaimUsageError(
-      `--now is not a parseable instant: ${flags.now}`,
+      `--now is not a parseable instant: ${described}`,
       {
-        details: { now: flags.now },
+        details: { now: described },
       },
     );
   }

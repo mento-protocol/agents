@@ -155,8 +155,14 @@ export function statusForError(error) {
     // report to the operator".
     return error?.partialClaim === true ? "stale" : "family-aborted";
   }
-  const status = CLAIM_CODE_STATUSES[claimCode];
-  if (status) return status;
+  // Own properties only: a `claimCode` naming an `Object.prototype` member
+  // would otherwise return a function where a status slug belongs.
+  if (
+    typeof claimCode === "string" &&
+    Object.hasOwn(CLAIM_CODE_STATUSES, claimCode)
+  ) {
+    return CLAIM_CODE_STATUSES[claimCode];
+  }
   // A `MarkerError` and every unclassified throw are the caller's input problem
   // until proven otherwise: exit 2 tells an agent to fix the command, where a
   // silent exit 1 would tell it nothing at all.

@@ -1399,6 +1399,76 @@ test("a renew the caller cannot record is a warning on the report", async () => 
   assert.equal(warned.number, PR);
 });
 
+test("--advisory forces exit 0 for the child, never for a termination", async () => {
+  // `--advisory` forces exit 0 for whatever the child did. The override was
+  // unconditional, so a guard that was aborted or signalled — a publishing
+  // command stopped mid-flight — also reported 0, telling the caller the work
+  // had finished.
+  const scheduler = () => () => {};
+
+  const aborted = await (async () => {
+    const { ctx, lease } = await heldLease();
+    const controller = new AbortController();
+    const spawned = realSpawn();
+    const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+      runId: lease.owner.runId,
+      purpose: "wait",
+      advisory: true,
+      argv: [...LONG_LIVED_ARGV],
+      spawn: spawned.spawn,
+      signal: controller.signal,
+      scheduleRenews: scheduler,
+      reportSink: sink().write,
+      stdio: [...LONG_LIVED_STDIO],
+      killGraceMs: 50,
+    });
+    // Long enough for the verifying read to have finished and the child to be
+    // running, so the abort lands mid-flight rather than before the spawn.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    return guarded;
+  })();
+  assert.equal(aborted.exitCode, 3, "an aborted advisory guard is not 0");
+  assert.equal(aborted.report.status, "guard-aborted");
+
+  const signalled = await (async () => {
+    const { ctx, lease } = await heldLease();
+    const spawned = realSpawn();
+    const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+      runId: lease.owner.runId,
+      purpose: "wait",
+      advisory: true,
+      argv: [...LONG_LIVED_ARGV],
+      spawn: spawned.spawn,
+      scheduleRenews: scheduler,
+      reportSink: sink().write,
+      stdio: [...LONG_LIVED_STDIO],
+      killGraceMs: 50,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Delivered to guard's own handler, so the test runner is never signalled.
+    process.listeners("SIGINT").at(-1)();
+    return guarded;
+  })();
+  assert.equal(signalled.exitCode, 3, "a signalled advisory guard is not 0");
+  assert.equal(signalled.report.status, "guard-signalled");
+
+  // The ordinary case is unchanged: `--advisory` still forwards a failing
+  // child as exit 0.
+  const { ctx, lease } = await heldLease();
+  const ordinary = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "wait",
+    advisory: true,
+    argv: exitingArgv(97),
+    scheduleRenews: scheduler,
+    reportSink: sink().write,
+    stdio: "ignore",
+  });
+  assert.equal(ordinary.exitCode, 0);
+  assert.equal(ordinary.report.child.exitCode, 97);
+});
+
 test("a guard handed an already-aborted signal verifies nothing and spawns nothing", async () => {
   // The abort was acted on only after the claims were verified and the child
   // was spawned, so a caller that had already withdrawn the operation got a
