@@ -117,6 +117,14 @@ old is not that case — the reference is still LOCK — so it is exit 16 `stale
 naming the token to release with, and nothing is unlabelled or cleared. Every
 renew prints the rotated token in `next`, and that is the one to release with.
 
+**A release reconciles the label; it never removes it blindly.** A successor
+can acquire between the compare-and-swap that writes the UNLOCK and the label
+call that follows it. `release` and `family release` therefore reconcile each
+released pull request's label against the reference as it is when that call
+runs — the same comparison `label reconcile --apply` makes — so the label goes
+only when the reference is at UNLOCK or absent, and a successor's LOCK keeps
+it. The reported `label.changed` is what the reconcile actually did.
+
 **An identifier is never a credential.** `--run-id` (and
 `MENTO_CLAIM_RUN_ID`), `--run-id-prefix`, `--host`, `--runtime`, `--login`,
 `--agent` and every `--set` value are refused when they carry a credential
@@ -224,7 +232,11 @@ signal to that group and exits **3**, with `killedBy: "guard-<signal>"` in the
 report. A library caller's `AbortSignal` stops it the same way, reported as
 `killedBy: "guard-aborted"` and `status: "guard-aborted"`: the abort reaches
 the whole process group, not the direct child alone, so a detached grandchild
-cannot outlive it. `detached` takes the child out of the terminal's foreground
+cannot outlive it. An abort that arrives **before** the child starts stops
+there instead of waiting: the pre-spawn verification can sit in a `gh` call for
+as long as the transport timeout allows, and an abort during it now ends the
+run with `spawned: false` rather than spawning the command afterwards.
+`detached` takes the child out of the terminal's foreground
 group, so without that forwarding a Ctrl-C would kill guard and leave the child
 publishing under a lease nothing renews. The same `detached` gives the child no
 controlling terminal, so a guarded command must be non-interactive: a
@@ -405,6 +417,14 @@ The coarse rule, which a calling agent can follow without the table:
 0 proceed; 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR
 and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 ```
+
+**A refusal is not an ambiguity.** A write the server refused (`permission`,
+exit 21) and a missing `gh` (`config`, exit 3) answer the request rather than
+leaving it open, so the compare-and-swap loop stops on them and reports them as
+themselves. It used to spend its attempts, find the reference unmoved each
+time, and report exit 12 `unknown-outcome` — sending the operator to `adopt` to
+look for a commit that was never written. A credential that may read the
+reference but not write it is exit 21 for that reason.
 
 A family aborts with `family-aborted` at exit 10 — skip the family this run —
 except when the rollback left a LOCK behind: that is `stale` at exit 16, the

@@ -1469,6 +1469,64 @@ test("--advisory forces exit 0 for the child, never for a termination", async ()
   assert.equal(ordinary.report.child.exitCode, 97);
 });
 
+test("an abort during the verifying read stops there, and spawns nothing", async () => {
+  // The abort only set a flag, and the loop read on: every remaining member,
+  // and a repair renew for one it could fix, until the transport finally
+  // answered — or never, if the caller's own signal made that transport reject
+  // as a plain failure. The pre-spawn work races the abort now, and nothing
+  // further is read or renewed once it arrives.
+  const { ctx, server, lease } = await heldLease();
+  const controller = new AbortController();
+  const spawned = recordingSpawn();
+  const stderr = sink();
+
+  let reads = 0;
+  let releaseRead = () => {};
+  const held = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  const slow = server.withOperations({
+    // The first read never answers until this test lets it, which is the shape
+    // of a transport that has stopped talking.
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads === 1) await held;
+      return server.operations.readClaimRef(...args);
+    },
+  });
+
+  const guarded = guardChild(
+    ctx,
+    [
+      { number: PR, token: lease.token },
+      { number: 880, token: lease.token },
+    ],
+    {
+      runId: lease.owner.runId,
+      purpose: "push",
+      argv: exitingArgv(0),
+      spawn: spawned.spawn,
+      signal: controller.signal,
+      scheduleRenews: () => () => {},
+      reportSink: stderr.write,
+      stdio: "ignore",
+      overrides: slow,
+    },
+  );
+
+  // Give the first read time to be in flight, then withdraw the operation.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.abort();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 3, "the abort is answered, not waited out");
+  assert.equal(result.report.status, "guard-aborted");
+  assert.equal(result.report.spawned, false);
+  assert.equal(spawned.calls.length, 0);
+  assert.equal(reads, 1, "no further member is read once the abort arrives");
+  releaseRead();
+});
+
 test("a guard handed an already-aborted signal verifies nothing and spawns nothing", async () => {
   // The abort was acted on only after the claims were verified and the child
   // was spawned, so a caller that had already withdrawn the operation got a

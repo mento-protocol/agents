@@ -251,19 +251,27 @@ test("ref name is refs/mento-claims/v1/pr/872 and a matching-refs response conta
   const head = await readClaimRefFromGitHub(ctx, refName, scope, {
     async json(args) {
       jsonCalls.push(args);
+      // Two `--slurp` pages, the exact ref on the **second**. The prefix match
+      // returns every `…/87x`, so a namespace past one page pushed the ref
+      // this read is about onto a later one, where an unpaginated read could
+      // not see it — and the claim read as absent.
       return [
-        {
-          ref: "refs/mento-claims/v1/pr/87",
-          object: { sha: "a".repeat(40), type: "commit" },
-        },
-        {
-          ref: "refs/mento-claims/v1/pr/8720",
-          object: { sha: "b".repeat(40), type: "commit" },
-        },
-        {
-          ref: "refs/mento-claims/v1/pr/872",
-          object: { sha: "c".repeat(40), type: "commit" },
-        },
+        [
+          {
+            ref: "refs/mento-claims/v1/pr/87",
+            object: { sha: "a".repeat(40), type: "commit" },
+          },
+          {
+            ref: "refs/mento-claims/v1/pr/8720",
+            object: { sha: "b".repeat(40), type: "commit" },
+          },
+        ],
+        [
+          {
+            ref: "refs/mento-claims/v1/pr/872",
+            object: { sha: "c".repeat(40), type: "commit" },
+          },
+        ],
       ];
     },
     async graphql(query, variables) {
@@ -287,6 +295,8 @@ test("ref name is refs/mento-claims/v1/pr/872 and a matching-refs response conta
   assert.deepEqual(jsonCalls, [
     [
       "api",
+      "--paginate",
+      "--slurp",
       "repos/mento-protocol/frontend-monorepo/git/matching-refs/mento-claims/v1/pr/872",
     ],
   ]);

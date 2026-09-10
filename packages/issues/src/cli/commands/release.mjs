@@ -16,10 +16,7 @@ import {
   classifyObservedHead,
   releaseClaim,
 } from "../../claims/transitions.mjs";
-import {
-  projectClaimLabel,
-  projectClaimLabelAfter,
-} from "../../claims/label.mjs";
+import { reconcileClaimLabel } from "../../claims/label.mjs";
 import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
@@ -81,7 +78,10 @@ export async function runRelease(runtime) {
     owner: { ...ctx.owner, runId },
   });
   if (head?.state === "UNLOCK" && verdict.status === "already-released") {
-    const label = await projectClaimLabel(ctx, number, { present: false });
+    // The label follows the reference as the reference is **now**, not as this
+    // release left it: another run may have claimed the item since, and a
+    // blind remove would leave its LOCK on an item that looks unclaimed.
+    const label = await labelAfterRelease(ctx, number);
     // Only while the entry still names this lease: a new local claim of the
     // same item may have written its own record at this path in the meantime,
     // and deleting it would take the successor's `adopt` candidate with it.
@@ -132,10 +132,15 @@ export async function runRelease(runtime) {
     runId,
     current: head,
   });
-  const { result, label } = await projectClaimLabelAfter(ctx, number, {
-    present: false,
-    run: () => releaseClaim(lease, { outcome }),
-  });
+  const result = await releaseClaim(lease, { outcome });
+  // Then the label, against the reference as it is **now**. Removing it
+  // because this release wanted it gone was a stale intention by the time it
+  // ran: a successor can acquire between the compare-and-swap and this call,
+  // it finds the label already present and adds nothing, and the remove then
+  // left its LOCK on an item that looks unclaimed. Reconciling reads the head
+  // first and applies what the head says. The label call still happens only
+  // after the compare-and-swap is confirmed (§2.13).
+  const label = await labelAfterRelease(ctx, number);
   // Compare, then remove. This runs after the compare-and-swap and after the
   // label projection — long enough for a new local claim of the same item to
   // have written its own entry at this path — and clearing it unconditionally
@@ -171,5 +176,35 @@ export async function runRelease(runtime) {
       stateCleared: cleared?.removed ?? null,
       stateClearReason: cleared?.reason ?? null,
     },
+  };
+}
+
+/**
+ * Bring the label in line with the reference, after a release has landed.
+ *
+ * The label is a projection of the ref (I-G), and the ref is what it is when
+ * this runs — not what this release intended. A successor that acquired in
+ * between sees the label already present and adds nothing, so removing it on
+ * the strength of a finished release left a held claim looking unclaimed.
+ * `reconcileClaimLabel` reads the head first and applies what it says: remove
+ * for an UNLOCK or an absent ref, leave alone for a LOCK.
+ *
+ * It never throws, and a failure here never fails a release that landed: the
+ * warnings ride the document.
+ *
+ * @param {object} ctx claim context.
+ * @param {number} number PR or issue number.
+ * @returns {Promise<{name: string|null, changed: boolean, status: string,
+ *   warnings: object[]}>}
+ */
+async function labelAfterRelease(ctx, number) {
+  const reconcile = await reconcileClaimLabel(ctx, number, { apply: true });
+  return {
+    name: reconcile.name,
+    changed: reconcile.changed === true,
+    // `applied` carries the projection's own status when one was made; the
+    // reconcile's status covers every other outcome (`in-sync`, `unknown`).
+    status: reconcile.applied?.status ?? reconcile.status,
+    warnings: reconcile.warnings,
   };
 }

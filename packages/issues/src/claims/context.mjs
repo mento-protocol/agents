@@ -210,9 +210,15 @@ export function resolveOwner(partial = {}, options = {}) {
 
   const login = partial.login ?? env.MENTO_CLAIM_LOGIN ?? null;
   if (login != null && !isGithubLogin(login)) {
-    throw new ClaimConfigError(`Claim login is not a GitHub login: ${login}`, {
-      details: { login },
-    });
+    // Described, never echoed. A login is not a closed vocabulary, so there is
+    // no word to print back, and a value that failed the grammar has nothing
+    // vouching for it: `--login` is one paste away from a credential the
+    // patterns do not recognize.
+    const described = describeRedactedValue(login);
+    throw new ClaimConfigError(
+      `Claim login is not a GitHub login: ${described}`,
+      { details: { login: described } },
+    );
   }
 
   const agent = partial.agent ?? null;

@@ -284,16 +284,23 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
     {
       json: async (args, options) => {
         jsonCalls.push({ args, options });
+        // The `--slurp` shape: one array per page. The exact ref sits on the
+        // **second** page, where an unpaginated read never saw it — and the
+        // claim then read as absent.
         return [
-          {
-            ref: "refs/mento-claims/v1/pr/87",
-            object: { sha: PARENT_OID, type: "commit" },
-          },
-          { ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } },
-          {
-            ref: "refs/mento-claims/v1/pr/8720",
-            object: { sha: TREE_OID, type: "commit" },
-          },
+          [
+            {
+              ref: "refs/mento-claims/v1/pr/87",
+              object: { sha: PARENT_OID, type: "commit" },
+            },
+          ],
+          [
+            { ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } },
+            {
+              ref: "refs/mento-claims/v1/pr/8720",
+              object: { sha: TREE_OID, type: "commit" },
+            },
+          ],
         ];
       },
       graphql: async (query, variables, options) => {
@@ -317,6 +324,8 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
   assert.equal(jsonCalls.length, 1);
   assert.deepEqual(jsonCalls[0].args, [
     "api",
+    "--paginate",
+    "--slurp",
     "repos/owner/name/git/matching-refs/mento-claims/v1/pr/872",
   ]);
   assert.equal(jsonCalls[0].options.mutates, false);
@@ -333,20 +342,36 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
   // A ref that does not exist reads as null, without a second call.
   const absent = await readRefCommit({ repo: "owner/name" }, REF_NAME, {
     json: async () => [
-      {
-        ref: "refs/mento-claims/v1/pr/87",
-        object: { sha: PARENT_OID, type: "commit" },
-      },
+      [
+        {
+          ref: "refs/mento-claims/v1/pr/87",
+          object: { sha: PARENT_OID, type: "commit" },
+        },
+      ],
     ],
     graphql: async () => assert.fail("no object read for an absent ref"),
   });
   assert.equal(absent, null);
 
+  // An error body — which `--slurp` wraps as a page that is not an array — is
+  // refused rather than read as "the claim is absent".
+  await assert.rejects(
+    () =>
+      readRefCommit({ repo: "owner/name" }, REF_NAME, {
+        json: async () => [{ message: "Not Found" }],
+        graphql: async () => assert.fail("no object read"),
+      }),
+    (error) => {
+      assert.equal(error.code, "GH_UNEXPECTED_RESPONSE");
+      return true;
+    },
+  );
+
   // A ref pointing at something other than a commit reports it instead of
   // pretending to have a payload.
   const foreign = await readRefCommit({ repo: "owner/name" }, REF_NAME, {
     json: async () => [
-      { ref: REF_NAME, object: { sha: COMMIT_OID, type: "tag" } },
+      [{ ref: REF_NAME, object: { sha: COMMIT_OID, type: "tag" } }],
     ],
     graphql: async () => ({
       data: {
@@ -1183,6 +1208,37 @@ test("the repository splitter requires exactly two non-empty components", () => 
       /Repository must be owner\/name/u,
       `${repo} must be refused`,
     );
+  }
+
+  // Two components is not enough either. Both halves are spliced into a REST
+  // path unencoded, so `owner/name?per_page=1` counted as `owner/name` and
+  // then rewrote the request it was interpolated into — and `..` would have
+  // walked out of the path altogether.
+  for (const repo of [
+    "owner/name?per_page=1",
+    "owner/name#fragment",
+    "owner/na me",
+    "owner/..",
+    "../name",
+    ".hidden/name",
+    "owner/name%2f..",
+    "owner/name\\extra",
+  ]) {
+    assert.throws(
+      () => splitRepo(repo),
+      /must start alphanumeric/u,
+      `${repo} must be refused`,
+    );
+  }
+
+  // And the shapes GitHub really uses still pass.
+  for (const repo of [
+    "mento-protocol/frontend-monorepo",
+    "Owner1/name.with.dots",
+    "owner/name_with_underscores",
+    "0owner/9name",
+  ]) {
+    assert.equal(splitRepo(repo).nameWithOwner, repo);
   }
 });
 

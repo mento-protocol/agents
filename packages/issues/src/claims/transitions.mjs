@@ -579,6 +579,12 @@ async function writeLockTransition({
       );
     }
     if (err?.claimCode === "CLAIM_REF_INVALID") throw err;
+    // A transport failure carries no observed head, and there is nothing to
+    // classify from one: `classifyObservedHead(null, …)` reads "the ref is
+    // absent" and answers `superseded` — exit 13, "treat work in flight as
+    // forfeit" — for a 403 or a missing `gh`. It passes through as itself, so
+    // a permission refusal is exit 21 and an environment fault is exit 3.
+    if (isTransportFailure(err)) throw err;
     throwClassified(
       classifyAdvanceConflict(err, {
         profile: ctx.profile,
@@ -1191,6 +1197,10 @@ export async function releaseClaim(lease, options = {}) {
         { details: err.details, cause: err },
       );
     }
+    // Same rule as the LOCK transitions: a transport failure carries no
+    // observed head, so classifying it would read "the ref is absent" and
+    // answer `superseded` for a 403 or a missing `gh`.
+    if (isTransportFailure(err)) throw err;
     const verdict = classifyAdvanceConflict(err, {
       profile,
       scope,

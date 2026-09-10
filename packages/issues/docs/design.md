@@ -471,6 +471,17 @@ errors, is treated identically: **the outcome is unknown until the reconcile
 read decides.** The fake server's friendlier messages are test conveniences and
 carry no meaning in production.
 
+Two failures are exempt, because they are not ambiguous at all. A permission
+refusal (`GH_PERMISSION`) is the server's own answer about the request, and a
+missing `gh` (`GH_ENV`) means the call was never made; when the reconcile then
+finds the reference exactly where it was, nothing landed and nothing ever will.
+Those pass through as themselves — exit 21 and exit 3 — instead of exhausting
+the attempts and reporting exit 12 "do not retry; run adopt", which sent an
+agent looking for a commit that was never made. A transport failure carrying no
+observed head is never classified as a ref verdict either:
+`classifyObservedHead(null, …)` reads "the ref is absent" and would answer
+`superseded` (exit 13) for a 403 that proved nothing about the reference.
+
 | Action          | Observed head                                                         | Verdict                                              |
 | --------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
 | acquire         | LOCK, `ownerRunId === owner.runId`                                    | `ClaimAlreadyHeldError` (10)                         |
@@ -786,12 +797,22 @@ candidate to a one-line warning.
 ## Label projection
 
 The rule is one sentence: **the label is present exactly while the reference is
-at LOCK, regardless of owner.** Add on `claim` and `takeover` success; remove on
-`release` success; always **after** the compare-and-swap is confirmed.
+at LOCK, regardless of owner.** Add on `claim` and `takeover` success; on
+`release` success reconcile against the reference; always **after** the
+compare-and-swap is confirmed.
 
 That ordering is enforced by construction rather than by prose — the label call
 is unreachable until the transition thunk fulfils — so a refused acquire issues
 zero label calls and a successful takeover sees the final applied count.
+
+Release **reconciles** rather than removes, because by the time it runs its
+intention may be stale. A successor can acquire between this run's
+compare-and-swap and this label call; it finds the label already present and
+adds nothing, and a blind remove then left the successor's LOCK on an item that
+looked unclaimed — the one shape the whole projection exists to prevent.
+`reconcileClaimLabel` reads the head first and applies what the head says:
+remove for an UNLOCK or an absent ref, leave alone for a LOCK. `family release`
+does the same for each member it released.
 
 A label failure is a `warnings[]` entry, never a non-zero exit: one attempt plus
 one retry, remove tolerates 404, and a takeover reports `alreadyPresent` rather
@@ -953,15 +974,19 @@ against that vocabulary, never against a shape. `describeGrammarWord` echoes a
 word only when it is in the relevant allowlist — the command words for an
 unknown command, the flags this command declares for an unknown flag, the
 slugs of a closed vocabulary for `--outcome` and `adopt --action`
-(`assertVocabulary`), the profile's keys for `--set` — and describes
-every other word. Shape is not evidence: `correct-horse-battery` is lowercase
-letters and dashes, exactly like a flag name. What keeps the refusal actionable
+(`assertVocabulary`), the profile's keys for `--set`, the fence purposes and
+aliases a `guard --gate` may name — and describes every other word. Shape is
+not evidence: `correct-horse-battery` is lowercase letters and dashes, exactly
+like a flag name. What keeps the refusal actionable
 is the vocabulary itself — the message lists it — plus a suggestion: a word
 within edit distance 2 of a real one is named, `did you mean --dry-run?`, so a
 typo is answered without repeating what was typed. A command is judged word by
 word, so `claims <secret>` keeps the half that names a real command. An
 `--flag=value` refusal reports only the name; the inline value never reaches
-the document.
+the document. `describeGrammarWord`, the suggestion and the edit distance live
+in `shared/vocabulary.mjs` rather than in the argument parser, because the
+claims layer refuses words too — a `--gate` naming no fence purpose is refused
+inside `guard`, and it must describe and suggest exactly as the parser does.
 
 Identifiers are refused outright rather than described, because they are stored
 rather than merely printed. The claim-id grammar accepts `ghp_…`, so a token
@@ -970,7 +995,13 @@ every later reader trusts, written into the host-local state entry, and printed
 by guard's own report path. `--run-id` (from the flag or `MENTO_CLAIM_RUN_ID`),
 `--run-id-prefix`, `--host`, `--runtime`, `--login`, `--agent` and every
 `--set` value go through `containsSecret` where they are resolved — every field
-the payload records — and the refusal names the source, never the value.
+the payload records — and the refusal names the source, never the value. A
+value refused for its **shape** rather than for a credential match is described
+the same way: a `--login` that is not a GitHub login reports its type and its
+length in the message and in `details`, never the string. The check for a
+credential shape runs first, so a value that reaches this branch matched no
+known token shape — which is exactly the case that must not be echoed, because
+the patterns recognize GitHub's own shapes and nothing else.
 
 Every output path then runs one last `redactDocument` pass: the CLI's
 `writeDocument`, guard's own report sink, which does not go through the CLI at
@@ -995,15 +1026,24 @@ graphql repository(owner,name){ id defaultBranchRef { target { ... on Commit { o
 graphql mutation { updateRefs(input:{ repositoryId, refUpdates:[{ name, beforeOid, afterOid, force:false }] }) { clientMutationId } }
 ```
 
-Both listings — the namespace's `matching-refs` and a pull request's labels —
-are read with `--paginate --slurp`. Neither flag alone is enough: without
-`--paginate` a namespace past GitHub's page size lost the rest of itself in
-silence (monitoring already advertises 101 refs, so `claims list --stale`
-would have reported on a subset), and `--paginate` on its own emits one JSON
-body per page, which a single `JSON.parse` refuses outright. `--slurp` returns
-the pages as one array and the caller flattens them. It needs `gh` 2.42 or
-newer; an older one exits with an unknown-flag error, which is loud rather than
-a truncated answer.
+Three listings are read with `--paginate --slurp`: the namespace's
+`matching-refs`, a pull request's labels, and the **exact-ref read** every
+transition starts from, which is a `matching-refs` call too. Neither flag alone
+is enough: without `--paginate` a namespace past
+GitHub's page size lost the rest of itself in silence (monitoring already
+advertises 101 refs, so `claims list --stale` would have reported on a subset),
+and `--paginate` on its own emits one JSON body per page, which a single
+`JSON.parse` refuses outright. `--slurp` returns the pages as one array and the
+caller flattens them, through the same non-array-page check everywhere. It needs
+`gh` 2.42 or newer; an older one exits with an unknown-flag error, which is loud
+rather than a truncated answer.
+
+The exact-ref read is where truncation was not merely incomplete but wrong.
+`matching-refs` is a **prefix** match, so `…/pr/87` returns every `…/pr/87x`;
+once such a prefix outgrew a page the exact ref could sit on a later one, an
+unpaginated read never saw it, and the claim read as **absent** — so every
+acquire bootstrapped into a conflict against a reference that was there all
+along.
 
 `Repository.ref(qualifiedName:)` returns `null` outside `refs/heads` and
 `refs/tags` — verified live — so the REST-then-object path is mandatory rather
@@ -1208,8 +1248,14 @@ Every failure exits 3 **before any network call**:
 - Unknown keys inside `claims` are rejected.
 - `scopeTemplate` starts with `refs/`, contains `{pr}` exactly once, renders
   through `assertValidRefName`, and `namespace` is its prefix.
-- `repository` is `owner/name` with each half starting on an alphanumeric, so
-  `.` and `..` are refused: it is spliced into a `gh api` path unencoded.
+- `repository` is `owner/name`, exactly two halves, each starting on an
+  alphanumeric and continuing in letters, digits, `.`, `_` or `-`. That is the
+  whole grammar GitHub allows, and it is a **grammar** rather than a pair of
+  emptiness checks because the string is spliced into a `gh api` path
+  unencoded: `.` and `..` traverse it, and `name?per_page=1` or `name#x` ends
+  the path early and rewrites the request. `splitRepo` applies the same grammar
+  wherever a repository string is split for a request, so a value that never
+  passed the config validator cannot reach the API by another route.
 - `0 < renewMinutes`, `renewMinutes * 2 <= ttlMinutes`,
   `ttlMinutes <= maxTtlMinutes <= 360`.
 - `1 <= graceMinutes <= 60`; `minRemainingSeconds >= 30`;

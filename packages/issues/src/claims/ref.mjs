@@ -180,6 +180,32 @@ export async function compareAndSwapRefOnGitHub(
   );
 }
 
+/**
+ * Transport codes that prove a write never happened and never will.
+ *
+ * A permission refusal is the server's own answer about the request, and a
+ * missing `gh` means the call was never made. Neither leaves anything on the
+ * reference to adopt, so neither may be reported as an unknown outcome.
+ */
+const DEFINITIVE_WRITE_FAILURE_CODES = new Set(["GH_PERMISSION", "GH_ENV"]);
+
+/**
+ * Is this failure definitive — the write provably did not happen?
+ *
+ * `outcomeUnknown` is the transport's own statement that it cannot say, and it
+ * always wins: a timeout carrying a permission code would still be ambiguous.
+ *
+ * @param {unknown} error the failure the compare-and-swap raised.
+ * @returns {boolean}
+ */
+function isDefinitiveWriteFailure(error) {
+  return (
+    error?.outcomeUnknown !== true &&
+    error?.claimCode == null &&
+    DEFINITIVE_WRITE_FAILURE_CODES.has(error?.code)
+  );
+}
+
 async function defaultSleep(ms) {
   const { sleep } = await import("../gh/run.mjs");
   return sleep(ms);
@@ -719,6 +745,13 @@ export async function advanceRef(
           { cause: lastError },
         );
       }
+      // The reference is exactly where it was, and this failure is definitive:
+      // a credential that may read but not write, or an environment that
+      // cannot run `gh` at all. Nothing landed, so there is nothing to adopt —
+      // and retrying cannot help either. Reporting exit 12 "do not retry; run
+      // adopt" for a 403 sent an agent looking for a commit that was never
+      // made; the honest answers are exit 21 and exit 3.
+      if (isDefinitiveWriteFailure(lastError)) throw lastError;
       if (attempt >= CLAIM_RECONCILE_ATTEMPTS) {
         throw unknownRefAdvanceError(
           ctx,

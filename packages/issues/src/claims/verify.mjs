@@ -31,6 +31,7 @@ import {
   ClaimSupersededError,
 } from "./errors.mjs";
 import { redactDocument, redactSecrets } from "../gh/redact.mjs";
+import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { leaseState, payloadOwnerRunId } from "./payload.mjs";
 import { claimRefName, readClaim } from "./ref.mjs";
 import { adoptClaim, renewClaim } from "./transitions.mjs";
@@ -51,6 +52,9 @@ export const GUARD_USAGE_EXIT_CODE = 2;
  * 13: the claim was never lost, so the work in flight is not forfeit.
  */
 export const GUARD_SIGNALLED_EXIT_CODE = 3;
+
+/** What a raced pre-spawn read resolves to when the caller aborts first. */
+const ABORTED = Symbol("guard-aborted");
 
 /** The JSON envelope every command shares. */
 export const RESULT_SCHEMA = "mento-issues-result:v1";
@@ -145,11 +149,20 @@ export function canonicalFencePurpose(purpose) {
     typeof canonical !== "string" ||
     !Object.hasOwn(FENCE_PURPOSES, canonical)
   ) {
+    // A closed vocabulary, described rather than echoed — the rule every other
+    // slug in this package follows. `--gate` took whatever it was given
+    // straight into the message and into `details.purpose`, and from there into
+    // guard's report and the failure document.
+    const words = [
+      ...Object.keys(FENCE_PURPOSES),
+      ...Object.keys(FENCE_PURPOSE_ALIASES),
+    ];
+    const described = describeGrammarWord(purpose, words);
     throw new ClaimUsageError(
-      `Unknown fence purpose ${JSON.stringify(purpose)}; expected one of ${Object.keys(
+      `Unknown fence purpose ${described}; expected one of ${Object.keys(
         FENCE_PURPOSES,
-      ).join(", ")}`,
-      { details: { purpose: purpose ?? null } },
+      ).join(", ")}${suggestion(purpose, words)}`,
+      { details: { purpose: purpose == null ? null : described } },
     );
   }
   return canonical;
@@ -865,13 +878,39 @@ export async function guardChild(ctx, claims, options = {}) {
       abortListener = null;
     }
   };
+  // The gate the pre-spawn work races against. Setting a flag was not enough:
+  // the verification loop went on reading every remaining member and repairing
+  // what it could, so an abort during a slow read was noticed only when that
+  // read finally answered — or never, if the caller's own signal made the
+  // transport reject as a transport failure instead.
+  let announceAbort = () => {};
+  const abortedGate = new Promise((resolve) => {
+    announceAbort = () => resolve(ABORTED);
+  });
   if (signal) {
     abortListener = () => {
       if (childStarted) killChild("guard-aborted");
-      else abortedBeforeSpawn = true;
+      else {
+        abortedBeforeSpawn = true;
+        announceAbort();
+      }
     };
     signal.addEventListener?.("abort", abortListener, { once: true });
   }
+
+  /**
+   * Await one pre-spawn read, giving up the moment the caller aborts.
+   *
+   * Only reads are raced. A repair renew **writes**, so it is never left in
+   * flight: the loop below refuses to start one once the abort has arrived.
+   * A read abandoned this way changes nothing on the server and settles on its
+   * own.
+   *
+   * @param {Promise<unknown>} work the read in flight.
+   * @returns {Promise<unknown>} its result, or {@link ABORTED}.
+   */
+  const untilAborted = (work) =>
+    signal ? Promise.race([work, abortedGate]) : work;
 
   const minRemainingMs =
     options.minRemainingMs ??
@@ -885,6 +924,9 @@ export async function guardChild(ctx, claims, options = {}) {
 
   const entries = [];
   for (const member of members) {
+    // Nothing further is read, and nothing at all is renewed, once the caller
+    // has withdrawn the operation.
+    if (abortedBeforeSpawn) break;
     const entry = {
       number: member.number,
       token: member.token,
@@ -899,18 +941,23 @@ export async function guardChild(ctx, claims, options = {}) {
       verifiedAtMs: null,
       unverified: false,
     };
-    entry.report = await verifyClaim(
-      ctx,
-      member.number,
-      {
-        token: entry.token,
-        runId,
-        minRemainingMs,
-        purpose,
-      },
-      overrides,
+    const verdict = await untilAborted(
+      verifyClaim(
+        ctx,
+        member.number,
+        {
+          token: entry.token,
+          runId,
+          minRemainingMs,
+          purpose,
+        },
+        overrides,
+      ),
     );
+    if (verdict === ABORTED) break;
+    entry.report = verdict;
     if (
+      !abortedBeforeSpawn &&
       renewIfNeeded &&
       !entry.report.held &&
       REPAIRABLE_REASONS.has(entry.report.reason)
@@ -946,6 +993,15 @@ export async function guardChild(ctx, claims, options = {}) {
     entry.deadlineMs = leaseDeadlineOf(entry.report);
     entry.verifiedAtMs = ctx.clock.now();
     entries.push(entry);
+  }
+
+  // Whatever was verified before the abort arrived is reported, and nothing is
+  // spawned. This is checked here, before the deadline sweep and the mandatory
+  // verdict, because an abandoned member has no report for either to read.
+  if (abortedBeforeSpawn) {
+    clearAbortListener();
+    const report = emit(abortedReport(entries));
+    return { exitCode: GUARD_SIGNALLED_EXIT_CODE, report };
   }
 
   /**

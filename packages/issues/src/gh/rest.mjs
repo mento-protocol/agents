@@ -231,17 +231,27 @@ export async function readRefCommit(
   const { owner, name, nameWithOwner } = assertRepository(options);
   assertTransportRefName(refName);
 
-  const matches = await json(
+  const pages = await json(
     [
       "api",
+      // Paginated for the same reason the listing is, and it matters more
+      // here, because this read decides whether a claim **exists**.
+      // `matching-refs` is a prefix match, so `…/pr/87` also returns every
+      // `…/pr/87x`; once a namespace outgrew one page the exact ref could sit
+      // on a later one, an unpaginated read never saw it, and the claim read
+      // as absent — so every acquire bootstrapped into a conflict against a
+      // reference that was there all along.
+      ...PAGINATED_JSON_FLAGS,
       `repos/${nameWithOwner}/git/matching-refs/${refName.slice(MATCHING_REFS_PREFIX)}`,
     ],
     callOptions(options, false),
   );
-  // `matching-refs` is a prefix match: `.../87` also returns `.../872`.
-  const match = (Array.isArray(matches) ? matches : []).find(
-    (entry) => entry?.ref === refName,
+  const matches = flattenPaginatedJson(
+    pages,
+    `matching-refs read for ${refName}`,
   );
+  // `matching-refs` is a prefix match: `.../87` also returns `.../872`.
+  const match = matches.find((entry) => entry?.ref === refName);
   if (!match) return null;
 
   const oid = typeof match.object?.sha === "string" ? match.object.sha : null;

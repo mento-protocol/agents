@@ -24,7 +24,7 @@ import {
   assertTransitionInputs,
   classifyObservedHead,
 } from "../../claims/transitions.mjs";
-import { projectClaimLabel } from "../../claims/label.mjs";
+import { projectClaimLabel, reconcileClaimLabel } from "../../claims/label.mjs";
 import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome, collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
@@ -257,7 +257,11 @@ export async function runFamilyRelease(runtime) {
 
   const warnings = [];
   for (const number of releasedNumbers) {
-    const label = await projectClaimLabel(ctx, number, { present: false });
+    // Against the reference as it is now, exactly as the single release does:
+    // a successor that acquired this member between the compare-and-swap and
+    // this call found the label present and added nothing, and a blind remove
+    // left its LOCK on an item that looks unclaimed.
+    const label = await reconcileClaimLabel(ctx, number, { apply: true });
     warnings.push(...label.warnings);
     // Only while the entry still names the lease this command released: the
     // same read-compare-then-remove the single release makes, for the same

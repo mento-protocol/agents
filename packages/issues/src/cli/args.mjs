@@ -10,6 +10,7 @@
 import { ClaimUsageError } from "../claims/verify.mjs";
 import { CLAIM_OUTCOMES } from "../claims/constants.mjs";
 import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
+import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 
 /** Flags every command accepts. */
 export const GLOBAL_FLAGS = Object.freeze({
@@ -317,92 +318,6 @@ function usage(message, details = {}) {
  * @returns {string} a description safe to print.
  */
 const describeRejectedValue = describeRedactedValue;
-
-/** The edit distance at which a rejected word is called a typo of a known one. */
-const SUGGESTION_MAX_DISTANCE = 2;
-
-/**
- * Levenshtein distance, bounded by the shorter comparisons it is used for.
- *
- * @param {string} left
- * @param {string} right
- * @returns {number}
- */
-function editDistance(left, right) {
-  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let row = 1; row <= left.length; row += 1) {
-    const current = [row];
-    for (let column = 1; column <= right.length; column += 1) {
-      const substitution =
-        previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1);
-      current[column] = Math.min(
-        previous[column] + 1,
-        current[column - 1] + 1,
-        substitution,
-      );
-    }
-    previous = current;
-  }
-  return previous[right.length];
-}
-
-/**
- * The known word a rejected one is closest to, when it is close enough.
- *
- * This is what keeps a refusal actionable now that an unknown word is never
- * echoed: naming a word from the CLI's own vocabulary reveals nothing about
- * what was typed, and it is the half of "unknown flag --dry-runn" that a
- * caller actually needs.
- *
- * @param {unknown} word the rejected word.
- * @param {Iterable<string>} known the vocabulary it was judged against.
- * @returns {string|null} the closest known word, or null.
- */
-function suggestKnownWord(word, known) {
-  if (typeof word !== "string" || word.length === 0) return null;
-  let best = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const candidate of known) {
-    const distance = editDistance(word.toLowerCase(), candidate.toLowerCase());
-    if (distance < bestDistance) {
-      best = candidate;
-      bestDistance = distance;
-    }
-  }
-  return bestDistance <= SUGGESTION_MAX_DISTANCE ? best : null;
-}
-
-/** `; did you mean X?`, or nothing at all. */
-function suggestion(word, known, render = (value) => value) {
-  const candidate = suggestKnownWord(word, known);
-  return candidate === null ? "" : `; did you mean ${render(candidate)}?`;
-}
-
-/**
- * Describe a rejected grammar word against the vocabulary it belongs to.
- *
- * These are not values: they are what the caller typed where this CLI's own
- * vocabulary belongs. A word **from that vocabulary** is echoed, because a
- * command like `claims frobnicate` has to be able to say which half it
- * recognized. Every other word is described like any rejected value: shape
- * alone is not evidence, and a passphrase of lowercase letters and dashes is
- * exactly the shape a flag name has. A multi-word command is judged word by
- * word.
- *
- * @param {unknown} word the rejected word.
- * @param {Iterable<string>} [known] the vocabulary it was judged against.
- * @returns {string} a description safe to print.
- */
-function describeGrammarWord(word, known = []) {
-  if (typeof word !== "string" || word.length === 0) {
-    return describeRejectedValue(word);
-  }
-  const vocabulary = known instanceof Set ? known : new Set(known);
-  return word
-    .split(" ")
-    .map((part) => (vocabulary.has(part) ? part : describeRejectedValue(part)))
-    .join(" ");
-}
 
 /** Every word that appears in a command key, for judging an unknown command. */
 function knownCommandWords() {

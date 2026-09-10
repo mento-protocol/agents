@@ -5991,3 +5991,190 @@ test("a flag named after an Object.prototype member is an unknown flag", async (
   assert.equal(gated.exitCode, 2);
   assert.match(gated.document.error.message, /fence purpose/u);
 });
+
+test("a rejected --gate and a rejected --login are described, not echoed", async () => {
+  // Two refusals that still copied their value into the message and the
+  // details: the fence purpose — a closed vocabulary — and the login, which
+  // `containsSecret` cannot recognize when the credential is not GitHub's own
+  // shape.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const passphrase = "correct-horse-battery";
+
+  const gate = await context.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    passphrase,
+  ]);
+  assert.equal(gate.exitCode, 2);
+  assert.ok(
+    !gate.stdout.includes(passphrase),
+    `the gate is described, not echoed: ${gate.stdout}`,
+  );
+  assert.match(gate.document.error.message, /<string, 21 characters>/u);
+  assert.equal(gate.document.error.details.purpose, "<string, 21 characters>");
+
+  // A near miss still names the real purpose, from the vocabulary itself.
+  const nearMiss = await context.run([
+    "claims",
+    "verify",
+    "--pr",
+    String(PR),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "pus",
+  ]);
+  assert.match(nearMiss.document.error.message, /did you mean push\?/u);
+
+  const login = await context.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--login",
+    "correct_horse_battery_staple",
+  ]);
+  assert.equal(login.exitCode, 3);
+  assert.ok(
+    !login.stdout.includes("correct_horse_battery_staple"),
+    `the login is described, not echoed: ${login.stdout}`,
+  );
+  assert.match(login.document.error.message, /<string, 28 characters>/u);
+  assert.equal(login.document.error.details.login, "<string, 28 characters>");
+});
+
+test("a credential that may read but not write is a permission failure, not an unknown outcome", async () => {
+  // `updateRefs` answered 403 — the server's own, definitive answer about the
+  // request — every reconciling read then found the reference exactly where it
+  // was, and the exhausted compare-and-swap was reported as exit 12 "do not
+  // retry; run adopt": an agent sent looking for a commit that was never made.
+  const context = harness();
+  const permission = Object.assign(
+    new Error("HTTP 403: Resource not accessible by integration"),
+    { code: "GH_PERMISSION", httpStatus: 403 },
+  );
+  const readOnly = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      // The bootstrap of an absent ref is a write too; refuse only the LOCK
+      // this claim is about, which is the interesting half.
+      const afterOid = args[4];
+      if (context.server.commits.get(afterOid)?.payload?.state === "LOCK") {
+        throw permission;
+      }
+      return context.server.operations.compareAndSwapRef(...args);
+    },
+  };
+
+  const refused = await context.run(["claims", "claim", "--pr", String(PR)], {
+    operations: { ...context.options.operations, claims: readOnly },
+  });
+
+  assert.equal(refused.exitCode, 21, "stop and report to the operator");
+  assert.equal(refused.document.status, "permission");
+  assert.notEqual(refused.document.error.claimCode, "CLAIM_UNKNOWN_OUTCOME");
+  assert.equal(
+    refused.document.next?.adopt,
+    undefined,
+    "nothing landed, so nothing is offered to adopt",
+  );
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "UNLOCK",
+    "the reference is where the bootstrap left it",
+  );
+});
+
+test("a successor's LOCK between the release and its label keeps the label", async () => {
+  // The label is a projection of the reference, and this projection ran after
+  // the compare-and-swap: a successor that acquired in between found the label
+  // present and added nothing, and the blind remove then left its LOCK on a
+  // pull request that looked unclaimed.
+  const LABEL = "dependabot-prep:claimed";
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  assert.equal(context.server.hasLabel(PR, LABEL), true);
+
+  // A second run claims the item the moment this release's UNLOCK lands.
+  const successor = harness({ options: context.options });
+  let raced = false;
+  const racing = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      const result = await context.server.operations.compareAndSwapRef(...args);
+      const afterOid = args[4];
+      if (
+        !raced &&
+        context.server.commits.get(afterOid)?.payload?.state === "UNLOCK"
+      ) {
+        raced = true;
+        const acquired = await successor.run([
+          "claims",
+          "claim",
+          "--pr",
+          String(PR),
+        ]);
+        assert.equal(acquired.exitCode, 0, "the successor claimed it");
+      }
+      return result;
+    },
+  };
+
+  const released = await context.run(
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ],
+    { operations: { ...context.options.operations, claims: racing } },
+  );
+
+  assert.equal(released.exitCode, 0, "this run's release still landed");
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "LOCK",
+    "the successor holds the reference",
+  );
+  assert.equal(
+    context.server.hasLabel(PR, LABEL),
+    true,
+    "so the label stays, and the item does not look unclaimed",
+  );
+  assert.equal(released.document.label.changed, false);
+
+  // With no successor the label is still removed.
+  const plain = harness();
+  const mine = await claimOnce(plain);
+  const cleanly = await plain.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    mine.document.claim.token,
+    "--run-id",
+    mine.document.claim.runId,
+  ]);
+  assert.equal(cleanly.exitCode, 0);
+  assert.equal(plain.server.hasLabel(PR, LABEL), false);
+  assert.equal(cleanly.document.label.changed, true);
+});
