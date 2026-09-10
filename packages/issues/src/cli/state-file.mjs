@@ -662,11 +662,16 @@ export function createStateStore(input) {
      * so `expected` makes the removal conditional: the stored token and run id
      * must still be the ones being released.
      *
-     * The residual is the one every read-then-act path on a filesystem has:
-     * the read and the unlink are two operations, so a successor that writes
-     * between them still loses its entry. It is not the mutual-exclusion
-     * authority — the reference is — and the window is now a few instructions
-     * rather than two network round trips and a label call.
+     * The comparison is made on the file this call holds open, not merely on
+     * the path — the same `fstat` against `lstat` the guard slot's release
+     * makes. `writeEntry` replaces an entry by `rename`, so a successor's
+     * record is a different inode: if the path stops naming the file that was
+     * read, the removal is refused. That narrows the window; it does not close
+     * it. There is no compare-and-unlink, so a successor that renames its
+     * record into place between the identity check and the unlink still loses
+     * it. The window is now a few syscalls rather than two network round trips
+     * and a label call, and the reference — never this file — is the
+     * mutual-exclusion authority.
      *
      * @param {number} number PR or issue number.
      * @param {{token?: string, runId?: string}} [expected] the lease that may
@@ -675,9 +680,35 @@ export function createStateStore(input) {
      */
     clearEntry(number, expected = null) {
       const path = pathFor(number);
-      if (expected) {
-        const stored = readEntry(number);
-        if (stored === null) return { path, removed: false, reason: "absent" };
+      if (!expected) {
+        try {
+          rmSync(path, { force: true });
+          return { path, removed: true };
+        } catch {
+          return { path, removed: false, reason: "unremovable" };
+        }
+      }
+      let descriptor = null;
+      try {
+        descriptor = openSync(path, "r");
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          return { path, removed: false, reason: "absent" };
+        }
+        return { path, removed: false, reason: "unreadable" };
+      }
+      try {
+        let stored = null;
+        try {
+          stored = JSON.parse(readFileSync(descriptor, "utf8"));
+        } catch {
+          // A record this store cannot read is a record it cannot prove is
+          // its own, so it stays where it is.
+          return { path, removed: false, reason: "unreadable" };
+        }
+        if (stored?.schema !== STATE_SCHEMA) {
+          return { path, removed: false, reason: "unreadable" };
+        }
         const sameToken =
           expected.token == null || stored.token === expected.token;
         const sameRun =
@@ -685,12 +716,22 @@ export function createStateStore(input) {
         if (!sameToken || !sameRun) {
           return { path, removed: false, reason: "superseded" };
         }
-      }
-      try {
+        // And the path must still name the file those fields were read from.
+        const held = fstatSync(descriptor);
+        const named = lstatSync(path);
+        if (held.dev !== named.dev || held.ino !== named.ino) {
+          return { path, removed: false, reason: "superseded" };
+        }
         rmSync(path, { force: true });
         return { path, removed: true };
       } catch {
         return { path, removed: false, reason: "unremovable" };
+      } finally {
+        try {
+          closeSync(descriptor);
+        } catch {
+          // The descriptor is this call's own; a failed close changes nothing.
+        }
       }
     },
   };

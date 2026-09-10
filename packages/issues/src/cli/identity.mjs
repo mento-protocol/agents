@@ -154,6 +154,11 @@ export function resolveCliIdentity(input) {
   // credential. The host, the login and the agent are configuration, which is
   // exit 3; the prefix is a flag this command line supplied, which is exit 2.
   assertNotCredential(host, "The claim host", ClaimConfigError);
+  if (runtime != null) {
+    // `ownerRuntime` is in every payload beside the host and the login, so it
+    // belongs to the same rule; it was the one identifier left out of it.
+    assertNotCredential(runtime, "The claim runtime", ClaimConfigError);
+  }
   if (login != null) {
     assertNotCredential(login, "The claim login", ClaimConfigError);
   }

@@ -292,7 +292,12 @@ export async function reconcileClaimLabel(
     operations.listIssueLabels(ctx, number),
   );
   if (!listed.ok) {
+    // The same `unknown` verdict the failed ref read produces, and it carries
+    // its error for the same reason: nothing was compared, so the command has
+    // no `ok` to report. Without the error the CLI classified this branch as
+    // success — exit 0 beside `actual: null`.
     reconcile.status = "unknown";
+    reconcile.error = listed.error;
     reconcile.warnings.push(
       warningOf(listed.error, { number, stage: "list-labels" }),
     );

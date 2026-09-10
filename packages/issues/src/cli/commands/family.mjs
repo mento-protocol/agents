@@ -31,6 +31,7 @@ import { planTransition } from "../dry-run.mjs";
 import { exitCodeForCliError, statusForError } from "../exit-codes.mjs";
 import { buildNextCommands, claimBlock } from "../output.mjs";
 import {
+  clearStateWarnings,
   markFailureContext,
   recordLeaseState,
   recordUnknownOutcome,
@@ -260,11 +261,13 @@ export async function runFamilyRelease(runtime) {
     warnings.push(...label.warnings);
     // Only while the entry still names the lease this command released: the
     // same read-compare-then-remove the single release makes, for the same
-    // reason — a successor's record must survive somebody else's cleanup.
-    runtime.stateStore?.clearEntry(number, {
+    // reason — a successor's record must survive somebody else's cleanup. And
+    // an entry this run could not read or remove is a warning here too.
+    const cleared = runtime.stateStore?.clearEntry(number, {
       token: tokens[numbers.indexOf(number)],
       runId,
     });
+    warnings.push(...clearStateWarnings(number, cleared));
   }
   for (const failure of failures) {
     warnings.push({

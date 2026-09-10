@@ -24,7 +24,7 @@ import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { buildNextCommands } from "../output.mjs";
-import { markFailureContext } from "./common.mjs";
+import { clearStateWarnings, markFailureContext } from "./common.mjs";
 
 /**
  * @param {object} runtime the CLI runtime.
@@ -91,7 +91,7 @@ export async function runRelease(runtime) {
       status: "already-released",
       ref,
       scope,
-      warnings: label.warnings,
+      warnings: [...label.warnings, ...clearStateWarnings(number, cleared)],
       body: {
         released: false,
         outcome,
@@ -113,6 +113,8 @@ export async function runRelease(runtime) {
           numberFlag: ctx.profile.numberKey,
         }),
         statePath: cleared?.path ?? null,
+        stateCleared: cleared?.removed ?? null,
+        stateClearReason: cleared?.reason ?? null,
       },
     };
   }
@@ -146,7 +148,7 @@ export async function runRelease(runtime) {
     status: result.status,
     ref,
     scope,
-    warnings: label.warnings,
+    warnings: [...label.warnings, ...clearStateWarnings(number, cleared)],
     body: {
       released: result.released,
       outcome,
@@ -161,6 +163,13 @@ export async function runRelease(runtime) {
         numberFlag: ctx.profile.numberKey,
       }),
       statePath: cleared?.path ?? null,
+      // What actually happened to the entry. `superseded` is the healthy
+      // outcome of the compare — somebody else's record is at that path and
+      // was left alone — while a file this run could not read or remove is a
+      // warning, because it is still there and the next `adopt --from-state`
+      // will read it.
+      stateCleared: cleared?.removed ?? null,
+      stateClearReason: cleared?.reason ?? null,
     },
   };
 }

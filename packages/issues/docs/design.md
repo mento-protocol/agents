@@ -804,7 +804,10 @@ remove the label of a claim that was held, and report success for it. Such a
 read answers `status: "unknown"`, `desired: null`, no label call at all, and
 the error travels with the result so the CLI classifies it like any other —
 exit 20 for a transport that says nothing about the claim, exit 16 for a
-reference this package proved unreadable. `ensureClaimLabel` is idempotent: a
+reference this package proved unreadable. A **label listing** that fails is the
+same verdict and carries its error the same way: without it that branch
+reported `ok` exit 0 beside `actual: null`, success for a comparison that never
+happened. `ensureClaimLabel` is idempotent: a
 `GET` that returns 200 reports `{ created: false, existing: true }` and, if the
 colour or description differ, **warns rather than edits**.
 
@@ -951,9 +954,9 @@ rather than merely printed. The claim-id grammar accepts `ghp_…`, so a token
 pasted into `--run-id` was a perfectly valid run id: recorded in the payload
 every later reader trusts, written into the host-local state entry, and printed
 by guard's own report path. `--run-id` (from the flag or `MENTO_CLAIM_RUN_ID`),
-`--run-id-prefix`, `--host`, `--login`, `--agent` and every `--set` value go
-through `containsSecret` where they are resolved, and the refusal names the
-source, never the value.
+`--run-id-prefix`, `--host`, `--runtime`, `--login`, `--agent` and every
+`--set` value go through `containsSecret` where they are resolved — every field
+the payload records — and the refusal names the source, never the value.
 
 Every output path then runs one last `redactDocument` pass: the CLI's
 `writeDocument`, guard's own report sink, which does not go through the CLI at
@@ -1274,11 +1277,22 @@ token, runId })` reads the stored record and unlinks only while it still names
 the lease being released. The clear runs after the compare-and-swap and after
 the label projection, which is long enough for a new local claim of the same
 item to have written its own record at that path, and removing it took the
-successor's `adopt` candidate with it. The residual is every read-then-act
-path's: the read and the unlink are two operations, so a successor writing
-between them still loses its entry. The window is now a few instructions rather
-than two round trips and a label call, and the reference — not this file — is
-the authority either way.
+successor's `adopt` candidate with it. The comparison is made on the file the
+call holds open — `fstat` against `lstat`, the identity check the guard slot's
+release makes — and `writeEntry` replaces a record by `rename`, so a
+successor's record is a different inode and the removal is refused. The
+residual is every read-then-act path's: there is no compare-and-unlink, so a
+successor that renames its record into place between the identity check and the
+unlink still loses it. The window is now a few syscalls rather than two round
+trips and a label call, and the reference — not this file — is the authority
+either way.
+
+The answer is reported rather than assumed. `clearEntry` returns `removed` and
+a `reason` — `absent`, `superseded`, `unreadable`, `unremovable` — and the
+release document carries both, as `stateCleared` and `stateClearReason`. The
+first two are healthy outcomes; a record this run could not read or remove
+earns a `clear-state` warning, because it is still sitting where the next
+`adopt --from-state` will read it.
 
 `guard` adds a **slot file** beside that entry,
 `<numberKey>-<n>.guard-<first 16 hex of sha256(runId)>.json`, schema

@@ -118,10 +118,11 @@ naming the token to release with, and nothing is unlabelled or cleared. Every
 renew prints the rotated token in `next`, and that is the one to release with.
 
 **An identifier is never a credential.** `--run-id` (and
-`MENTO_CLAIM_RUN_ID`), `--run-id-prefix`, `--host`, `--login`, `--agent` and
-every `--set` value are refused when they carry a credential shape. All of them
-are recorded in the claim payload and printed in reports, and the claim-id
-grammar would otherwise accept a `ghp_…` as a perfectly good run id.
+`MENTO_CLAIM_RUN_ID`), `--run-id-prefix`, `--host`, `--runtime`, `--login`,
+`--agent` and every `--set` value are refused when they carry a credential
+shape. Every one of them is recorded in the claim payload and printed in
+reports, and the claim-id grammar would otherwise accept a `ghp_…` as a
+perfectly good run id.
 
 **`label reconcile` writes only with `--apply`.** Without it the command
 compares the label against the ref and reports the difference, so it is a read:

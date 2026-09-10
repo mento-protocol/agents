@@ -15,6 +15,7 @@ import {
   isSafeSingleLineText,
   SINGLE_LINE_TEXT_MAX_LENGTH,
 } from "../shared/text.mjs";
+import { describeRedactedValue } from "../gh/redact.mjs";
 import {
   DEFAULT_LEASE,
   DEFAULT_MIN_REMAINING_MS,
@@ -190,9 +191,14 @@ export function resolveOwner(partial = {}, options = {}) {
       );
     }
     if (!allowUnknownRuntime && !KNOWN_RUNTIMES.includes(runtime)) {
+      // A closed vocabulary, so the rejected value is described rather than
+      // echoed. `--runtime` is recorded as `ownerRuntime` in every payload,
+      // which is exactly why neither it nor a message about it may carry a
+      // credential.
+      const described = describeRedactedValue(runtime);
       throw new ClaimConfigError(
-        `Claim runtime must be one of ${KNOWN_RUNTIMES.join(", ")}, got: ${runtime}`,
-        { details: { runtime } },
+        `Claim runtime must be one of ${KNOWN_RUNTIMES.join(", ")}, got: ${described}`,
+        { details: { runtime: described } },
       );
     }
   } else if (requireRuntime) {

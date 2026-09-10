@@ -93,6 +93,37 @@ export function recordLeaseState(runtime, number, lease) {
 }
 
 /**
+ * The warning a state entry the release could not deal with earns.
+ *
+ * `clearEntry` reports what happened. `absent` and `superseded` are healthy —
+ * there was nothing to remove, or the record at that path belongs to a
+ * successor and was left alone — while a file this run could not read or
+ * remove is still sitting where the next `adopt --from-state` will read it.
+ * That one is a warning; it used to be silent.
+ *
+ * @param {number} number PR or issue number.
+ * @param {{path: string, removed: boolean, reason?: string}|null} cleared the
+ *   store's answer.
+ * @returns {object[]} zero or one warning.
+ */
+export function clearStateWarnings(number, cleared) {
+  if (!cleared || cleared.removed === true) return [];
+  if (cleared.reason !== "unremovable" && cleared.reason !== "unreadable") {
+    return [];
+  }
+  const verb = cleared.reason === "unreadable" ? "read" : "removed";
+  return [
+    {
+      stage: "clear-state",
+      number,
+      path: cleared.path,
+      reason: cleared.reason,
+      message: `The state entry ${cleared.path} could not be ${verb}; it is still there, and a later adopt --from-state will read it`,
+    },
+  ];
+}
+
+/**
  * Record an unknown outcome's candidate so `adopt --from-state` can find it.
  *
  * This is the one moment the state file earns its keep: the process that

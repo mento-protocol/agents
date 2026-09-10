@@ -5730,4 +5730,135 @@ test("a release clears the state entry only while it still names that lease", as
   ]);
   assert.equal(plain.exitCode, 0);
   assert.equal(myStore.readEntry(PR), null, "its own entry is cleared");
+  assert.equal(plain.document.stateCleared, true);
+  assert.equal(plain.document.stateClearReason, null);
+});
+
+test("a state entry the release cannot remove is reported, not swallowed", async () => {
+  // `clearEntry` answers what happened — `absent`, `superseded`, `unreadable`,
+  // `unremovable` — and the document reported only the path, so a record that
+  // stayed behind was silent. A later `adopt --from-state` reads exactly that
+  // record.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const released = await context.run(
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      claimed.document.claim.token,
+      "--run-id",
+      claimed.document.claim.runId,
+    ],
+    {
+      createStateStore: (input) => {
+        const real = createStateStore(input);
+        return {
+          ...real,
+          clearEntry(number) {
+            return {
+              path: real.pathFor(number),
+              removed: false,
+              reason: "unremovable",
+            };
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(released.exitCode, 0, "the claim was released");
+  assert.equal(released.document.stateCleared, false);
+  assert.equal(released.document.stateClearReason, "unremovable");
+  const warned = released.document.warnings.find(
+    (warning) => warning.stage === "clear-state",
+  );
+  assert.ok(warned, `the entry left behind is reported: ${released.stdout}`);
+  assert.equal(warned.number, PR);
+  assert.match(warned.message, /adopt --from-state/u);
+});
+
+test("label reconcile classifies a label listing it could not make", async () => {
+  // The unknown verdict from a failed *listing* carried no error, so the
+  // command reported `ok` exit 0 with `actual: null` — success for a
+  // comparison that never happened.
+  const context = harness();
+  await claimOnce(context);
+  const LABEL = "dependabot-prep:claimed";
+  const failing = {
+    ...context.labels,
+    async listIssueLabels() {
+      const error = new Error("gh api labels timed out after 60000 ms");
+      error.code = "GH_TIMEOUT";
+      throw error;
+    },
+  };
+
+  const reconciled = await context.run(
+    ["claims", "label", "reconcile", "--pr", String(PR), "--apply"],
+    { operations: { ...context.options.operations, labels: failing } },
+  );
+
+  assert.equal(reconciled.exitCode, 20, "retry with backoff");
+  assert.equal(reconciled.document.status, "transport");
+  assert.equal(reconciled.document.label.status, "unknown");
+  assert.equal(reconciled.document.label.actual, null);
+  assert.equal(
+    context.server.hasLabel(PR, LABEL),
+    true,
+    "and nothing was changed",
+  );
+});
+
+test("a runtime that is a credential is refused like every other identifier", async () => {
+  // `ownerRuntime` is in every payload beside the host and the login, and it
+  // was the one identifier the credential check left out — while the "must be
+  // one of" refusal echoed whatever it was given.
+  const context = harness();
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+
+  for (const [label, extra, env] of [
+    ["--runtime", ["--runtime", secret], { CLAUDECODE: "1" }],
+    [
+      "MENTO_CLAIM_RUNTIME",
+      [],
+      { CLAUDECODE: "1", MENTO_CLAIM_RUNTIME: secret },
+    ],
+  ]) {
+    const refused = await context.run(
+      ["claims", "claim", "--pr", String(PR), ...extra],
+      { env },
+    );
+    assert.equal(refused.exitCode, 3, label);
+    assert.ok(
+      !refused.stdout.includes(secret) && !refused.stderr.includes(secret),
+      `${label} echoes the credential`,
+    );
+    // Refused as a credential, not merely as a runtime this package does not
+    // know: the value is never compared against the vocabulary at all.
+    assert.match(refused.document.error.message, /runtime/iu, label);
+    assert.match(
+      refused.document.error.message,
+      /looks like a credential/u,
+      label,
+    );
+    assert.equal(context.server.calls.commit.length, 0, `${label} wrote`);
+    assert.equal(existsSync(store.pathFor(PR)), false, label);
+  }
+
+  // An ordinary unknown runtime is still refused, and now described rather
+  // than echoed.
+  const unknown = await context.run(
+    ["claims", "claim", "--pr", String(PR), "--runtime", "vim"],
+    { env: { CLAUDECODE: "1" } },
+  );
+  assert.equal(unknown.exitCode, 3);
+  assert.match(unknown.document.error.message, /must be one of/u);
 });
