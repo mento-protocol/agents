@@ -230,6 +230,13 @@ export async function runGuard(runtime) {
   };
   let result;
   let releaseWarnings = [];
+  let slotsReleased = false;
+  /** Give the slot back exactly once, on whichever path leaves this call. */
+  const releaseSlotsOnce = () => {
+    if (slotsReleased) return [];
+    slotsReleased = true;
+    return releaseSlots();
+  };
   try {
     result = await guardChild(ctx, pairs, {
       runId,
@@ -259,13 +266,31 @@ export async function runGuard(runtime) {
         return recordLeaseState(runtime, entry.number, entry.lease).warnings;
       },
     });
+  } catch (error) {
+    // `guardChild` throws for a failure it cannot turn into a report — a
+    // transport that never answered during verification, say — and the block
+    // below is then unreachable, so a slot this guard declined to remove left
+    // no warning and no path anywhere in the failure document. The `finally`
+    // cannot carry it either: it runs after this block, so the release has to
+    // happen here for its warnings to travel with the refusal. Both surfaces
+    // get it — `error.details.slotWarnings`, the same field the reservation
+    // loop uses, and `runtime.warnings`, which is what the failure document
+    // prints.
+    const leftover = releaseSlotsOnce();
+    if (leftover.length > 0) {
+      runtime.warnings.push(...leftover);
+      if (error !== null && typeof error === "object") {
+        error.details = { ...(error.details ?? {}), slotWarnings: leftover };
+      }
+    }
+    throw error;
   } finally {
     // The slot lasts exactly as long as the child, and a guard removes only
     // the slot it created. A guard killed outright leaves its slot behind:
     // the next guard of that run refuses and prints `claims slot clear`,
     // which is the one command that removes somebody else's slot, and only
     // once its process is provably dead.
-    releaseWarnings = releaseSlots();
+    releaseWarnings = releaseSlotsOnce();
   }
 
   // A slot this guard declined to remove is an anomaly worth a line of its

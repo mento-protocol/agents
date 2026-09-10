@@ -763,6 +763,34 @@ export function assertVocabulary(value, { flag, allowed }) {
   );
 }
 
+/** A GitHub label colour: six hexadecimal digits, optionally led by `#`. */
+const LABEL_COLOR_PATTERN = /^#?[0-9a-fA-F]{6}$/u;
+
+/**
+ * Refuse a label colour GitHub will not accept, before any network call.
+ *
+ * The grammar is local because the failure was not: `label ensure --color
+ * not-hex` resolved a login, was refused by GitHub twice — the create and its
+ * one retry — and then reported both refusals as **warnings** beside
+ * `status: "ok"` and exit 0. A command line this package can refuse itself is
+ * exit 2 and costs no round trip.
+ *
+ * @param {unknown} color the `--color` value, or undefined.
+ * @returns {string|undefined} the same value, for chaining.
+ * @throws {ClaimUsageError} for anything that is not six hexadecimal digits.
+ */
+export function assertLabelColor(color) {
+  if (color === undefined) return color;
+  if (typeof color !== "string" || !LABEL_COLOR_PATTERN.test(color)) {
+    const described = describeRejectedValue(color);
+    throw usage(
+      `--color must be six hexadecimal digits, optionally led by #, got: ${described}`,
+      { flag: "color", value: described },
+    );
+  }
+  return color;
+}
+
 /**
  * Refuse a release outcome outside the documented vocabulary.
  *

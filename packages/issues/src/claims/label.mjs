@@ -312,30 +312,29 @@ export async function reconcileClaimLabel(
   reconcile.status = "drifted";
   if (!apply) return reconcile;
 
-  // A **removal** is decided from a read that is already in the past: the
-  // label listing between them costs a round trip, and a successor can acquire
-  // inside it. That successor finds the label already present and adds
-  // nothing, and this removal then strips the label off its LOCK — an item
-  // that looks unclaimed while it is held, which is the one shape the whole
-  // projection exists to prevent. So the reference is read once more
-  // immediately before the removal and the decision is remade on what it says
-  // now: an acquire that landed in the window leaves the label exactly where
-  // the successor needs it.
+  // The mutation is decided from a read that is already in the past: the label
+  // listing between them costs a round trip, and the reference can move inside
+  // it. A removal loses that race one way — a successor acquires, finds the
+  // label already present, adds nothing, and this removal strips it off a LOCK
+  // that is held — and an addition loses it the other, re-labelling an item a
+  // release has just freed. Neither direction is this command's to assume:
+  // `label reconcile` needs no ownership at all, so the reference it read may
+  // belong to anybody. So the reference is read once more immediately before
+  // the mutation and the decision is remade on what it says now.
   //
   // This **narrows** the window; it cannot close it. GitHub offers no
   // compare-and-mutate for labels, so nothing can bind the mutation to the
   // head the decision was made from — the same documented residual as the
   // state entry's read-then-unlink. What keeps it survivable is that the
   // projection is self-healing: the next `label reconcile` corrects whatever
-  // this one gets wrong. An add needs none of this, because the reference it
-  // was decided from is a LOCK this run holds.
-  if (reconcile.desired === false && ctx.options?.dryRun !== true) {
+  // this one gets wrong.
+  if (ctx.options?.dryRun !== true) {
     let current;
     try {
       current = await readClaim(ctx, number, options.operations ?? {});
     } catch (error) {
       // The same rule as the first read: a read that failed is not a reading
-      // of the reference, so nothing is removed on the strength of it.
+      // of the reference, so nothing is mutated on the strength of it.
       reconcile.status = "unknown";
       reconcile.error = error;
       reconcile.warnings.push(

@@ -77,6 +77,50 @@ export function isValidRefName(name) {
   return refNameProblem(name) === null;
 }
 
+/** The longest ref name the REST paths this package builds will carry. */
+const TRANSPORT_REF_NAME_MAX_LENGTH = 255;
+
+/**
+ * Characters that survive git but break the request a ref name is spliced into.
+ *
+ * `# % &` are why this grammar exists separately from git's: all three are
+ * legal in a reference name and all three are spliced into a REST path
+ * unencoded — `#` truncates the request at the fragment, `%` starts a
+ * percent-escape, `&` starts another query parameter — so the read comes back
+ * "absent", a fail-open answer for a malformed namespace.
+ */
+const TRANSPORT_FORBIDDEN_PATTERN = /[\s~^:?*[\\#%&]/u;
+
+/**
+ * Explain why a reference name cannot be sent over this package's transport.
+ *
+ * Deliberately weaker than {@link refNameProblem} in one respect: it accepts a
+ * ref **prefix** as well as a whole name, because a namespace listing splices
+ * one into the same path. It is stricter in the other, and both are applied.
+ * The config validator checks a rendered template against this grammar at load
+ * as well, so a policy every later read would reject cannot pass
+ * `config validate` and fail in production instead.
+ *
+ * @param {unknown} name candidate reference name or prefix.
+ * @returns {string | null} the reason, or `null` when the name is usable.
+ */
+export function transportRefNameProblem(name) {
+  if (typeof name !== "string" || !name.startsWith("refs/")) {
+    return "must start with refs/";
+  }
+  if (name.length > TRANSPORT_REF_NAME_MAX_LENGTH) {
+    return `must be at most ${TRANSPORT_REF_NAME_MAX_LENGTH} characters`;
+  }
+  if (TRANSPORT_FORBIDDEN_PATTERN.test(name)) {
+    return "must not contain whitespace or any of ~ ^ : ? * [ \\ # % &";
+  }
+  if (/[\p{Cc}]/u.test(name)) return "must not contain a control character";
+  if (name.includes("..")) return "must not contain ..";
+  if (name.includes("//")) return "must not contain an empty path component";
+  if (name.endsWith("/")) return "must not end with /";
+  return null;
+}
+
 /**
  * Assert a reference name, throwing when it is invalid.
  *

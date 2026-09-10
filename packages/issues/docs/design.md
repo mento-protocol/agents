@@ -418,6 +418,15 @@ initializer adopts a peer UNLOCK and proceeds; it rejects a peer LOCK as a
 conflict; three exhausted create-from-absent attempts throw a plain `Error`,
 deliberately not the stale error.
 
+That bootstrap is a **write**, so everything the acquire would refuse is
+refused before it. The metadata keys always were; the profile's own payload
+rules were not, because they lived in `buildClaimPayload`, which runs after the
+bootstrap has landed. An issue-board `acquireClaim(ctx, issue, {})` — the
+profile requires `metadata.operation` on acquire — threw its refusal and left a
+commit and a reference behind it, and a claim-id that fails the grammar did the
+same. Both are read now before `initializeClaimRef`: a call this package
+refuses must not mutate the repository.
+
 **Renew after expiry is legal** while the token is still head and the run id
 matches. The payload records `renewedAfterExpiry: true` and the CLI prints a
 warning. Expiry is a signal to a _taker_, not a revocation of a holder that is
@@ -856,10 +865,14 @@ does the same for each member it released.
 The reconcile itself has the same window inside it, one round trip narrower.
 Between its authoritative read and the mutation sits the label listing it
 compares against, and a successor that acquires there finds the label present,
-adds nothing, and has it removed by a decision made before it existed. So a
-**removal** re-reads the reference immediately before it mutates and remakes
-the decision on what it says now; an add needs none of that, because the LOCK
-it was decided from is this run's own. That narrows the window and cannot close
+adds nothing, and has it removed by a decision made before it existed. So the
+reference is re-read immediately before the mutation and the decision is remade
+on what it says now. **Both** directions need that, not only the removal: a
+release landing in the same window leaves an add re-labelling an item that is
+free, and `label reconcile` is the one command with no ownership at all — no
+token, no run id — so the reference it read may belong to anybody and the
+"we hold this LOCK" reasoning that would exempt an add is not available to it.
+That narrows the window and cannot close
 it: GitHub offers no compare-and-mutate for labels, so nothing binds the
 mutation to the head the decision came from. It is the documented residual the
 state entry's read-then-unlink also carries, and it is survivable for the same
@@ -896,6 +909,15 @@ reported `ok` exit 0 beside `actual: null`, success for a comparison that never
 happened. `ensureClaimLabel` is idempotent: a
 `GET` that returns 200 reports `{ created: false, existing: true }` and, if the
 colour or description differ, **warns rather than edits**.
+
+That "a label problem is a warning" rule is about the **repository**, not about
+the command line, and `label ensure --color` showed why the two must not be
+confused. A colour GitHub cannot parse resolved a login, was refused by the
+create and by its one retry, and came back as two warnings beside
+`status: "ok"` and exit 0 — a success report for a label that does not exist.
+The grammar is six hexadecimal digits with an optional leading `#`, it is
+checked before `ensureLogin`, and it is exit 2 with no round trip at all: a
+command line this package can refuse itself is never GitHub's to refuse.
 
 ## Errors
 
@@ -1032,6 +1054,14 @@ runtime and the agent must be 1–120 single-line characters — printed theirs
 too, and they are precisely the checks that catch a multiline paste, an
 oversized one, or a value that is not a string at all. The vocabulary refusal
 next to them always described its value; these now do as well.
+
+The **config loader** is held to it too, and for the same reason: a policy
+document is where a wrong variable gets pasted as readily as a command line,
+and its refusal is printed, logged and pasted onward exactly like the CLI's. A
+`requiredBefore` or `advisoryBefore` entry that names no fence purpose goes
+through `describeGrammarWord` against the purposes and their aliases, so a real
+purpose is echoed and a passphrase is described, with the same `did you mean`
+that makes a typo actionable.
 
 Every one of those tables is read with `Object.hasOwn`, never with a bare index
 or `in`. A flag named after an `Object.prototype` member — `--constructor`,
@@ -1319,7 +1349,16 @@ Every failure exits 3 **before any network call**:
   `CLAIM_CONFIG_RETIRED_COORDINATION`.
 - Unknown keys inside `claims` are rejected.
 - `scopeTemplate` starts with `refs/`, contains `{pr}` exactly once, renders
-  through `assertValidRefName`, and `namespace` is its prefix.
+  through `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
+  not the whole rule: the rendered name and the namespace are each checked
+  against `transportRefNameProblem` too, the same grammar the transport applies
+  before it splices one into a REST path. `#`, `%` and `&` are legal in a
+  reference and break the request that carries one — a `#` truncates it at the
+  fragment, so the read comes back "absent", which is fail-open for a
+  malformed namespace. Without this a policy naming `refs/x#y` passed
+  `config validate` and then failed on every read, which is the one outcome a
+  validator exists to prevent. Both grammars live in `shared/ref-name.mjs`, so
+  the loader and the transport cannot drift apart.
 - `repository` is `owner/name`, exactly two halves, each starting on an
   alphanumeric and continuing in letters, digits, `.`, `_` or `-`. That is the
   whole grammar GitHub allows, and it is a **grammar** rather than a pair of
@@ -1533,6 +1572,15 @@ other errno, and `unreadable` for a document that cannot be parsed. "Not alive"
 is not proof of death, and this is the one place where the difference decides
 whether a file is deleted. It supports `--dry-run` and touches no network.
 `guard` never calls it.
+
+A slot guard declined to remove is therefore the next guard's problem, so it is
+reported on **every** path out of the command, including the one that carries
+no report at all. `guardChild` throws for a failure it cannot turn into a
+verdict — a transport that never answered during verification — and the
+slot-release block sits after the call, on the way to a report: the release
+happened in the `finally` and its warnings went nowhere. They travel with the
+refusal now, on `error.details.slotWarnings` (the field the reservation loop
+already uses) and in the failure document's own `warnings[]`.
 
 **The residual is procedural and is stated rather than papered over.** Run
 beside a live guard of the same run id on the same host, `slot clear` can

@@ -6495,3 +6495,253 @@ test("a family member the rollback could not release still gets its label", asyn
     "the peer's own LOCK keeps the label it projected",
   );
 });
+
+test("a release between the reconcile's listing and its add cancels the stale add", async () => {
+  // The pre-mutation re-read covered removals only, on the reasoning that an
+  // add is decided from a LOCK this run holds. `label reconcile` holds
+  // nothing: it needs no token and no run id, so the reference it read may
+  // belong to anybody, and a release landing in the window left the label
+  // added to a pull request that is free.
+  const LABEL = "dependabot-prep:claimed";
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  // The drift this reconcile is about: LOCK on the reference, label absent.
+  context.server.removeLabel(PR, LABEL);
+  assert.equal(context.server.hasLabel(PR, LABEL), false);
+
+  let raced = false;
+  const racingLabels = {
+    ...context.labels,
+    async listIssueLabels(...args) {
+      const listed = await context.labels.listIssueLabels(...args);
+      if (!raced) {
+        raced = true;
+        const released = await context.run([
+          "claims",
+          "release",
+          "--pr",
+          String(PR),
+          "--token",
+          token,
+          "--run-id",
+          runId,
+        ]);
+        assert.equal(released.exitCode, 0, "the owner released it");
+      }
+      return listed;
+    },
+  };
+
+  const reconciled = await context.run(
+    ["claims", "label", "reconcile", "--pr", String(PR), "--apply"],
+    { operations: { ...context.options.operations, labels: racingLabels } },
+  );
+
+  assert.equal(reconciled.exitCode, 0);
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "UNLOCK",
+    "the claim was released while this command was comparing",
+  );
+  assert.equal(
+    context.server.hasLabel(PR, LABEL),
+    false,
+    "so nothing is added, and a free pull request does not look claimed",
+  );
+
+  // With no release the missing label is still added.
+  const plain = harness();
+  await claimOnce(plain);
+  plain.server.removeLabel(PR, LABEL);
+  const swept = await plain.run([
+    "claims",
+    "label",
+    "reconcile",
+    "--pr",
+    String(PR),
+    "--apply",
+  ]);
+  assert.equal(swept.exitCode, 0);
+  assert.equal(plain.server.hasLabel(PR, LABEL), true);
+});
+
+test("a guard that throws still reports the slot it could not give back", async () => {
+  // `guardChild` throws for a failure it cannot turn into a report, and the
+  // slot-release block runs only on the way to a report: a slot this guard
+  // declined to remove — the thing that blocks the next guard of this run id —
+  // left no warning and no path anywhere in the failure document.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+  const unreachable = Object.assign(new Error("gh timed out after 30000ms"), {
+    code: "GH_TIMEOUT",
+    outcomeUnknown: true,
+  });
+
+  let tripped = false;
+  const failing = {
+    ...context.server.operations,
+    async readClaimRef(...args) {
+      if (tripped) return context.server.operations.readClaimRef(...args);
+      tripped = true;
+      // Somebody else's slot sits at the path by the time the release runs.
+      writeFileSync(
+        slotPath,
+        `${JSON.stringify({
+          schema: GUARD_SLOT_SCHEMA,
+          repository: REPOSITORY,
+          number: PR,
+          runId,
+          pid: process.pid,
+          nonce: "a-slot-this-reservation-never-created",
+          reservedAt: "2026-09-09T10:00:00.000Z",
+        })}\n`,
+      );
+      throw unreachable;
+    },
+  };
+
+  const failed = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      process.execPath,
+      "-e",
+      "process.exit(0)",
+    ],
+    { operations: { ...context.options.operations, claims: failing } },
+  );
+
+  assert.equal(failed.exitCode, 20, "retry with backoff");
+  // Guard's failure document is the one command's that goes to stderr, so the
+  // whole point of putting the slot warning on it is that it lands there.
+  const document = failed.stderrDocuments.at(-1);
+  const printed = [
+    ...(document.warnings ?? []),
+    ...(document.error?.details?.slotWarnings ?? []),
+  ];
+  assert.ok(
+    printed.some((warning) =>
+      /another reservation's nonce/u.test(warning?.message ?? ""),
+    ),
+    "the slot this guard could not give back is named in the failure",
+  );
+  assert.equal(existsSync(slotPath), true, "and it is left where it is");
+});
+
+test("a rejected fence purpose in a policy is described, not echoed", async () => {
+  // A policy document is where a wrong variable gets pasted as readily as a
+  // command line, and this refusal is printed, logged and pasted onward.
+  const SENTINEL = "correct-horse-battery-staple";
+  const context = harness({ claims: { requiredBefore: [SENTINEL] } });
+
+  const refused = await context.run(["claims", "read", "--pr", String(PR)]);
+
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.status, "config");
+  assert.match(refused.document.error.message, /unknown fence purpose/u);
+  assert.equal(
+    JSON.stringify(refused.document).includes(SENTINEL),
+    false,
+    "the rejected purpose reaches no message and no detail",
+  );
+
+  // A real purpose is still named, because naming it is what makes the
+  // refusal actionable.
+  const typo = harness({ claims: { requiredBefore: ["pusher"] } });
+  const suggested = await typo.run(["claims", "read", "--pr", String(PR)]);
+  assert.equal(suggested.exitCode, 3);
+  assert.match(suggested.document.error.message, /did you mean push\?/u);
+});
+
+test("label ensure refuses a colour GitHub cannot parse before any network call", async () => {
+  // The colour reached GitHub, was refused by the create and by its one retry,
+  // and both refusals came back as warnings beside `status: "ok"` and exit 0 —
+  // a usage fault reported as a success, with the label still missing.
+  const context = harness();
+  let labelCalls = 0;
+  let logins = 0;
+  const counting = {
+    ...context.labels,
+    async readLabel(...args) {
+      labelCalls += 1;
+      return context.labels.readLabel(...args);
+    },
+    async createLabel(...args) {
+      labelCalls += 1;
+      return context.labels.createLabel(...args);
+    },
+  };
+  const operations = {
+    ...context.options.operations,
+    labels: counting,
+    gh: {
+      readViewerLogin: async () => {
+        logins += 1;
+        return "chapati23";
+      },
+    },
+  };
+
+  const refused = await context.run(
+    ["claims", "label", "ensure", "--color", "not-hex"],
+    { operations },
+  );
+
+  assert.equal(refused.exitCode, 2, "fix the command");
+  assert.equal(refused.document.status, "usage");
+  assert.match(refused.document.error.message, /six hexadecimal digits/u);
+  assert.equal(labelCalls, 0, "no label call was made");
+  assert.equal(logins, 0, "and no login was resolved");
+
+  // Both accepted spellings still reach the create.
+  for (const color of ["ededed", "#ED1C24"]) {
+    const ensured = await context.run(
+      ["claims", "label", "ensure", "--color", color],
+      { operations },
+    );
+    assert.equal(ensured.exitCode, 0);
+  }
+  assert.ok(labelCalls > 0, "a valid colour is not refused locally");
+});
+
+test("a namespace the transport cannot carry is refused when the config loads", async () => {
+  // Git permits `#` in a reference name; the REST path it is spliced into does
+  // not, and truncates at the fragment — so every read came back "absent",
+  // fail-open, for a policy `config validate` had already passed.
+  const context = harness({
+    claims: {
+      namespace: "refs/mento-claims/v1#pr",
+      scopeTemplate: "refs/mento-claims/v1#pr/{pr}",
+    },
+  });
+
+  const refused = await context.run(["claims", "read", "--pr", String(PR)]);
+
+  assert.equal(refused.exitCode, 3, "stop and report to the operator");
+  assert.equal(refused.document.status, "config");
+  assert.match(refused.document.error.message, /usable ref name/u);
+
+  // `config validate` is where an operator would meet it, and it must agree.
+  const validated = await context.run(["config", "validate"]);
+  assert.equal(validated.exitCode, 3);
+  assert.match(validated.document.error.message, /usable ref name/u);
+});

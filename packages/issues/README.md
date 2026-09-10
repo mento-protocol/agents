@@ -140,11 +140,19 @@ and every one of those restrictions applies. It changes nothing when the
 **reference** cannot be read: a timeout, a permission refusal or an unreadable
 payload answers `status: "unknown"` with a non-zero exit — 20 for a transport,
 16 for a reference this package proved unreadable — because a read that failed
-is not evidence that a claim is gone. A **removal** re-reads the reference
-immediately before it mutates, so a claim acquired while the command was
-comparing keeps its label; that narrows the window rather than closing it,
-since GitHub has no compare-and-mutate for labels, and the next reconcile
-corrects whatever this one gets wrong.
+is not evidence that a claim is gone. It re-reads the reference immediately
+before **either** mutation and decides again on what it says then: a claim
+acquired while the command was comparing keeps its label, and a claim released
+in that window is not given one. Neither direction is this command's to assume
+— it needs no token and no run id, so the reference it read may belong to
+anybody. That narrows the window rather than closing it, since GitHub has no
+compare-and-mutate for labels, and the next reconcile corrects whatever this
+one gets wrong.
+
+**`label ensure --color` is checked here, not by GitHub.** A colour that is not
+six hexadecimal digits (a leading `#` is allowed) is exit 2 and costs no round
+trip. It used to resolve a login, be refused by the create and by its one
+retry, and report both refusals as warnings beside `status: "ok"` and exit 0.
 
 **A dry run refuses what the write would refuse.** `--dry-run` runs the
 transition's own input checks before it plans, so an unusable `--set` value or

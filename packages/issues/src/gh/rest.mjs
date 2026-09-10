@@ -29,6 +29,7 @@
 import { GhCommandError, GhEnvError } from "./errors.mjs";
 import { ghGraphql, ghJson } from "./graphql.mjs";
 import { runGh } from "./run.mjs";
+import { transportRefNameProblem } from "../shared/ref-name.mjs";
 import { splitRepo } from "../shared/split-repo.mjs";
 import { isSafeSingleLineText } from "../shared/text.mjs";
 
@@ -59,25 +60,16 @@ function assertObjectId(value, label) {
 }
 
 /**
- * The transport-level ref-name guard. The full grammar lives in
+ * The transport-level ref-name guard. The full git grammar lives in
  * `shared/ref-name.mjs` and is applied by the claims layer; this one exists so
  * no unvalidated string can ever be spliced into a REST path.
+ *
+ * The grammar itself lives beside git's, in `shared/ref-name.mjs`, so the
+ * config validator can apply the same rule to a template at load time instead
+ * of letting a policy pass `config validate` and fail on every later read.
  */
 function assertTransportRefName(refName, label = "ref name") {
-  if (
-    typeof refName !== "string" ||
-    !refName.startsWith("refs/") ||
-    refName.length > 255 ||
-    // `# % &` are here for the URL splice, not for git, which permits all
-    // three: the name goes into a REST path unencoded, so a `#` truncates the
-    // request at the fragment and the read comes back "absent" — a fail-open
-    // answer for a malformed namespace.
-    /[\s~^:?*[\\#%&]/u.test(refName) ||
-    /[\p{Cc}]/u.test(refName) ||
-    refName.includes("..") ||
-    refName.includes("//") ||
-    refName.endsWith("/")
-  ) {
+  if (transportRefNameProblem(refName) !== null) {
     throw new GhEnvError(`${label} is not a usable ref name: ${refName}`);
   }
   return refName;

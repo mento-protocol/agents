@@ -36,6 +36,7 @@ import {
   leaseState,
   payloadOwnerRunId,
   serializeClaimPayload,
+  validateClaimId,
 } from "./payload.mjs";
 import {
   ambiguousAdvanceRecoveryText,
@@ -733,6 +734,16 @@ export async function acquireClaim(ctx, number, metadata = {}, overrides = {}) {
     ? prepareAcquireOwner(ctx, number, overrides)
     : { ...ctx.owner, runId: metadata.claimId ?? null };
   assertMetadataKeys(profile, stripEnvelopeKeys(profile, metadata));
+  // Every rule the payload will apply, applied **before** the first write.
+  // `initializeClaimRef` bootstraps an absent reference with an UNLOCK commit,
+  // and the profile's own payload rules were not read until
+  // `buildClaimPayload`, which runs after that commit has landed: an
+  // issue-board `acquireClaim(ctx, issue, {})` — no `metadata.operation` —
+  // threw a plain refusal and left a commit and a reference behind it. A call
+  // this package refuses must not mutate the repository.
+  const operation = profile.operationFor("acquire", metadata);
+  const claimId = profile.leaseCapable ? null : (metadata.claimId ?? null);
+  if (claimId != null) validateClaimId(claimId);
 
   const current = await initializeClaimRef(
     ctx,
@@ -806,7 +817,7 @@ export async function acquireClaim(ctx, number, metadata = {}, overrides = {}) {
     profile,
     scope,
     state: "LOCK",
-    operation: profile.operationFor("acquire", metadata),
+    operation,
     operationId,
     metadata: {
       ...metadata,

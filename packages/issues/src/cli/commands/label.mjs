@@ -12,6 +12,7 @@
  */
 
 import { ensureClaimLabel, reconcileClaimLabel } from "../../claims/label.mjs";
+import { assertLabelColor } from "../args.mjs";
 import { exitCodeForCliError, statusForError } from "../exit-codes.mjs";
 import { markFailureContext } from "./common.mjs";
 
@@ -21,12 +22,18 @@ import { markFailureContext } from "./common.mjs";
  */
 export async function runLabelEnsure(runtime) {
   const { ctx, flags } = runtime;
+  // Before the login, because this is a command-line refusal and must cost no
+  // round trip. A colour GitHub cannot parse used to resolve a login, be
+  // refused by the create and by its one retry, and then report both refusals
+  // as warnings beside `status: "ok"` and exit 0 — a usage fault reported as a
+  // success, with the label still missing.
+  const color = assertLabelColor(flags.color);
   // A label write records no login, but this command is a write and resolves
   // the same identity every other write does — after the grammar has accepted
   // the command line, not while the runtime is being built.
   await runtime.ensureLogin();
   const result = await ensureClaimLabel(ctx, {
-    color: flags.color,
+    color,
     description: flags.description,
   });
   return {

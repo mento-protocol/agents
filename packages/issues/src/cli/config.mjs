@@ -21,8 +21,16 @@ import { createRequire } from "node:module";
 import { assertLeaseInvariants } from "../claims/context.mjs";
 import { ClaimConfigError } from "../claims/errors.mjs";
 import { CLAIM_PROFILES, claimProfile } from "../claims/profile.mjs";
-import { FENCE_PURPOSES, canonicalFencePurpose } from "../claims/verify.mjs";
-import { assertValidRefName } from "../shared/ref-name.mjs";
+import {
+  FENCE_PURPOSE_ALIASES,
+  FENCE_PURPOSES,
+  canonicalFencePurpose,
+} from "../claims/verify.mjs";
+import {
+  assertValidRefName,
+  transportRefNameProblem,
+} from "../shared/ref-name.mjs";
+import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { isExactSemanticVersion } from "../shared/exact-version.mjs";
 import {
   SINGLE_LINE_TEXT_MAX_LENGTH,
@@ -190,15 +198,27 @@ function assertPackageBlock(block) {
   return { name: block.name, version: block.version };
 }
 
+/** Every spelling a `requiredBefore` or `advisoryBefore` entry may use. */
+const KNOWN_FENCE_PURPOSE_WORDS = Object.freeze([
+  ...Object.keys(FENCE_PURPOSES),
+  ...Object.keys(FENCE_PURPOSE_ALIASES),
+]);
+
 function assertFencePurposes(claims, key) {
   const values = assertStringArray(claims, key);
   return values.map((entry) => {
     try {
       return canonicalFencePurpose(entry);
     } catch (error) {
+      // A closed vocabulary, described rather than echoed. A policy document is
+      // where a wrong variable gets pasted as readily as a command line does,
+      // and this refusal is printed, logged and pasted onward: only a word that
+      // really is a purpose is repeated back.
+      const words = [...KNOWN_FENCE_PURPOSE_WORDS];
+      const described = describeGrammarWord(entry, words);
       throw configError(
-        `claims.${key} names an unknown fence purpose ${entry}; expected one of ${Object.keys(FENCE_PURPOSES).join(", ")}`,
-        { details: { key, value: entry }, cause: error },
+        `claims.${key} names an unknown fence purpose ${described}; expected one of ${Object.keys(FENCE_PURPOSES).join(", ")}${suggestion(entry, words)}`,
+        { details: { key, value: described }, cause: error },
       );
     }
   });
@@ -269,12 +289,30 @@ function assertScopeTemplate(claims) {
       { details: { namespace, scopeTemplate } },
     );
   }
+  const rendered = scopeTemplate.replaceAll("{pr}", "1");
   try {
-    assertValidRefName(scopeTemplate.replaceAll("{pr}", "1"));
+    assertValidRefName(rendered);
   } catch (error) {
     throw configError(
       `claims.scopeTemplate does not render a valid ref name: ${error.message}`,
       { details: { scopeTemplate }, cause: error },
+    );
+  }
+  // Git's grammar is not the whole rule: a name is spliced into a REST path
+  // unencoded, and `#`, `%` and `&` are legal in a reference and break the
+  // request that carries one. Without this a policy naming `refs/x#y` passed
+  // `config validate` and then failed on every read the transport made — the
+  // one place a validator exists to stop. The namespace is checked in its own
+  // right because a listing splices it as a prefix.
+  for (const [key, value] of [
+    ["namespace", namespace],
+    ["scopeTemplate", rendered],
+  ]) {
+    const problem = transportRefNameProblem(value);
+    if (problem === null) continue;
+    throw configError(
+      `claims.${key} is not a usable ref name for the GitHub transport: it ${problem}`,
+      { details: { namespace, scopeTemplate } },
     );
   }
   return scopeTemplate;

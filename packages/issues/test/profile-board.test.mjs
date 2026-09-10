@@ -263,3 +263,46 @@ test("isRecoverableClaimRaceError walks only err.cause across both vocabularies"
   partial.partialClaim = true;
   assert.equal(isRecoverableClaimRaceError(partial), false);
 });
+
+test("a refused acquire writes nothing: the profile's payload rules run before the bootstrap", async () => {
+  // `initializeClaimRef` bootstraps an absent reference with an UNLOCK commit,
+  // and the profile's own payload rules were not read until
+  // `buildClaimPayload`, which runs after that commit has landed. So an
+  // issue-board acquire with no `metadata.operation` threw its refusal — and
+  // left a commit and a reference behind it, for a call this package had
+  // already decided to refuse.
+  const { ctx, server } = boardContext();
+  const refName = claimRefName(ctx, ISSUE);
+  const commitsBefore = server.calls.commit.length;
+  const casBefore = server.calls.cas.length;
+
+  await assert.rejects(
+    () => acquireClaim(ctx, ISSUE, {}),
+    /requires metadata.operation on acquire/u,
+  );
+
+  assert.equal(server.calls.commit.length, commitsBefore, "no commit is made");
+  assert.equal(server.calls.cas.length, casBefore, "no reference is written");
+  assert.equal(server.getRefOid(refName), null, "and none was created");
+
+  // The claim-id grammar is read there too, and refuses before the bootstrap
+  // for the same reason: it is a rule of the payload this call would write.
+  await assert.rejects(
+    () =>
+      acquireClaim(ctx, ISSUE, {
+        operation: "prepare",
+        claimId: "not a claim id",
+      }),
+    (error) => {
+      assert.equal(server.getRefOid(refName), null, "still nothing written");
+      return true;
+    },
+  );
+  assert.equal(server.calls.commit.length, commitsBefore);
+  assert.equal(server.calls.cas.length, casBefore);
+
+  // And a well-formed acquire still bootstraps and claims.
+  const lease = await acquireClaim(ctx, ISSUE, { operation: "prepare" });
+  assert.equal(typeof lease.token, "string");
+  assert.notEqual(server.getRefOid(refName), null);
+});
