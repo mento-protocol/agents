@@ -1,0 +1,469 @@
+/**
+ * Label projection (PLAN §2.13).
+ *
+ * The label is a human-visible projection of the ref, never an authority.
+ * C-21 fixes the rule: the label is present exactly while the ref is at LOCK,
+ * regardless of who owns it. So it is added after a confirmed acquire or
+ * takeover, removed after a confirmed release, and always **after** the
+ * compare-and-swap, never before.
+ *
+ * No label **failure** throws. A label API failure is a `warnings[]` entry on
+ * an otherwise successful claim: losing a cosmetic label must never fail a
+ * claim that the ref already proves, and must never turn a successful release
+ * into a non-zero exit.
+ *
+ * One thing does throw, and it is not a label failure: an environment this
+ * package refuses to write from. Every function here that mutates a label
+ * calls `assertMutationAllowed` first, because these are exported and a
+ * library caller reaches them without passing the CLI's own gate. The read-only
+ * form of `reconcileClaimLabel` is exempt, as every read is.
+ */
+
+import { splitRepo } from "../shared/split-repo.mjs";
+import { assertMutationAllowed } from "./context.mjs";
+import { readClaim } from "./ref.mjs";
+
+/** Attempts a label call gets: one, plus one retry (PLAN §2.13). */
+const LABEL_ATTEMPTS = 2;
+
+function repositoryPath(ctx) {
+  return splitRepo(ctx.options.repo).nameWithOwner;
+}
+
+async function ghJsonFor(ctx, args, mutates) {
+  const { ghJson } = await import("../gh/graphql.mjs");
+  const { callOptions } = await import("../gh/rest.mjs");
+  // The same derivation every other `gh` call uses, so a context carrying its
+  // own environment or abort signal is honoured on the label calls too.
+  return ghJson(args, callOptions(ctx.options, mutates));
+}
+
+/**
+ * The five label calls, with production defaults over `../gh`.
+ *
+ * They are loaded lazily, exactly as the reference operations are, so the
+ * offline suite never reaches the `gh` layer: every test injects this bag.
+ *
+ * @returns {object} the label operations bag.
+ */
+export function defaultLabelOperations() {
+  return {
+    async readLabel(ctx, name) {
+      try {
+        return await ghJsonFor(
+          ctx,
+          [
+            "api",
+            `repos/${repositoryPath(ctx)}/labels/${encodeURIComponent(name)}`,
+          ],
+          false,
+        );
+      } catch (error) {
+        if (error?.httpStatus === 404) return null;
+        throw error;
+      }
+    },
+
+    async createLabel(ctx, { name, color, description }) {
+      const args = [
+        "api",
+        "--method",
+        "POST",
+        `repos/${repositoryPath(ctx)}/labels`,
+        "-f",
+        `name=${name}`,
+      ];
+      if (color != null) args.push("-f", `color=${color}`);
+      if (description != null) args.push("-f", `description=${description}`);
+      return ghJsonFor(ctx, args, true);
+    },
+
+    async listIssueLabels(ctx, number) {
+      const { PAGINATED_JSON_FLAGS, flattenPaginatedJson } =
+        await import("../gh/rest.mjs");
+      // `--paginate` on its own emits one JSON body per page, and the parse
+      // then fails on the concatenation: a pull request with more labels than
+      // one page answered `GH_INVALID_JSON` rather than listing them. `--slurp`
+      // makes the pages a single array, flattened here.
+      const pages = await ghJsonFor(
+        ctx,
+        [
+          "api",
+          ...PAGINATED_JSON_FLAGS,
+          `repos/${repositoryPath(ctx)}/issues/${number}/labels`,
+        ],
+        false,
+      );
+      // A page that is not an array is GitHub's error object rather than a
+      // listing. Reading it as "no labels" would have `addLabel` post a
+      // duplicate, so it throws — and the label layer turns that into the
+      // warning every other label failure becomes.
+      const listed = flattenPaginatedJson(
+        pages,
+        `labels listing for ${repositoryPath(ctx)} issue ${number}`,
+      );
+      return listed
+        .map((entry) => entry?.name)
+        .filter((entry) => typeof entry === "string");
+    },
+
+    async addLabel(ctx, number, name) {
+      // The read decides whether this add changes anything, so a takeover can
+      // report `alreadyPresent` instead of an indistinguishable second POST.
+      const present = await this.listIssueLabels(ctx, number);
+      if (present.includes(name)) {
+        return { added: false, status: "already-present" };
+      }
+      const { addIssueLabels } = await import("../gh/rest.mjs");
+      return addIssueLabels(ctx.options, number, [name]);
+    },
+
+    async removeLabel(ctx, number, name) {
+      const { removeIssueLabel } = await import("../gh/rest.mjs");
+      return removeIssueLabel(ctx.options, number, name);
+    },
+  };
+}
+
+function labelOperationsFor(ctx, overrides = {}) {
+  return { ...(ctx.labelOperations ?? defaultLabelOperations()), ...overrides };
+}
+
+function warningOf(error, extra = {}) {
+  return {
+    ...extra,
+    claimCode: error?.claimCode ?? null,
+    code: error?.code ?? null,
+    message: String(error?.message ?? error).split("\n")[0],
+  };
+}
+
+async function attemptTwice(action) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= LABEL_ATTEMPTS; attempt += 1) {
+    try {
+      return { ok: true, value: await action(attempt), attempts: attempt };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return { ok: false, error: lastError, attempts: LABEL_ATTEMPTS };
+}
+
+/**
+ * Add or remove the claim label, after the compare-and-swap is confirmed.
+ *
+ * @param {object} ctx claim context.
+ * @param {number} number PR or issue number.
+ * @param {{present: boolean}} input the desired projection.
+ * @param {object} [overrides] label operations overrides.
+ * @returns {Promise<object>} a `LabelResult`; never throws for a label
+ *   failure. An environment this package will not write from is refused.
+ */
+export async function projectClaimLabel(ctx, number, input, overrides = {}) {
+  const present = input?.present === true;
+  const name = ctx.label ?? null;
+  const result = {
+    name,
+    number,
+    desired: present,
+    changed: false,
+    alreadyPresent: false,
+    status: "disabled",
+    attempts: 0,
+    warnings: [],
+  };
+  if (name == null) return result;
+  // A label call is a **write**, and the environment rules belong to the write
+  // rather than to the command that happens to make it. The CLI refuses a
+  // mutating command under `GITHUB_ACTIONS` or an unapproved cloud session, but
+  // this function is exported: a library caller reached it directly and moved
+  // the board's labels from an environment this package refuses to write from.
+  // It is asserted before the dry-run branch for the same reason the CLI
+  // asserts before it plans — a dry run refuses what the write would refuse.
+  assertMutationAllowed(ctx);
+  if (ctx.options?.dryRun === true) {
+    // §2.13: no label call at all under a dry run.
+    result.status = "dry-run";
+    return result;
+  }
+
+  const operations = labelOperationsFor(ctx, overrides);
+  const attempt = await attemptTwice(async () =>
+    present
+      ? operations.addLabel(ctx, number, name)
+      : operations.removeLabel(ctx, number, name),
+  );
+  result.attempts = attempt.attempts;
+  if (!attempt.ok) {
+    result.status = "failed";
+    result.warnings.push(
+      warningOf(attempt.error, {
+        number,
+        label: name,
+        action: present ? "add" : "remove",
+      }),
+    );
+    return result;
+  }
+
+  const value = attempt.value ?? {};
+  if (present) {
+    result.alreadyPresent = value.status === "already-present";
+    result.changed = value.added === true;
+    result.status = value.status ?? (result.changed ? "added" : "unchanged");
+  } else {
+    result.changed = value.removed === true;
+    result.status = value.status ?? (result.changed ? "removed" : "unchanged");
+  }
+  return result;
+}
+
+/**
+ * Run a transition, then project the label — in that order, always.
+ *
+ * The ordering rule of §2.13 is a package invariant, not prose for the caller
+ * to remember: the label call is unreachable until `run` has fulfilled, so a
+ * refused or contended transition can never leave a label behind.
+ *
+ * @param {object} ctx claim context.
+ * @param {number} number PR or issue number.
+ * @param {{present: boolean, run: () => Promise<any>}} input the transition.
+ * @param {object} [overrides] label operations overrides.
+ * @returns {Promise<{result: any, label: object}>}
+ */
+export async function projectClaimLabelAfter(
+  ctx,
+  number,
+  input,
+  overrides = {},
+) {
+  const result = await input.run();
+  const label = await projectClaimLabel(
+    ctx,
+    number,
+    { present: input.present },
+    overrides,
+  );
+  return { result, label };
+}
+
+/**
+ * Compare the label against the ref, and optionally correct it.
+ *
+ * The desired state comes from the ref alone (I-G): LOCK means present,
+ * anything else — UNLOCK, absent, unreadable — means absent.
+ *
+ * @param {object} ctx claim context.
+ * @param {number} number PR or issue number.
+ * @param {object} [options] `{ apply, operations }` — `operations` overrides
+ *   the reference read, `overrides` the label calls.
+ * @param {object} [overrides] label operations overrides.
+ * @returns {Promise<object>} a `LabelReconcile`; never throws for a label
+ *   failure. With `apply`, an environment this package will not write from is
+ *   refused.
+ */
+export async function reconcileClaimLabel(
+  ctx,
+  number,
+  options = {},
+  overrides = {},
+) {
+  const apply = options.apply === true;
+  const name = ctx.label ?? null;
+  const reconcile = {
+    name,
+    number,
+    refState: null,
+    desired: false,
+    actual: null,
+    changed: false,
+    applied: null,
+    status: "disabled",
+    error: null,
+    warnings: [],
+  };
+  if (name == null) return reconcile;
+  // Only with `--apply`: without it this is a comparison and a report, which
+  // is a read and runs in every environment. With it, it is a write, and the
+  // refusal comes before the two reads rather than after them — there is
+  // nothing to report from an environment this package will not write from.
+  if (apply) assertMutationAllowed(ctx);
+
+  try {
+    const state = await readClaim(ctx, number, options.operations ?? {});
+    reconcile.refState = state?.state ?? "absent";
+    reconcile.desired = state?.state === "LOCK";
+  } catch (error) {
+    // The reference is the authority, and a read that failed is not a reading
+    // of it. Treating the failure as `desired: false` made a timeout, a
+    // permission refusal or an unreadable payload **remove** the label of a
+    // claim that was very much held, and report success for it. The verdict is
+    // `unknown`: no label call at all, the label left exactly as it is, and
+    // the error kept so the caller can classify it — a transport failure is
+    // exit 20 and a retry, an unreadable payload is exit 16 and an operator.
+    reconcile.refState = "unknown";
+    reconcile.desired = null;
+    reconcile.status = "unknown";
+    reconcile.error = error;
+    reconcile.warnings.push(warningOf(error, { number, stage: "read-ref" }));
+    return reconcile;
+  }
+
+  const operations = labelOperationsFor(ctx, overrides);
+  const listed = await attemptTwice(() =>
+    operations.listIssueLabels(ctx, number),
+  );
+  if (!listed.ok) {
+    // The same `unknown` verdict the failed ref read produces, and it carries
+    // its error for the same reason: nothing was compared, so the command has
+    // no `ok` to report. Without the error the CLI classified this branch as
+    // success — exit 0 beside `actual: null`.
+    reconcile.status = "unknown";
+    reconcile.error = listed.error;
+    reconcile.warnings.push(
+      warningOf(listed.error, { number, stage: "list-labels" }),
+    );
+    return reconcile;
+  }
+  reconcile.actual = listed.value.includes(name);
+
+  if (reconcile.actual === reconcile.desired) {
+    reconcile.status = "in-sync";
+    return reconcile;
+  }
+  reconcile.status = "drifted";
+  if (!apply) return reconcile;
+
+  // The mutation is decided from a read that is already in the past: the label
+  // listing between them costs a round trip, and the reference can move inside
+  // it. A removal loses that race one way — a successor acquires, finds the
+  // label already present, adds nothing, and this removal strips it off a LOCK
+  // that is held — and an addition loses it the other, re-labelling an item a
+  // release has just freed. Neither direction is this command's to assume:
+  // `label reconcile` needs no ownership at all, so the reference it read may
+  // belong to anybody. So the reference is read once more immediately before
+  // the mutation and the decision is remade on what it says now.
+  //
+  // This **narrows** the window; it cannot close it. GitHub offers no
+  // compare-and-mutate for labels, so nothing can bind the mutation to the
+  // head the decision was made from — the same documented residual as the
+  // state entry's read-then-unlink. What keeps it survivable is that the
+  // projection is self-healing: the next `label reconcile` corrects whatever
+  // this one gets wrong.
+  if (ctx.options?.dryRun !== true) {
+    let current;
+    try {
+      current = await readClaim(ctx, number, options.operations ?? {});
+    } catch (error) {
+      // The same rule as the first read: a read that failed is not a reading
+      // of the reference, so nothing is mutated on the strength of it.
+      reconcile.status = "unknown";
+      reconcile.error = error;
+      reconcile.warnings.push(
+        warningOf(error, { number, stage: "recheck-ref" }),
+      );
+      return reconcile;
+    }
+    reconcile.refState = current?.state ?? "absent";
+    reconcile.desired = current?.state === "LOCK";
+    if (reconcile.desired === reconcile.actual) {
+      reconcile.status = "in-sync";
+      return reconcile;
+    }
+  }
+
+  reconcile.applied = await projectClaimLabel(
+    ctx,
+    number,
+    { present: reconcile.desired },
+    overrides,
+  );
+  reconcile.changed = reconcile.applied.changed;
+  reconcile.warnings.push(...reconcile.applied.warnings);
+  reconcile.status =
+    reconcile.applied.status === "failed" ? "failed" : "applied";
+  return reconcile;
+}
+
+/**
+ * Make sure the claim label exists, without ever editing an existing one.
+ *
+ * A label that already exists with a different color or description is a
+ * warning, not an edit: the repository's own choice wins over the package's
+ * default (C-20).
+ *
+ * @param {object} ctx claim context.
+ * @param {object} [input] `{ color, description }`.
+ * @param {object} [overrides] label operations overrides.
+ * @returns {Promise<object>} a `LabelResult`; never throws for a label
+ *   failure. An environment this package will not write from is refused.
+ */
+export async function ensureClaimLabel(ctx, input = {}, overrides = {}) {
+  const name = ctx.label ?? null;
+  const result = {
+    name,
+    created: false,
+    existing: false,
+    label: null,
+    status: "disabled",
+    warnings: [],
+  };
+  if (name == null) return result;
+  // Creating a repository label is a write, so the same environment rule
+  // applies here as to the projection above.
+  assertMutationAllowed(ctx);
+  if (ctx.options?.dryRun === true) {
+    result.status = "dry-run";
+    return result;
+  }
+
+  const operations = labelOperationsFor(ctx, overrides);
+  const read = await attemptTwice(() => operations.readLabel(ctx, name));
+  if (!read.ok) {
+    result.status = "failed";
+    result.warnings.push(warningOf(read.error, { label: name, stage: "read" }));
+    return result;
+  }
+
+  if (read.value) {
+    result.existing = true;
+    result.label = read.value;
+    result.status = "exists";
+    const { color, description } = input;
+    if (color != null && read.value.color !== color) {
+      result.warnings.push({
+        label: name,
+        field: "color",
+        message: `Label ${name} already exists with color ${read.value.color}, not ${color}; it is left as it is`,
+      });
+    }
+    if (description != null && read.value.description !== description) {
+      result.warnings.push({
+        label: name,
+        field: "description",
+        message: `Label ${name} already exists with a different description; it is left as it is`,
+      });
+    }
+    return result;
+  }
+
+  const created = await attemptTwice(() =>
+    operations.createLabel(ctx, {
+      name,
+      color: input.color ?? null,
+      description: input.description ?? null,
+    }),
+  );
+  if (!created.ok) {
+    result.status = "failed";
+    result.warnings.push(
+      warningOf(created.error, { label: name, stage: "create" }),
+    );
+    return result;
+  }
+  result.created = true;
+  result.label = created.value ?? { name };
+  result.status = "created";
+  return result;
+}

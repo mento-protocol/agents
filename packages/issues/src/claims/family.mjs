@@ -1,0 +1,265 @@
+/**
+ * Family claims (PLAN §2.12).
+ *
+ * A consolidation touches several pull requests, so a run claims them as a
+ * set. Two properties make that safe. Members are acquired in a total order —
+ * ascending by number — so two overlapping families contend but never
+ * deadlock. And acquire never waits: there is no wait-for-free loop, so no run
+ * ever holds one member while waiting for another.
+ *
+ * AMENDMENTS §D adds the identity rule: one generated run id covers every
+ * member, because the family is one owner. C-1 still holds — a run id comes
+ * into existence only inside `acquireClaim` — so the family does not inject
+ * one. It freezes the run-id inputs instead: the entropy is drawn once, and
+ * the clock the family acquires against is pinned to the instant the family
+ * started, so every member's `acquireClaim` generates the same id. Pinning the
+ * clock also dates every member's lease from the family's start, which can
+ * only shorten the effective lease of a slow later member, never extend it.
+ *
+ * AMENDMENTS §E cuts `withFamilyClaim` and `familyHeartbeat`: family liveness
+ * is `guard` with repeated `--pr`/`--token` pairs.
+ */
+
+import { isClaimNumber } from "../shared/claim-number.mjs";
+import { ClaimFamilyAbortedError, isTransportFailure } from "./errors.mjs";
+import { acquireClaim, releaseClaim } from "./transitions.mjs";
+import { ClaimUsageError } from "./verify.mjs";
+
+/**
+ * Order and validate the members of a family, before any network call.
+ *
+ * @param {unknown} numbers the requested members.
+ * @returns {number[]} the members, ascending.
+ * @throws {ClaimUsageError} for a non-positive, non-integer or duplicate member.
+ */
+export function planFamilyClaims(numbers) {
+  if (!Array.isArray(numbers) || numbers.length === 0) {
+    throw new ClaimUsageError("A family needs at least one member", {
+      details: { numbers: numbers ?? null },
+    });
+  }
+  const seen = new Set();
+  for (const number of numbers) {
+    if (!isClaimNumber(number)) {
+      throw new ClaimUsageError(
+        `A family member must be a positive safe integer, got ${JSON.stringify(number ?? null)}`,
+        { details: { numbers: [...numbers] } },
+      );
+    }
+    if (seen.has(number)) {
+      throw new ClaimUsageError(
+        `A family names ${number} more than once; every member is claimed exactly once`,
+        { details: { numbers: [...numbers], duplicate: number } },
+      );
+    }
+    seen.add(number);
+  }
+  return [...numbers].sort((left, right) => left - right);
+}
+
+/**
+ * A context whose run-id inputs are pinned, so every member generates the
+ * same run id inside `acquireClaim`.
+ *
+ * @param {object} ctx claim context.
+ * @returns {object} the pinned context.
+ */
+function familyContext(ctx) {
+  const entropy = ctx.random(6);
+  const startedAtMs = ctx.clock.now();
+  return {
+    ...ctx,
+    random: () => entropy,
+    clock: { ...ctx.clock, now: () => startedAtMs },
+  };
+}
+
+/**
+ * The two transitions inside `acquireClaim` that write a LOCK.
+ *
+ * `acquireClaim` also initializes an absent ref, and that transition's
+ * candidate is an UNLOCK: an unknown outcome there leaves no LOCK, so it is
+ * not unresolved ownership.
+ */
+const LOCK_TRANSITION_ACTIONS = new Set(["acquire", "takeover"]);
+
+/**
+ * Did this acquire failure leave a LOCK nobody can account for?
+ *
+ * An unknown outcome from a lock compare-and-swap means the candidate may have
+ * landed. `claimFamily` records a member only after `acquireClaim` returns, so
+ * that member is absent from `leases` and the rollback never releases it. The
+ * family must say so: the run may hold a LOCK it cannot name.
+ *
+ * @param {unknown} acquireError the failure `acquireClaim` threw.
+ * @returns {boolean}
+ */
+function unresolvedLockOwnership(acquireError) {
+  return (
+    acquireError?.claimCode === "CLAIM_UNKNOWN_OUTCOME" &&
+    LOCK_TRANSITION_ACTIONS.has(acquireError?.details?.action)
+  );
+}
+
+/**
+ * Release every member of a family, newest first by default.
+ *
+ * Never throws: a release failure is collected, because the caller is usually
+ * already handling another failure and must still learn about this one.
+ *
+ * @param {{order: number[], leases: Map<number, object>}} family the family.
+ * @param {object} [options] `{ outcome, reverse }`.
+ * @returns {Promise<{released: number[], failures: Array<{number: number, error: Error}>}>}
+ */
+export async function releaseFamily(family, options = {}) {
+  const { outcome = "completed", reverse = true } = options;
+  const order = reverse ? [...family.order].reverse() : [...family.order];
+  const released = [];
+  const failures = [];
+  for (const number of order) {
+    const lease = family.leases.get(number);
+    if (!lease) continue;
+    try {
+      await releaseClaim(lease, { outcome });
+      released.push(number);
+    } catch (error) {
+      failures.push({ number, error });
+    }
+  }
+  return { released, failures };
+}
+
+/**
+ * Claim every member of a family, or none of them.
+ *
+ * @param {object} ctx claim context.
+ * @param {number[]} numbers the members.
+ * @param {object} [metadata] metadata for every member's acquire.
+ * @param {object} [options] `{ overrides, rollbackOutcome }`.
+ * @returns {Promise<{order: number[], leases: Map<number, object>, runId: string}>}
+ * @throws {ClaimFamilyAbortedError} when any member could not be claimed.
+ */
+export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
+  const { overrides = {}, rollbackOutcome = "family-rollback" } = options;
+  const order = planFamilyClaims(numbers);
+  const pinned = familyContext(ctx);
+  const leases = new Map();
+  let runId = null;
+
+  for (const number of order) {
+    let lease;
+    try {
+      lease = await acquireClaim(pinned, number, metadata, overrides);
+    } catch (acquireError) {
+      const claimed = { order: [...leases.keys()], leases };
+      const rollback = await releaseFamily(claimed, {
+        outcome: rollbackOutcome,
+        reverse: true,
+      });
+      const rollbackFailed = rollback.failures.length > 0;
+      const unresolved = unresolvedLockOwnership(acquireError);
+      // A rollback release whose compare-and-swap ended unknown may have
+      // landed an UNLOCK nobody can name. Reducing it to a one-line summary
+      // threw away the only evidence that could adopt it — the candidate, its
+      // operation id and the lease it was written under — so every one of them
+      // is carried on the error, per member, exactly as the failed acquire's
+      // own candidate is.
+      const unresolvedRollbacks = rollback.failures
+        .filter(
+          (entry) =>
+            entry.error?.claimCode === "CLAIM_UNKNOWN_OUTCOME" &&
+            typeof entry.error?.details?.candidate?.oid === "string",
+        )
+        .map((entry) => ({
+          number: entry.number,
+          candidate: entry.error.details.candidate,
+          operationId: entry.error.details.candidate.operationId ?? null,
+          lease: entry.error.details.lease ?? null,
+        }));
+      // An ambiguous rollback outranks a proven one, for the reason
+      // `family release` uses: exit 16 sends an operator at a LOCK that is
+      // still there, while a candidate that may have landed is exit 12 and an
+      // `adopt`. A proven failure alongside it is still in `releaseFailures`.
+      const ambiguous = unresolved || unresolvedRollbacks.length > 0;
+      // `family-aborted` is exit 10 — "skip this family this run" — and that
+      // is the verdict for a **race**: a member another run holds. A failure
+      // that is not a claim verdict at all is a different fact, and wrapping
+      // it hid the only two that matter: a credential that may not write is
+      // exit 21 "stop and report to the operator", and a transport that timed
+      // out is exit 20 "retry with backoff". Both were read as "somebody else
+      // has it", so a run with the wrong token retried the whole family every
+      // cycle and reported contention that never happened. The classification
+      // is preserved only when the rollback left nothing behind — every member
+      // released, none of them ambiguous — which is the same rule
+      // `family release` follows for its own members.
+      if (!ambiguous && !rollbackFailed && isTransportFailure(acquireError)) {
+        throw acquireError;
+      }
+      const summary = `Family claim aborted at ${ctx.profile.subject(ctx.profile.canonicalScope(ctx.options, number))}: ${String(acquireError?.message ?? acquireError).split("\n")[0]}`;
+      const aborted = new ClaimFamilyAbortedError(
+        // The failed member's own recovery text is kept whole when its LOCK
+        // may have landed. It names the candidate and the `adopt` line, and
+        // the first-line summary above drops both.
+        unresolved
+          ? `${summary}\n${String(acquireError?.message ?? acquireError)}`
+          : summary,
+        {
+          // An unresolved LOCK is not an ordinary family abort. Exit 10 tells
+          // the caller to skip the family this run, which is wrong while a
+          // LOCK this run may hold is still on a ref. Exit 12 is the honest
+          // verdict: do not retry, run `adopt`. An ambiguous rollback release
+          // reads the same way — its UNLOCK may have landed — and a rollback
+          // that provably failed is still reported in `releaseFailures`.
+          claimCode: ambiguous ? "CLAIM_UNKNOWN_OUTCOME" : undefined,
+          code: ambiguous ? ctx.profile.errorCodes.unknown : undefined,
+          details: {
+            order,
+            failedAt: number,
+            failure: {
+              code: acquireError?.code ?? null,
+              claimCode: acquireError?.claimCode ?? null,
+              reason: acquireError?.reason ?? null,
+            },
+            // The failed member's candidate and lease, so `adopt` — and the
+            // CLI's own unknown-outcome record — can prove whether the LOCK
+            // landed. Without them the only surviving evidence is a message.
+            candidate: unresolved
+              ? (acquireError?.details?.candidate ?? null)
+              : null,
+            lease: unresolved ? (acquireError?.details?.lease ?? null) : null,
+            // Every rollback release that ended unknown, one entry per member,
+            // each carrying what `adopt` needs to resolve it.
+            unresolved: unresolvedRollbacks,
+            released: rollback.released,
+            releaseFailures: rollback.failures.map((entry) => ({
+              number: entry.number,
+              code: entry.error?.code ?? null,
+              claimCode: entry.error?.claimCode ?? null,
+              message: String(entry.error?.message ?? entry.error).split(
+                "\n",
+              )[0],
+            })),
+          },
+          // A rollback release that failed is the graver fault: it leaves a
+          // LOCK behind, so it becomes the cause and `isRecoverableClaimRaceError`
+          // reports the family as unrecoverable (exit 16 rather than 10).
+          cause: rollback.failures[0]?.error ?? acquireError,
+        },
+      );
+      // A member whose lock compare-and-swap ended unknown may hold a LOCK the
+      // rollback never saw, so the family is partial even when every release
+      // this run could make succeeded.
+      aborted.partialClaim = rollbackFailed || unresolved;
+      aborted.acquireError = acquireError;
+      throw aborted;
+    }
+    // The pinned clock exists only to make the run id identical across the
+    // family. Renew and release must see real time, so every lease is handed
+    // back to the caller's context as soon as it exists.
+    lease.ctx = ctx;
+    runId ??= lease.owner.runId;
+    leases.set(number, lease);
+  }
+
+  return { order, leases, runId };
+}

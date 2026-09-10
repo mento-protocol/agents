@@ -1,0 +1,44 @@
+{
+  "name": "@mento-protocol/issues",
+  "version": "0.1.0",
+  "description": "GitHub ref-backed claims (compare-and-swap mutex with an opt-in lease), a bounded gh runner, and procedural-marker byte contracts.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mento-protocol/agents.git",
+    "directory": "packages/issues"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./claims": "./src/claims/index.mjs",
+    "./gh": "./src/gh/index.mjs",
+    "./markers": "./src/markers/index.mjs",
+    "./cli": "./src/cli/main.mjs",
+    "./testing": "./src/testing/index.mjs",
+    "./fixtures/comment-marker-vectors.json": "./fixtures/comment-marker-vectors.json",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "mento-issues": "./bin/mento-issues.mjs"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "bin",
+    "docs",
+    "fixtures",
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "vectors": "node bin/mento-issues.mjs markers vectors --out fixtures/comment-marker-vectors.json"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

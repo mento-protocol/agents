@@ -1,0 +1,168 @@
+{
+  "schema": "dependabot-prep-comment-marker-vectors:v1",
+  "generatedBy": "@mento-protocol/issues",
+  "vectors": [
+    {
+      "name": "review-reply-decomposed-unicode",
+      "markerSchema": "dependabot-prep-reply:v1",
+      "root": {
+        "restDatabaseId": 1987654321,
+        "idAscii": "1987654321",
+        "idUtf8Hex": "31393837363534333231",
+        "idSha256": "1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2",
+        "body": "Café\r\nSecond line 🧪",
+        "bodyUtf8Hex": "43616665cc810d0a5365636f6e64206c696e6520f09fa7aa",
+        "bodySha256": "29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977"
+      },
+      "operator": {
+        "id": 261429829,
+        "login": "gisk0",
+        "type": "User",
+        "ascii": "{\"id\":261429829,\"login\":\"gisk0\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a3236313432393832392c226c6f67696e223a226769736b30222c2274797065223a2255736572227d",
+        "sha256": "77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5"
+      },
+      "visibleBody": {
+        "text": "Fixed in 4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a - preserved Café bytes.",
+        "utf8Hex": "466978656420696e2034663363326231613039653864376336623561343933383237313630356634653364326331623061202d207072657365727665642043616665cc812062797465732e",
+        "sha256": "cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4"
+      },
+      "head": "4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a",
+      "decision": "fixed",
+      "marker": "<!-- dependabot-prep-reply:v1 root-id-sha256=1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2 root-body-sha256=29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977 head=4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a visible-body-sha256=cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4 operator-sha256=77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5 decision=fixed -->",
+      "submittedBody": "Fixed in 4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a - preserved Café bytes.\n\n<!-- dependabot-prep-reply:v1 root-id-sha256=1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2 root-body-sha256=29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977 head=4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a visible-body-sha256=cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4 operator-sha256=77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5 decision=fixed -->"
+    },
+    {
+      "name": "top-level-minimal-id",
+      "markerSchema": "dependabot-prep-comment:v1",
+      "root": {
+        "restDatabaseId": 1,
+        "idAscii": "1",
+        "idUtf8Hex": "31",
+        "idSha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        "body": "Line one\nLine two\twith tab",
+        "bodyUtf8Hex": "4c696e65206f6e650a4c696e652074776f097769746820746162",
+        "bodySha256": "7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8"
+      },
+      "operator": {
+        "id": 42,
+        "login": "a-b",
+        "type": "User",
+        "ascii": "{\"id\":42,\"login\":\"a-b\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a34322c226c6f67696e223a22612d62222c2274797065223a2255736572227d",
+        "sha256": "5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0"
+      },
+      "visibleBody": {
+        "text": "Won't fix: the update is outside this repository policy.",
+        "utf8Hex": "576f6e2774206669783a2074686520757064617465206973206f7574736964652074686973207265706f7369746f727920706f6c6963792e",
+        "sha256": "d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407"
+      },
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "decision": "wont-fix",
+      "marker": "<!-- dependabot-prep-comment:v1 root-id-sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b root-body-sha256=7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa visible-body-sha256=d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407 operator-sha256=5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0 decision=wont-fix -->",
+      "submittedBody": "Won't fix: the update is outside this repository policy.\n\n<!-- dependabot-prep-comment:v1 root-id-sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b root-body-sha256=7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa visible-body-sha256=d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407 operator-sha256=5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0 decision=wont-fix -->"
+    },
+    {
+      "name": "review-reply-claimed",
+      "markerSchema": "dependabot-prep-reply:v2",
+      "root": {
+        "restDatabaseId": 1987654321,
+        "idAscii": "1987654321",
+        "idUtf8Hex": "31393837363534333231",
+        "idSha256": "1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2",
+        "body": "Café\r\nSecond line 🧪",
+        "bodyUtf8Hex": "43616665cc810d0a5365636f6e64206c696e6520f09fa7aa",
+        "bodySha256": "29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977"
+      },
+      "operator": {
+        "id": 261429829,
+        "login": "gisk0",
+        "type": "User",
+        "ascii": "{\"id\":261429829,\"login\":\"gisk0\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a3236313432393832392c226c6f67696e223a226769736b30222c2274797065223a2255736572227d",
+        "sha256": "77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5"
+      },
+      "visibleBody": {
+        "text": "Fixed in 4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a - preserved Café bytes.",
+        "utf8Hex": "466978656420696e2034663363326231613039653864376336623561343933383237313630356634653364326331623061202d207072657365727665642043616665cc812062797465732e",
+        "sha256": "cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4"
+      },
+      "head": "4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a",
+      "decision": "fixed",
+      "claim": "1a2b3c4d5e6f7089a1b2c3d4e5f60718293a4b5c",
+      "marker": "<!-- dependabot-prep-reply:v2 root-id-sha256=1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2 root-body-sha256=29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977 head=4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a visible-body-sha256=cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4 operator-sha256=77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5 decision=fixed claim=1a2b3c4d5e6f7089a1b2c3d4e5f60718293a4b5c -->",
+      "submittedBody": "Fixed in 4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a - preserved Café bytes.\n\n<!-- dependabot-prep-reply:v2 root-id-sha256=1b776fa8fc5e852289d8239212b337e6238022c8539132bff681a9dbd1a62aa2 root-body-sha256=29aa8d06f77ee9dea5c0d00888aaaf14a37b8e9f477d9f7d527ecf0febe89977 head=4f3c2b1a09e8d7c6b5a4938271605f4e3d2c1b0a visible-body-sha256=cab55553406b87b8b06886760a00e877a5ba88da84b632b037887da730ef81a4 operator-sha256=77b6351947e5e1469fe83ff802ba44161b1d8ce862a15ef2a6c5dc1ccfffc4e5 decision=fixed claim=1a2b3c4d5e6f7089a1b2c3d4e5f60718293a4b5c -->"
+    },
+    {
+      "name": "top-level-claimed",
+      "markerSchema": "dependabot-prep-comment:v2",
+      "root": {
+        "restDatabaseId": 1,
+        "idAscii": "1",
+        "idUtf8Hex": "31",
+        "idSha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        "body": "Line one\nLine two\twith tab",
+        "bodyUtf8Hex": "4c696e65206f6e650a4c696e652074776f097769746820746162",
+        "bodySha256": "7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8"
+      },
+      "operator": {
+        "id": 42,
+        "login": "a-b",
+        "type": "User",
+        "ascii": "{\"id\":42,\"login\":\"a-b\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a34322c226c6f67696e223a22612d62222c2274797065223a2255736572227d",
+        "sha256": "5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0"
+      },
+      "visibleBody": {
+        "text": "Won't fix: the update is outside this repository policy.",
+        "utf8Hex": "576f6e2774206669783a2074686520757064617465206973206f7574736964652074686973207265706f7369746f727920706f6c6963792e",
+        "sha256": "d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407"
+      },
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "decision": "wont-fix",
+      "claim": "9c1f4e2a7b0d3856ef91a24c6d70b8f5e3a1c0d9",
+      "marker": "<!-- dependabot-prep-comment:v2 root-id-sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b root-body-sha256=7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa visible-body-sha256=d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407 operator-sha256=5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0 decision=wont-fix claim=9c1f4e2a7b0d3856ef91a24c6d70b8f5e3a1c0d9 -->",
+      "submittedBody": "Won't fix: the update is outside this repository policy.\n\n<!-- dependabot-prep-comment:v2 root-id-sha256=6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b root-body-sha256=7ad3bb1452e9e25fcb8687dc35f24b2d17e83d7f28584b6f2bd8aacb59b760f8 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa visible-body-sha256=d176776711abf7e7e04a597e70689addca3c95392cdc886dd2de6218600e3407 operator-sha256=5f25c7ba034ec1f5caa0ea3881872d8ccd70b429e36cf425137fd8406bb460b0 decision=wont-fix claim=9c1f4e2a7b0d3856ef91a24c6d70b8f5e3a1c0d9 -->"
+    }
+  ],
+  "summaryVectors": [
+    {
+      "name": "summary-plain",
+      "markerSchema": "mento-dependabot-preparation:v2",
+      "pr": 872,
+      "claim": "0123456789abcdef0123456789abcdef01234567",
+      "ownerRunId": "claude-code-mac-20260909T095812Z-7c1a9e4213b0",
+      "runSha256": "6ecef83da0fea15e3992f82d20bb053b9f2a7af2c7fb61206228d485f1ef3d44",
+      "operator": {
+        "id": 42,
+        "login": "chapati23",
+        "type": "User",
+        "ascii": "{\"id\":42,\"login\":\"chapati23\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a34322c226c6f67696e223a22636861706174693233222c2274797065223a2255736572227d",
+        "sha256": "a14d72776b98ba1e17b309f2f827fd3fd36c1f6ffbf5ba830508690d405671ef"
+      },
+      "supersedes": null,
+      "v1Line": "<!-- mento-dependabot-preparation:v1 -->",
+      "v2Line": "<!-- mento-dependabot-preparation:v2 pr=872 claim=0123456789abcdef0123456789abcdef01234567 run-sha256=6ecef83da0fea15e3992f82d20bb053b9f2a7af2c7fb61206228d485f1ef3d44 operator-sha256=a14d72776b98ba1e17b309f2f827fd3fd36c1f6ffbf5ba830508690d405671ef -->"
+    },
+    {
+      "name": "summary-takeover",
+      "markerSchema": "mento-dependabot-preparation:v2",
+      "pr": 872,
+      "claim": "fedcba9876543210fedcba9876543210fedcba98",
+      "ownerRunId": "openclaw-giskard-20260909T104403Z-3ad10ff591be",
+      "runSha256": "478a8fb3d04a99c580568a78c03aa11679f5bb8875a2ed285eb23dd08c94cf2e",
+      "operator": {
+        "id": 99,
+        "login": "openclaw-bot",
+        "type": "User",
+        "ascii": "{\"id\":99,\"login\":\"openclaw-bot\",\"type\":\"User\"}",
+        "bytesHex": "7b226964223a39392c226c6f67696e223a226f70656e636c61772d626f74222c2274797065223a2255736572227d",
+        "sha256": "eebde67d78d25352c8961db34cf1f57483f13a537c99cfbb6cd883bf5fb8f299"
+      },
+      "supersedes": "0123456789abcdef0123456789abcdef01234567",
+      "v1Line": "<!-- mento-dependabot-preparation:v1 -->",
+      "v2Line": "<!-- mento-dependabot-preparation:v2 pr=872 claim=fedcba9876543210fedcba9876543210fedcba98 run-sha256=478a8fb3d04a99c580568a78c03aa11679f5bb8875a2ed285eb23dd08c94cf2e operator-sha256=eebde67d78d25352c8961db34cf1f57483f13a537c99cfbb6cd883bf5fb8f299 supersedes=0123456789abcdef0123456789abcdef01234567 -->"
+    }
+  ]
+}

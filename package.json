@@ -1,0 +1,18 @@
+{
+  "name": "agents",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "format": "trunk fmt",
+    "lint": "trunk check --all",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  }
+}

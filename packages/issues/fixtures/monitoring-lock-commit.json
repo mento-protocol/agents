@@ -1,0 +1,48 @@
+{
+  "comment": "Golden commit messages for monitoring-monorepo's issue-board mutex, used by test/profile-board.test.mjs to prove `issueBoardProfile` is a byte-for-byte drop-in. These bytes are DERIVED FROM CODE, not captured from a live commit: they are what `basePayload` + the acquire and release payload literals in mento-protocol/monitoring-monorepo `scripts/pr/issue-board-lock.mjs` (lines 1058-1076 for the envelope, 1089-1093 for bootstrap, 1285-1295 for acquire, 1346-1357 for release) produce for the inputs recorded under `inputs`. The offline suite may not reach the network, so nothing here was read back from GitHub. `parentUnlock` and `parentLock` carry plausible 40-hex object ids; the end-to-end assertion in the same test substitutes the fake server's synthetic ids for exactly those two fields and compares everything else byte-for-byte.",
+  "source": {
+    "repository": "mento-protocol/monitoring-monorepo",
+    "file": "scripts/pr/issue-board-lock.mjs",
+    "envelope": "basePayload, lines 1058-1076",
+    "bootstrap": "initializeLockRef, lines 1089-1093",
+    "acquire": "acquireIssueMutationLock, lines 1285-1295",
+    "release": "releaseIssueMutationLock, lines 1346-1357",
+    "adr": "docs/adr/0082-persistent-issue-board-mutation-mutex.md"
+  },
+  "inputs": {
+    "options": {
+      "repo": "mento-protocol/monitoring-monorepo",
+      "projectOwner": "mento-protocol",
+      "projectNumber": 12
+    },
+    "issue": 2255,
+    "bootstrapOperationId": "lock-6f0a9d3e-2c11-4a2b-8f1a-3d0c9b7e5a41",
+    "acquireOperationId": "lock-6f0a9d3e-2c11-4a2b-8f1a-3d0c9b7e5a41",
+    "releaseOperationId": "unlock-58c1e0a7-4b6d-49f2-84a3-2c7b0d915ef6",
+    "acquireTimestamp": "2026-09-09T09:58:12.004Z",
+    "releaseTimestamp": "2026-09-09T11:02:41.117Z",
+    "metadata": {
+      "operation": "claim",
+      "agent": "codex",
+      "claimId": "codex-2255-20260909T095812Z",
+      "branch": "agent/issue-2255",
+      "previousBranch": null,
+      "claimedAt": "2026-09-09T09:58:12.004Z",
+      "pr": null,
+      "previousPr": null
+    },
+    "parentUnlock": "2fc690ff01cbf493d085a2d27b39f89d9f303504",
+    "parentLock": "a6fe65deb282c4fbc0663c9f576d6ff10677c65a",
+    "outcome": "completed"
+  },
+  "refName": "refs/mento-issue-board-locks/v1/02ed49af5d245dcd15ba9e5254dce3b02086fd670d6564b044e2ebea33a40f4b",
+  "bootstrap": {
+    "message": "{\"kind\":\"mento-issue-board-mutex\",\"version\":1,\"state\":\"UNLOCK\",\"scope\":{\"repo\":\"mento-protocol/monitoring-monorepo\",\"projectOwner\":\"mento-protocol\",\"projectNumber\":12,\"issue\":2255},\"operation\":\"initialize\",\"operationId\":\"lock-6f0a9d3e-2c11-4a2b-8f1a-3d0c9b7e5a41\",\"agent\":null,\"claimId\":null,\"branch\":null,\"previousBranch\":null,\"claimedAt\":null,\"pr\":null,\"previousPr\":null,\"parentLock\":null,\"completedAt\":\"2026-09-09T09:58:12.004Z\"}"
+  },
+  "acquire": {
+    "message": "{\"kind\":\"mento-issue-board-mutex\",\"version\":1,\"state\":\"LOCK\",\"scope\":{\"repo\":\"mento-protocol/monitoring-monorepo\",\"projectOwner\":\"mento-protocol\",\"projectNumber\":12,\"issue\":2255},\"operation\":\"claim\",\"operationId\":\"lock-6f0a9d3e-2c11-4a2b-8f1a-3d0c9b7e5a41\",\"agent\":\"codex\",\"claimId\":\"codex-2255-20260909T095812Z\",\"branch\":\"agent/issue-2255\",\"previousBranch\":null,\"claimedAt\":\"2026-09-09T09:58:12.004Z\",\"pr\":null,\"previousPr\":null,\"parentUnlock\":\"2fc690ff01cbf493d085a2d27b39f89d9f303504\",\"startedAt\":\"2026-09-09T09:58:12.004Z\"}"
+  },
+  "release": {
+    "message": "{\"kind\":\"mento-issue-board-mutex\",\"version\":1,\"state\":\"UNLOCK\",\"scope\":{\"repo\":\"mento-protocol/monitoring-monorepo\",\"projectOwner\":\"mento-protocol\",\"projectNumber\":12,\"issue\":2255},\"operation\":\"complete\",\"operationId\":\"unlock-58c1e0a7-4b6d-49f2-84a3-2c7b0d915ef6\",\"agent\":\"codex\",\"claimId\":\"codex-2255-20260909T095812Z\",\"branch\":\"agent/issue-2255\",\"previousBranch\":null,\"claimedAt\":\"2026-09-09T09:58:12.004Z\",\"pr\":null,\"previousPr\":null,\"parentLock\":\"a6fe65deb282c4fbc0663c9f576d6ff10677c65a\",\"completedAt\":\"2026-09-09T11:02:41.117Z\",\"outcome\":\"completed\"}"
+  }
+}
