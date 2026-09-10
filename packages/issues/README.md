@@ -156,9 +156,12 @@ compare-and-mutate for labels, and the next reconcile corrects whatever this
 one gets wrong.
 
 **`label ensure --color` is checked here, not by GitHub.** A colour that is not
-six hexadecimal digits (a leading `#` is allowed) is exit 2 and costs no round
-trip. It used to resolve a login, be refused by the create and by its one
-retry, and report both refusals as warnings beside `status: "ok"` and exit 0.
+six hexadecimal digits is exit 2 and costs no round trip. It used to resolve a
+login, be refused by the create and by its one retry, and report both refusals
+as warnings beside `status: "ok"` and exit 0. One leading `#` is accepted and
+**removed**: GitHub's label API carries the six digits alone, so `#ff0000`
+would fail the create and, on an existing label, report a colour mismatch
+against a label that matches. `##ff0000` is refused like anything else.
 
 **A dry run refuses what the write would refuse.** `--dry-run` runs the
 transition's own input checks before it plans, so an unusable `--set` value or

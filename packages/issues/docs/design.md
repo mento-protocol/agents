@@ -942,6 +942,14 @@ The grammar is six hexadecimal digits with an optional leading `#`, it is
 checked before `ensureLogin`, and it is exit 2 with no round trip at all: a
 command line this package can refuse itself is never GitHub's to refuse.
 
+The `#` is accepted and then **removed**, which is the second half of the same
+rule. GitHub's label API carries the six digits alone: it refuses a create
+whose `color` is `#ff0000`, and it answers `ff0000` on a read — so passing the
+`#` through failed the create and, against a label that already existed, made
+`ensureClaimLabel` report a colour mismatch for a colour that matched. One
+leading `#` and no more; `##ff0000` is not this grammar and is refused like any
+other value that is not.
+
 ## Errors
 
 ```text

@@ -6715,15 +6715,38 @@ test("label ensure refuses a colour GitHub cannot parse before any network call"
   assert.equal(labelCalls, 0, "no label call was made");
   assert.equal(logins, 0, "and no login was resolved");
 
-  // Both accepted spellings still reach the create.
-  for (const color of ["ededed", "#ED1C24"]) {
-    const ensured = await context.run(
-      ["claims", "label", "ensure", "--color", color],
-      { operations },
+  // One leading `#` and no more. `##ff0000` is not the grammar.
+  const doubled = await context.run(
+    ["claims", "label", "ensure", "--color", "##ff0000"],
+    { operations },
+  );
+  assert.equal(doubled.exitCode, 2);
+  assert.equal(labelCalls, 0);
+
+  // Both accepted spellings reach the create, and both reach it as the six
+  // digits alone: GitHub's label API refuses a `color` of `#ff0000` and
+  // answers `ff0000` on a read, so passing the `#` through both failed the
+  // create and made `ensureClaimLabel` report a mismatch against a label that
+  // matched.
+  for (const [given, sent] of [
+    ["ededed", "ededed"],
+    ["#ED1C24", "ED1C24"],
+  ]) {
+    const fresh = harness();
+    const ensured = await fresh.run(
+      ["claims", "label", "ensure", "--color", given],
+      { operations: fresh.options.operations },
     );
     assert.equal(ensured.exitCode, 0);
+    assert.equal(ensured.document.label.created, true);
+    assert.equal(
+      fresh.labels.definitions.get("dependabot-prep:claimed").color,
+      sent,
+      `${given} reaches GitHub as ${sent}`,
+    );
+    assert.deepEqual(ensured.document.warnings, [], "and nothing mismatched");
   }
-  assert.ok(labelCalls > 0, "a valid colour is not refused locally");
+  assert.equal(labelCalls, 0, "none of that touched the counting harness");
 });
 
 test("a namespace the transport cannot carry is refused when the config loads", async () => {

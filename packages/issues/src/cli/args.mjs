@@ -775,8 +775,16 @@ const LABEL_COLOR_PATTERN = /^#?[0-9a-fA-F]{6}$/u;
  * `status: "ok"` and exit 0. A command line this package can refuse itself is
  * exit 2 and costs no round trip.
  *
+ * A `#` is accepted and then **removed**, because GitHub's label API carries
+ * the six digits alone: it rejects a create whose `color` is `#ff0000`, and it
+ * answers `ff0000` on a read, so passing the `#` through also made
+ * `ensureClaimLabel` report a colour mismatch against a label that matched.
+ * One leading `#` and no more — `##ff0000` is refused like any other value
+ * that is not this grammar.
+ *
  * @param {unknown} color the `--color` value, or undefined.
- * @returns {string|undefined} the same value, for chaining.
+ * @returns {string|undefined} the six hexadecimal digits, with any leading `#`
+ *   removed, or `undefined` when no colour was given.
  * @throws {ClaimUsageError} for anything that is not six hexadecimal digits.
  */
 export function assertLabelColor(color) {
@@ -788,7 +796,7 @@ export function assertLabelColor(color) {
       { flag: "color", value: described },
     );
   }
-  return color;
+  return color.startsWith("#") ? color.slice(1) : color;
 }
 
 /**
