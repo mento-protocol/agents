@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 
+import { describeRedactedValue } from "../gh/redact.mjs";
 import { isClaimNumber } from "../shared/claim-number.mjs";
 import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { assertValidRefName } from "../shared/ref-name.mjs";
@@ -139,8 +140,12 @@ export function prClaimProfile(overrides = {}) {
       // `9007199254740993` is already `9007199254740992` by the time anything
       // renders it — a claim on a reference the caller never named.
       if (!isClaimNumber(number)) {
+        // Described, not echoed. Anything can arrive here — this is an
+        // exported entry point, and a string reaches it as readily as a
+        // number — and the refusal travels into `error.details`, into the
+        // failure document and into every report built from it.
         throw new Error(
-          `Pull request number must be a positive safe integer, got: ${number}`,
+          `Pull request number must be a positive safe integer, got: ${describeRedactedValue(number)}`,
         );
       }
       return {
@@ -222,8 +227,10 @@ export function issueBoardProfile(overrides = {}) {
       // the issue number is hashed into the reference name, so a number that
       // is not its own decimal rendering hashes to a different reference.
       if (!isClaimNumber(number)) {
+        // Described, not echoed, for the same reason as the pull-request
+        // profile's: an exported entry point takes whatever it is given.
         throw new Error(
-          `Issue number must be a positive safe integer, got: ${number}`,
+          `Issue number must be a positive safe integer, got: ${describeRedactedValue(number)}`,
         );
       }
       const projectOwner = String(options.projectOwner ?? "")

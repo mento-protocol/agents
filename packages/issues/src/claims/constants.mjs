@@ -72,18 +72,6 @@ export const MIN_GUARD_RENEW_INTERVAL_MS = 1_000;
  */
 export const GUARD_DEADLINE_CHECK_INTERVAL_MS = 250;
 
-/**
- * How long the exit path waits for a renew tick that is still in flight.
- *
- * The tick can rotate the reference and record the rotation, so the final
- * report must not be written while one is running: it would name a token the
- * next reader no longer finds. The wait is bounded because the reason a tick is
- * still running may be a transport that has stopped answering — the bound is
- * that transport's own timeout, which `ctx.options.timeoutMs` carries when the
- * caller set one, and this is the fallback for when it did not.
- */
-export const GUARD_TICK_SETTLE_MS = 60_000;
-
 /** Default lease shape, in the units the config document uses. */
 export const DEFAULT_LEASE = Object.freeze({
   ttlMinutes: 30,

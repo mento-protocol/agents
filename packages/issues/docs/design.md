@@ -747,16 +747,34 @@ returns its warnings from `onRenew`, which puts them on the report: a renewal
 the host could not record is exactly what the next `adopt --from-state` needs
 to know about.
 
-A tick that is still **in flight** when the child exits is waited for before
-the report is built. Cancelling the schedule stops the next tick and does
-nothing to the one parked inside a compare-and-swap, so that tick rotated the
-reference and called `onRenew` after the report had been written and the slot
-released: the report named a token one rotation stale, and the recorded state
-entry pointed at a token nothing had printed. The wait is **bounded**, because
-the reason a tick is still running may be a transport that has stopped
-answering — the bound is that transport's own timeout (`ctx.options.timeoutMs`,
-or `GUARD_TICK_SETTLE_MS`), after which the call is over one way or the other
-and guard must not be held open by it.
+A tick that is still **in flight** when the child exits is waited for, to its
+real settlement, before the report is built. Cancelling the schedule stops the
+next tick and does nothing to the one parked inside a compare-and-swap, so that
+tick rotated the reference and called `onRenew` after the report had been
+written and the slot released: the report named a token one rotation stale, and
+the recorded state entry pointed at a token nothing had printed.
+
+A timer cannot fix that, and the first attempt at one is worth recording: a
+bounded `Promise.race` releases the exit path while the tick is still running,
+so everything the finding is about happens after the release instead of before
+it. What makes the wait terminate is **cancellation**, not a deadline. Guard
+sets a `closing` flag and aborts a signal that every renew context carries:
+
+- the flag is checked before each remote call, so no further member of a family
+  is started once the child is gone, and at most one call is ever outstanding;
+- the signal ends that one call — the same `AbortSignal` a real `gh` call
+  already honours through `callOptions`, merged with the caller's own, so
+  either can end a renew;
+- a call that has already **answered** still applies its result, because that
+  is the state of the reference and a report naming the token before it would
+  be exactly the staleness this path exists to prevent;
+- a call that failed **because** guard aborted it is not a warning and moves no
+  verdict: the abort is the reason, and it says nothing about the claim.
+
+So the remaining wait is one call, bounded by the abort and by the runner's own
+per-call timeout, and "nothing runs after the report" is true by construction
+rather than by margin. `announceRenew` also refuses to run once the report is
+emitted — belt and braces for the one callback that reaches outside guard.
 
 Guard's report also carries the warnings its **runtime** collected, because
 guard's documents are its own and bypass `runCli`'s warning merge: a config
@@ -1107,7 +1125,10 @@ and its refusal is printed, logged and pasted onward exactly like the CLI's. A
 through `describeGrammarWord` against the purposes and their aliases, so a real
 purpose is echoed and a passphrase is described, with the same `did you mean`
 that makes a typo actionable. `claims.profile` and both marker revisions follow
-the same rule.
+the same rule, and so does the number a `canonicalScope` refuses: both profiles
+are exported entry points, so a string reaches them as readily as a number, and
+their refusal travels into `details`, into the failure document and into every
+report built from it.
 
 A key-by-key rule was not enough for the credential half, though, because a
 config value is **persisted**: `claims.kind` is copied into `payload.kind` and

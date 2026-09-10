@@ -427,3 +427,32 @@ test("claimProfile reads its own table, never Object.prototype", () => {
   assert.equal(claimProfile("pr").id, "pr");
   assert.equal(claimProfile("issue-board").id, "issue-board");
 });
+
+test("a rejected claim number is described, not echoed", () => {
+  // `canonicalScope` is an exported entry point, so anything at all reaches
+  // it — a string as readily as a number — and its refusal travels into
+  // `error.details`, into the failure document and into every report built
+  // from it.
+  const SENTINEL = "leak-9c31ab";
+  for (const profile of [prClaimProfile(), issueBoardProfile()]) {
+    const options = {
+      repo: "owner/name",
+      projectOwner: "mento-protocol",
+      projectNumber: 12,
+    };
+    assert.throws(
+      () => profile.canonicalScope(options, SENTINEL),
+      (error) => {
+        assert.match(error.message, /positive safe integer/u, profile.id);
+        assert.equal(
+          error.message.includes(SENTINEL),
+          false,
+          `${profile.id} must not echo the rejected number`,
+        );
+        assert.match(error.message, /<string, \d+ characters>/u);
+        return true;
+      },
+      `${profile.id} must refuse it`,
+    );
+  }
+});

@@ -20,7 +20,6 @@ import {
   DEFAULT_MIN_REMAINING_MS,
   GUARD_DEADLINE_CHECK_INTERVAL_MS,
   GUARD_HEARTBEAT_KILL_GRACE_MS,
-  GUARD_TICK_SETTLE_MS,
 } from "./constants.mjs";
 import { guardRenewIntervalMs } from "./context.mjs";
 import {
@@ -739,6 +738,12 @@ export async function guardChild(ctx, claims, options = {}) {
   const warnings = [...(options.warnings ?? [])];
   const renews = [];
   const announceRenew = (entry) => {
+    // Belt and braces for the one rule this callback has: nothing reaches the
+    // caller after the final report has been emitted. The exit path already
+    // waits for the renew loop to settle, so this should be unreachable — it
+    // is here because "should be" is not what a caller recording a rotation
+    // can rely on.
+    if (reported) return;
     if (typeof onRenew !== "function") return;
     try {
       // A caller that records the rotation — the CLI writes it to the state
@@ -914,6 +919,30 @@ export async function guardChild(ctx, claims, options = {}) {
   const untilAborted = (work) =>
     signal ? Promise.race([work, abortedGate]) : work;
 
+  /** The child has exited: the renew loop starts nothing further. */
+  let closing = false;
+  /** Set the instant the final report is emitted; nothing may run after it. */
+  let reported = false;
+  /**
+   * Aborted when guard starts closing, and carried by every renew call.
+   *
+   * The flag stops the loop **between** calls; this is what ends the call
+   * already in flight, so the exit path can wait for the tick's real
+   * settlement instead of releasing itself on a timer. It is merged with the
+   * context's own signal, so a caller that supplied one keeps it: either can
+   * end a renew.
+   */
+  const closingController = new AbortController();
+  const renewCtx = {
+    ...ctx,
+    options: {
+      ...ctx.options,
+      signal: ctx.options?.signal
+        ? AbortSignal.any([ctx.options.signal, closingController.signal])
+        : closingController.signal,
+    },
+  };
+
   const minRemainingMs =
     options.minRemainingMs ??
     (mandatory ? (ctx.leaseMs?.minRemainingMs ?? DEFAULT_MIN_REMAINING_MS) : 0);
@@ -944,8 +973,12 @@ export async function guardChild(ctx, claims, options = {}) {
   const repairEntry = async (entry, member) => {
     try {
       const hydrated = await untilAborted(
+        // `renewCtx`, not `ctx`: the lease this produces is the one the renew
+        // tick reuses while the child runs, so it has to carry the signal that
+        // ends a renew when guard closes. Before the spawn that signal is not
+        // aborted, so nothing here behaves differently.
         hydrateClaimLease(
-          ctx,
+          renewCtx,
           member.number,
           { token: entry.token, runId, current: entry.report.current },
           overrides,
@@ -1355,10 +1388,22 @@ export async function guardChild(ctx, claims, options = {}) {
     }
   };
 
-  /** One pass over every guarded claim; never run concurrently with itself. */
+  /**
+   * One pass over every guarded claim; never run concurrently with itself.
+   *
+   * Cancellation-aware, and the two halves of that are deliberately different.
+   * **No remote call is started** once `closing` is set — the checkpoints
+   * before the adopt and before the renew are what bound the exit path's wait
+   * to the single call already outstanding, rather than to a whole family's
+   * worth of round trips. But a call that has already **answered** still
+   * applies its result: dropping it would leave the report naming a token the
+   * reference has moved past, which is the staleness this whole path exists to
+   * prevent. Nothing can land after the report either way, because the exit
+   * path waits for this function to settle before it builds one.
+   */
   async function renewEntries() {
     for (const entry of entries) {
-      if (killedBy != null || finished) return;
+      if (closing || killedBy != null || finished) return;
       if (!entry.report.held) continue;
       // Nothing was proven since the last failure, and the clock has passed the
       // line: stop now rather than spend another round trip on a transport
@@ -1369,8 +1414,9 @@ export async function guardChild(ctx, claims, options = {}) {
       }
       try {
         if (!entry.lease) {
+          if (closing) return;
           entry.lease = await hydrateClaimLease(
-            ctx,
+            renewCtx,
             entry.number,
             { token: entry.token, runId },
             overrides,
@@ -1380,6 +1426,7 @@ export async function guardChild(ctx, claims, options = {}) {
         // `remainingMs` is measured from this instant, and dating the new
         // deadline from after the round trip would push it later than the
         // reference actually promises.
+        if (closing) return;
         const attemptAtMs = ctx.clock.now();
         const result = await renewClaim(entry.lease, {
           ifDue: true,
@@ -1426,6 +1473,11 @@ export async function guardChild(ctx, claims, options = {}) {
           announceRenew(entry);
         }
       } catch (error) {
+        // A call guard itself aborted on the way out says nothing about the
+        // claim, so it is not a warning and it moves no verdict: the abort is
+        // the reason it failed. Reporting it would put "aborted" on a report
+        // that is otherwise about a child that finished normally.
+        if (closing) return;
         warnings.push(warningOf(error, { number: entry.number }));
         if (mandatory && CLAIM_LOST_CLAIM_CODES.has(error?.claimCode)) {
           entry.report = {
@@ -1479,37 +1531,27 @@ export async function guardChild(ctx, claims, options = {}) {
   };
 
   const result = await exited;
+  // `closing` before `finished`, and both before the schedule is cancelled:
+  // from here the renew loop starts no further remote call, and the call that
+  // is already in flight is aborted through the signal every renew context
+  // carries. Cancelling the schedule alone stopped the **next** tick and did
+  // nothing to the one parked inside a read or a compare-and-swap, so that
+  // tick went on to rotate the reference and call `onRenew` after the final
+  // report had been written and the slot released.
+  closing = true;
+  closingController.abort();
   finished = true;
   cancelRenews();
-  // Cancelling the schedule stops the **next** tick; it does nothing to the
-  // one already parked inside a read or a compare-and-swap. That tick can
-  // still rotate the reference and call `onRenew` — and it used to do so after
-  // the final report had been written and the slot released, so the report
-  // named a token one rotation stale and the recorded state entry pointed at a
-  // token nothing had printed. The exit path waits for it to settle first.
+  // Then the tick is awaited to its **actual** settlement, not raced against a
+  // timer. A race releases the exit path while the tick is still running, and
+  // everything the finding is about — a rotated token, an `onRenew` call, a
+  // mutated report — happens after that release. Waiting for real is what
+  // makes "nothing runs after the report" true rather than likely.
   //
-  // The wait is bounded, because the whole reason a tick is still in flight
-  // may be a transport that has stopped answering: the bound is that
-  // transport's own timeout, after which the call is over one way or another
-  // and guard must not be held open by it.
-  if (inFlightTick) {
-    const settleMs =
-      options.tickSettleMs ?? ctx.options?.timeoutMs ?? GUARD_TICK_SETTLE_MS;
-    // The bound is a real timer, not an unref'd one: while guard waits, this
-    // is the only thing holding the loop open once the child's handle is gone,
-    // and an unref'd bound let the loop drain with the wait still pending. It
-    // is cleared the moment the race settles, so nothing of it outlives the
-    // call either.
-    let boundTimer = null;
-    const bound = new Promise((resolve) => {
-      boundTimer = setTimeout(resolve, settleMs);
-    });
-    try {
-      await Promise.race([inFlightTick.catch(() => {}), bound]);
-    } finally {
-      if (boundTimer) clearTimeout(boundTimer);
-    }
-  }
+  // It terminates because the tick starts nothing new once `closing` is set,
+  // so at most one call is outstanding, and that call is bounded twice over:
+  // by the abort above and by the runner's own per-call timeout.
+  if (inFlightTick) await inFlightTick.catch(() => {});
   clearSignalForwarders();
   clearAbortListener();
   // The escalation is NOT cancelled by the child's own exit. `git` and `node`
@@ -1599,6 +1641,7 @@ export async function guardChild(ctx, claims, options = {}) {
     },
     killedBy,
   });
+  reported = true;
   emit(report);
   return { exitCode, report };
 }
