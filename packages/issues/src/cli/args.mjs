@@ -818,6 +818,29 @@ export function collectSetFlags(entries, allowed) {
 }
 
 /**
+ * Refuse a flag value outside a closed vocabulary, without echoing it.
+ *
+ * The rule every slug in this CLI follows: a word from the vocabulary is
+ * printed back, anything else is described, and the nearest real word is
+ * suggested. Exported because more than one command has such a flag —
+ * `--outcome` below, `--action` in `adopt`.
+ *
+ * @param {unknown} value the supplied value.
+ * @param {{flag: string, allowed: Iterable<string>}} input the vocabulary.
+ * @returns {string} the value, when it is one of `allowed`.
+ * @throws {ClaimUsageError} otherwise.
+ */
+export function assertVocabulary(value, { flag, allowed }) {
+  const words = [...allowed];
+  if (typeof value === "string" && words.includes(value)) return value;
+  const described = describeGrammarWord(value, words);
+  throw usage(
+    `--${flag} must be one of ${words.join(", ")}, got: ${described}${suggestion(value, words)}`,
+    { flag, value: described },
+  );
+}
+
+/**
  * Refuse a release outcome outside the documented vocabulary.
  *
  * @param {unknown} outcome the `--outcome` value, or undefined.

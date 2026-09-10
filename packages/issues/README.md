@@ -127,7 +127,11 @@ grammar would otherwise accept a `ghp_…` as a perfectly good run id.
 compares the label against the ref and reports the difference, so it is a read:
 it runs under `GITHUB_ACTIONS`, in a cloud session without `allowCloudWriters`,
 and without a resolvable runtime or a login read. With `--apply` it is a write
-and every one of those restrictions applies.
+and every one of those restrictions applies. It changes nothing when the
+**reference** cannot be read: a timeout, a permission refusal or an unreadable
+payload answers `status: "unknown"` with a non-zero exit — 20 for a transport,
+16 for a reference this package proved unreadable — because a read that failed
+is not evidence that a claim is gone.
 
 **A dry run refuses what the write would refuse.** `--dry-run` runs the
 transition's own input checks before it plans, so an unusable `--set` value or
@@ -395,12 +399,13 @@ and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 
 A family aborts with `family-aborted` at exit 10 — skip the family this run —
 except when the rollback left a LOCK behind: that is `stale` at exit 16, the
-operator's row, because only a compare-and-swap by hand clears it. A member
-whose LOCK compare-and-swap ended unknown is `unknown-outcome` at exit 12
-instead, and so is a `family release` in which any member's UNLOCK ended
-unknown: the family exits 12 with every ambiguous member listed under
-`unresolved`, each carrying the candidate, the state file it was recorded in
-and the `adopt` line that resolves it. Every other `family release` failure
+operator's row, because only a compare-and-swap by hand clears it. Anything
+**ambiguous** outranks both: a member whose LOCK compare-and-swap ended
+unknown, a rollback release whose UNLOCK ended unknown, and a `family release`
+in which any member's UNLOCK ended unknown are all `unknown-outcome` at exit
+12, with every ambiguous member listed under `unresolved`, each carrying the
+candidate, the state file it was recorded in and the `adopt` line that resolves
+it. Every other `family release` failure
 keeps the status and exit code the same failure would have on a single
 `release`, so a member this run does not hold is `not-held` at exit 14 either
 way. Members that did release are still listed in `released`.

@@ -653,18 +653,44 @@ export function createStateStore(input) {
     },
 
     /**
-     * Remove one entry.
+     * Remove one entry, optionally only while it still names a given lease.
+     *
+     * A release clears the entry it wrote, and it does so after the
+     * compare-and-swap and after the label projection — long enough for a new
+     * local claim of the same item to have written its own record at the same
+     * path. Removing that record deleted the successor's `adopt` candidate,
+     * so `expected` makes the removal conditional: the stored token and run id
+     * must still be the ones being released.
+     *
+     * The residual is the one every read-then-act path on a filesystem has:
+     * the read and the unlink are two operations, so a successor that writes
+     * between them still loses its entry. It is not the mutual-exclusion
+     * authority — the reference is — and the window is now a few instructions
+     * rather than two network round trips and a label call.
      *
      * @param {number} number PR or issue number.
-     * @returns {{path: string, removed: boolean}}
+     * @param {{token?: string, runId?: string}} [expected] the lease that may
+     *   clear it; omit to remove whatever is there.
+     * @returns {{path: string, removed: boolean, reason?: string}}
      */
-    clearEntry(number) {
+    clearEntry(number, expected = null) {
       const path = pathFor(number);
+      if (expected) {
+        const stored = readEntry(number);
+        if (stored === null) return { path, removed: false, reason: "absent" };
+        const sameToken =
+          expected.token == null || stored.token === expected.token;
+        const sameRun =
+          expected.runId == null || stored.runId === expected.runId;
+        if (!sameToken || !sameRun) {
+          return { path, removed: false, reason: "superseded" };
+        }
+      }
       try {
         rmSync(path, { force: true });
         return { path, removed: true };
       } catch {
-        return { path, removed: false };
+        return { path, removed: false, reason: "unremovable" };
       }
     },
   };

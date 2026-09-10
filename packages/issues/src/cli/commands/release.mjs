@@ -82,7 +82,11 @@ export async function runRelease(runtime) {
   });
   if (head?.state === "UNLOCK" && verdict.status === "already-released") {
     const label = await projectClaimLabel(ctx, number, { present: false });
-    const cleared = runtime.stateStore?.clearEntry(number) ?? null;
+    // Only while the entry still names this lease: a new local claim of the
+    // same item may have written its own record at this path in the meantime,
+    // and deleting it would take the successor's `adopt` candidate with it.
+    const cleared =
+      runtime.stateStore?.clearEntry(number, { token, runId }) ?? null;
     return {
       status: "already-released",
       ref,
@@ -130,7 +134,13 @@ export async function runRelease(runtime) {
     present: false,
     run: () => releaseClaim(lease, { outcome }),
   });
-  const cleared = runtime.stateStore?.clearEntry(number) ?? null;
+  // Compare, then remove. This runs after the compare-and-swap and after the
+  // label projection — long enough for a new local claim of the same item to
+  // have written its own entry at this path — and clearing it unconditionally
+  // deleted that successor's record, and with it the candidate
+  // `adopt --from-state` reads.
+  const cleared =
+    runtime.stateStore?.clearEntry(number, { token, runId }) ?? null;
 
   return {
     status: result.status,

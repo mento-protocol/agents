@@ -668,6 +668,12 @@ returns its warnings from `onRenew`, which puts them on the report: a renewal
 the host could not record is exactly what the next `adopt --from-state` needs
 to know about.
 
+Guard's report also carries the warnings its **runtime** collected, because
+guard's documents are its own and bypass `runCli`'s warning merge: a config
+pinning a version this package is not, or a login that could not be read,
+appeared on no guard line and in no `--report` file until they were seeded into
+it.
+
 `--gate wait` is **advisory**: guard always spawns the child, renews while the
 claim is held, and — if the claim is not held at start — prints the verdict and
 runs the child anyway, because a run may legitimately watch CI read-only.
@@ -725,8 +731,17 @@ carrying the failed member's `candidate`, `lease` and its whole recovery text.
 Exit 10 would tell the caller to skip a family whose LOCK this run may still
 hold. The bootstrap transition is excluded: its candidate is an UNLOCK, so an
 unknown outcome there establishes no LOCK and the family is an ordinary abort.
-A failed rollback release outranks both — that LOCK is proven rather than
-possible, and only an operator compare-and-swap clears it.
+
+The **rollback** can end the same way, and it is reported the same way. A
+release whose compare-and-swap outcome is unknown may have landed an UNLOCK
+nobody can name, so every such member is carried on the error as
+`details.unresolved[]` — number, candidate, operation id and lease — and the
+CLI records each under its own number with `recordUnknownOutcome` before it
+prints, exactly as `family release` does. The family then exits 12 rather than
+16: the same precedence, because an adoptable candidate outranks a proven
+failure that an operator will see in `releaseFailures` either way. A rollback
+that provably failed, with no ambiguity anywhere, stays exit 16 — that LOCK is
+there, and only an operator compare-and-swap clears it.
 
 `claimFamily` uses **one generated run id** for every member. It gets there
 without weakening the "no supplied run id" rule: it pins the two inputs
@@ -782,9 +797,16 @@ because listing is a read and the difference it reports is the command's whole
 output; it stops before the projection that would apply it.
 
 `reconcileClaimLabel` computes `desired === (refState === "LOCK")` from the
-reference only, which is invariant I-G in code. `ensureClaimLabel` is
-idempotent: a `GET` that returns 200 reports `{ created: false, existing: true }`
-and, if the colour or description differ, **warns rather than edits**.
+reference only, which is invariant I-G in code — and from a reference it
+actually **read**. A failed read is not a reading of it: treating one as
+`desired: false` made a timeout, a permission refusal or an unreadable payload
+remove the label of a claim that was held, and report success for it. Such a
+read answers `status: "unknown"`, `desired: null`, no label call at all, and
+the error travels with the result so the CLI classifies it like any other —
+exit 20 for a transport that says nothing about the claim, exit 16 for a
+reference this package proved unreadable. `ensureClaimLabel` is idempotent: a
+`GET` that returns 200 reports `{ created: false, existing: true }` and, if the
+colour or description differ, **warns rather than edits**.
 
 ## Errors
 
@@ -913,7 +935,8 @@ What the caller typed where this CLI's own **vocabulary** belongs is judged
 against that vocabulary, never against a shape. `describeGrammarWord` echoes a
 word only when it is in the relevant allowlist — the command words for an
 unknown command, the flags this command declares for an unknown flag, the
-outcome slugs for `--outcome`, the profile's keys for `--set` — and describes
+slugs of a closed vocabulary for `--outcome` and `adopt --action`
+(`assertVocabulary`), the profile's keys for `--set` — and describes
 every other word. Shape is not evidence: `correct-horse-battery` is lowercase
 letters and dashes, exactly like a flag name. What keeps the refusal actionable
 is the vocabulary itself — the message lists it — plus a suggestion: a word
@@ -932,11 +955,13 @@ by guard's own report path. `--run-id` (from the flag or `MENTO_CLAIM_RUN_ID`),
 through `containsSecret` where they are resolved, and the refusal names the
 source, never the value.
 
-Both output paths then run one last `redactDocument` pass: the CLI's
-`writeDocument`, and guard's own report sink, which does not go through the CLI
-at all. It walks the tree, never the serialized JSON, since positional
-redaction of a finished string can eat the closing quote of the value it
-rewrites.
+Every output path then runs one last `redactDocument` pass: the CLI's
+`writeDocument`, guard's own report sink, which does not go through the CLI at
+all, and the `--report` **file**, which is the one that outlives the run. A
+warning carrying a credential — a store path, the message of a failed write —
+used to be redacted on stderr and written verbatim into that artifact. The pass
+walks the tree, never the serialized JSON, since positional redaction of a
+finished string can eat the closing quote of the value it rewrites.
 
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,
@@ -1243,6 +1268,17 @@ two guard slots, so one run could reserve the same slot twice. It is host-local 
 candidate record. It is **never** an authority and **never** a `--token`
 source. `claim` and `renew` exit 3 when it names the same run id under a
 different live pid — defence in depth behind the un-suppliable run id.
+
+A release **compares before it removes** that entry: `clearEntry(number, {
+token, runId })` reads the stored record and unlinks only while it still names
+the lease being released. The clear runs after the compare-and-swap and after
+the label projection, which is long enough for a new local claim of the same
+item to have written its own record at that path, and removing it took the
+successor's `adopt` candidate with it. The residual is every read-then-act
+path's: the read and the unlink are two operations, so a successor writing
+between them still loses its entry. The window is now a few instructions rather
+than two round trips and a label call, and the reference — not this file — is
+the authority either way.
 
 `guard` adds a **slot file** beside that entry,
 `<numberKey>-<n>.guard-<first 16 hex of sha256(runId)>.json`, schema

@@ -157,6 +157,29 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
       });
       const rollbackFailed = rollback.failures.length > 0;
       const unresolved = unresolvedLockOwnership(acquireError);
+      // A rollback release whose compare-and-swap ended unknown may have
+      // landed an UNLOCK nobody can name. Reducing it to a one-line summary
+      // threw away the only evidence that could adopt it — the candidate, its
+      // operation id and the lease it was written under — so every one of them
+      // is carried on the error, per member, exactly as the failed acquire's
+      // own candidate is.
+      const unresolvedRollbacks = rollback.failures
+        .filter(
+          (entry) =>
+            entry.error?.claimCode === "CLAIM_UNKNOWN_OUTCOME" &&
+            typeof entry.error?.details?.candidate?.oid === "string",
+        )
+        .map((entry) => ({
+          number: entry.number,
+          candidate: entry.error.details.candidate,
+          operationId: entry.error.details.candidate.operationId ?? null,
+          lease: entry.error.details.lease ?? null,
+        }));
+      // An ambiguous rollback outranks a proven one, for the reason
+      // `family release` uses: exit 16 sends an operator at a LOCK that is
+      // still there, while a candidate that may have landed is exit 12 and an
+      // `adopt`. A proven failure alongside it is still in `releaseFailures`.
+      const ambiguous = unresolved || unresolvedRollbacks.length > 0;
       const summary = `Family claim aborted at ${ctx.profile.subject(ctx.profile.canonicalScope(ctx.options, number))}: ${String(acquireError?.message ?? acquireError).split("\n")[0]}`;
       const aborted = new ClaimFamilyAbortedError(
         // The failed member's own recovery text is kept whole when its LOCK
@@ -169,15 +192,11 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
           // An unresolved LOCK is not an ordinary family abort. Exit 10 tells
           // the caller to skip the family this run, which is wrong while a
           // LOCK this run may hold is still on a ref. Exit 12 is the honest
-          // verdict: do not retry, run `adopt`. A failed rollback release
-          // still outranks it — that LOCK is proven, not merely possible, and
-          // only an operator compare-and-swap clears it (exit 16).
-          claimCode:
-            unresolved && !rollbackFailed ? "CLAIM_UNKNOWN_OUTCOME" : undefined,
-          code:
-            unresolved && !rollbackFailed
-              ? ctx.profile.errorCodes.unknown
-              : undefined,
+          // verdict: do not retry, run `adopt`. An ambiguous rollback release
+          // reads the same way — its UNLOCK may have landed — and a rollback
+          // that provably failed is still reported in `releaseFailures`.
+          claimCode: ambiguous ? "CLAIM_UNKNOWN_OUTCOME" : undefined,
+          code: ambiguous ? ctx.profile.errorCodes.unknown : undefined,
           details: {
             order,
             failedAt: number,
@@ -193,6 +212,9 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
               ? (acquireError?.details?.candidate ?? null)
               : null,
             lease: unresolved ? (acquireError?.details?.lease ?? null) : null,
+            // Every rollback release that ended unknown, one entry per member,
+            // each carrying what `adopt` needs to resolve it.
+            unresolved: unresolvedRollbacks,
             released: rollback.released,
             releaseFailures: rollback.failures.map((entry) => ({
               number: entry.number,

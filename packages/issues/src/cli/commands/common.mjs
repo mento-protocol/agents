@@ -120,18 +120,54 @@ export function recordLeaseState(runtime, number, lease) {
  */
 export function recordUnknownOutcome(runtime, error, options = {}) {
   const candidate = error?.details?.candidate ?? null;
-  if (
-    !runtime?.stateStore ||
-    error?.claimCode !== "CLAIM_UNKNOWN_OUTCOME" ||
-    typeof candidate?.oid !== "string"
-  ) {
-    return { statePath: null, next: null };
+  if (!runtime?.stateStore || error?.claimCode !== "CLAIM_UNKNOWN_OUTCOME") {
+    return { statePath: null, next: null, unresolved: [] };
+  }
+  // A family abort can carry candidates for members other than the one that
+  // failed: every rollback release whose compare-and-swap ended unknown may
+  // have landed an UNLOCK, and each is recorded under its own number so
+  // `adopt --from-state` can resolve it there.
+  const unresolved = [];
+  for (const entry of error.details?.unresolved ?? []) {
+    if (typeof entry?.candidate?.oid !== "string") continue;
+    const recorded = recordCandidate(runtime, {
+      number: entry.number,
+      candidate: entry.candidate,
+      lease: entry.lease ?? {},
+    });
+    unresolved.push({
+      number: entry.number,
+      candidate: entry.candidate,
+      statePath: recorded.statePath,
+      adopt: recorded.next?.adopt ?? null,
+    });
+  }
+  if (typeof candidate?.oid !== "string") {
+    return { statePath: null, next: null, unresolved };
   }
   // A family records the member that failed, not the first one it claimed.
   const number =
     options.number ?? error.details?.failedAt ?? runtime.failureNumber;
-  if (number == null) return { statePath: null, next: null };
-  const lease = error.details?.lease ?? {};
+  if (number == null) return { statePath: null, next: null, unresolved };
+  return {
+    ...recordCandidate(runtime, {
+      number,
+      candidate,
+      lease: error.details?.lease ?? {},
+    }),
+    unresolved,
+  };
+}
+
+/**
+ * Write one candidate record and build the `adopt` line that reads it.
+ *
+ * @param {object} runtime the CLI runtime.
+ * @param {{number: number, candidate: object, lease: object}} input the record.
+ * @returns {{statePath: string|null, next: object|null}}
+ */
+function recordCandidate(runtime, input) {
+  const { number, candidate, lease } = input;
   const written = runtime.stateStore.writeEntry(number, {
     refName: lease.refName ?? runtime.failureRef ?? null,
     token: lease.token ?? null,

@@ -18,6 +18,7 @@
 import { writeFileSync } from "node:fs";
 
 import { assertNoLiveDuplicateRunId } from "../../claims/context.mjs";
+import { redactDocument } from "../../gh/redact.mjs";
 import { ClaimConfigError } from "../../claims/errors.mjs";
 import { claimRefName } from "../../claims/ref.mjs";
 import {
@@ -238,7 +239,12 @@ export async function runGuard(runtime) {
       advisory: flags.advisory === true,
       reportSink: emit,
       spawn: runtime.spawn,
-      warnings: stateWarnings,
+      // Guard's documents are its own, so they bypass `runCli`'s warning
+      // merge: anything the runtime collected while it was built — a config
+      // pinning a version this package is not, a login that could not be
+      // read — appeared on no guard line and in no `--report` file until it
+      // was seeded here.
+      warnings: [...runtime.warnings, ...stateWarnings],
       // A guard renew rotates the token, so the state file has to follow it.
       // Otherwise a later `adopt --from-state` after a crash reads the acquire's
       // candidate, finds this run's own newer LOCK at the head, and reports the
@@ -272,27 +278,41 @@ export async function runGuard(runtime) {
       warnings: [...(result.report.warnings ?? []), ...releaseWarnings],
     };
     emit(
-      JSON.stringify({ ...result.report, phase: "guard-slot-release-warning" }),
+      JSON.stringify(
+        redactDocument({
+          ...result.report,
+          phase: "guard-slot-release-warning",
+        }),
+      ),
     );
   }
 
   if (flags.report !== undefined) {
     try {
-      writeFileSync(flags.report, `${JSON.stringify(result.report)}\n`);
+      // Redacted exactly as the emitted lines are. The file outlives the run —
+      // it is a CI artifact, and a person pastes it — so a credential in a
+      // warning's path or message must not be hidden on stderr and written
+      // verbatim here.
+      writeFileSync(
+        flags.report,
+        `${JSON.stringify(redactDocument(result.report))}\n`,
+      );
     } catch (error) {
       emit(
-        JSON.stringify({
-          ...result.report,
-          phase: "report-write-failed",
-          warnings: [
-            ...(result.report.warnings ?? []),
-            {
-              stage: "write-report",
-              path: flags.report,
-              message: String(error?.message ?? error).split("\n")[0],
-            },
-          ],
-        }),
+        JSON.stringify(
+          redactDocument({
+            ...result.report,
+            phase: "report-write-failed",
+            warnings: [
+              ...(result.report.warnings ?? []),
+              {
+                stage: "write-report",
+                path: flags.report,
+                message: String(error?.message ?? error).split("\n")[0],
+              },
+            ],
+          }),
+        ),
       );
     }
   }

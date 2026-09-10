@@ -23,6 +23,7 @@
 
 import { ClaimUsageError } from "../../claims/verify.mjs";
 import { adoptClaim, adoptRelease } from "../../claims/transitions.mjs";
+import { assertVocabulary } from "../args.mjs";
 import { claimBlock, buildNextCommands } from "../output.mjs";
 import {
   markFailureContext,
@@ -72,13 +73,16 @@ export async function runAdopt(runtime) {
   const number = flags.pr;
   const { scope, ref } = markFailureContext(runtime, number);
   const candidate = resolveCandidate(runtime, number);
-  const action = flags.action ?? candidate.action ?? "acquire";
-  if (!ACTIONS.has(action)) {
-    throw new ClaimUsageError(
-      `--action must be one of ${[...ACTIONS].join(", ")}, got: ${action}`,
-      { details: { action } },
-    );
-  }
+  // A closed vocabulary, judged against that vocabulary and never echoed: the
+  // value used to go verbatim into the message and the details, and a refusal
+  // is printed, logged and stored like every other one.
+  const action = assertVocabulary(
+    flags.action ?? candidate.action ?? "acquire",
+    {
+      flag: "action",
+      allowed: ACTIONS,
+    },
+  );
   // Precedence: the flag, then the candidate record `--from-state` read, then
   // the host-local state entry for this number. The last one is what makes a
   // recovery line pasted without `--run-id` still work on the host that

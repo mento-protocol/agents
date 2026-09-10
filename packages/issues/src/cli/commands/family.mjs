@@ -258,7 +258,13 @@ export async function runFamilyRelease(runtime) {
   for (const number of releasedNumbers) {
     const label = await projectClaimLabel(ctx, number, { present: false });
     warnings.push(...label.warnings);
-    runtime.stateStore?.clearEntry(number);
+    // Only while the entry still names the lease this command released: the
+    // same read-compare-then-remove the single release makes, for the same
+    // reason — a successor's record must survive somebody else's cleanup.
+    runtime.stateStore?.clearEntry(number, {
+      token: tokens[numbers.indexOf(number)],
+      runId,
+    });
   }
   for (const failure of failures) {
     warnings.push({

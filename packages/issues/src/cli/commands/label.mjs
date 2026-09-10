@@ -6,10 +6,13 @@
  * to decide ownership. C-20: an existing label is reported, never edited, so
  * the repository's own color and description win over this package's defaults.
  *
- * Neither command can fail a claim: every label problem is a warning.
+ * A label problem is a warning and never fails a claim. A failed read of the
+ * **reference** is not a label problem: `reconcile` cannot compare against a
+ * state it could not read, so it changes nothing and reports the failure.
  */
 
 import { ensureClaimLabel, reconcileClaimLabel } from "../../claims/label.mjs";
+import { exitCodeForCliError, statusForError } from "../exit-codes.mjs";
 import { markFailureContext } from "./common.mjs";
 
 /**
@@ -56,8 +59,16 @@ export async function runLabelReconcile(runtime) {
   const result = await reconcileClaimLabel(ctx, number, {
     apply: flags.apply === true,
   });
+  // An `unknown` verdict is a failure, not a report: the reference could not
+  // be read, so nothing was compared and nothing was changed. It is classified
+  // like any other failure — exit 20 for a transport that says nothing about
+  // the claim, exit 16 for a reference this package proved unreadable — rather
+  // than exit 0 beside a label whose state nobody established.
+  const failed = result.status === "unknown" && result.error != null;
   return {
-    status: "ok",
+    status: failed ? statusForError(result.error) : "ok",
+    exitCode: failed ? exitCodeForCliError(result.error) : 0,
+    error: failed ? result.error : null,
     ref,
     scope,
     warnings: result.warnings,

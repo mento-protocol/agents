@@ -532,8 +532,17 @@ export async function runCli(argv, options = {}) {
       ref: runtime?.failureRef ?? null,
       scope: runtime?.failureScope ?? null,
       next: recovery.next ?? runtime?.failureNext ?? null,
-      body:
-        recovery.statePath === null ? {} : { statePath: recovery.statePath },
+      body: {
+        ...(recovery.statePath === null
+          ? {}
+          : { statePath: recovery.statePath }),
+        // A family abort can leave a candidate per member — every rollback
+        // release whose outcome is unknown — and each one is recorded under
+        // its own number with the `adopt` line that resolves it.
+        ...(recovery.unresolved?.length > 0
+          ? { unresolved: recovery.unresolved }
+          : {}),
+      },
       warnings: runtime?.warnings ?? [],
       inspect: runtime?.failureInspect ?? null,
     });

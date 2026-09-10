@@ -262,6 +262,7 @@ export async function reconcileClaimLabel(
     changed: false,
     applied: null,
     status: "disabled",
+    error: null,
     warnings: [],
   };
   if (name == null) return reconcile;
@@ -271,9 +272,19 @@ export async function reconcileClaimLabel(
     reconcile.refState = state?.state ?? "absent";
     reconcile.desired = state?.state === "LOCK";
   } catch (error) {
-    reconcile.refState = "invalid";
-    reconcile.desired = false;
+    // The reference is the authority, and a read that failed is not a reading
+    // of it. Treating the failure as `desired: false` made a timeout, a
+    // permission refusal or an unreadable payload **remove** the label of a
+    // claim that was very much held, and report success for it. The verdict is
+    // `unknown`: no label call at all, the label left exactly as it is, and
+    // the error kept so the caller can classify it — a transport failure is
+    // exit 20 and a retry, an unreadable payload is exit 16 and an operator.
+    reconcile.refState = "unknown";
+    reconcile.desired = null;
+    reconcile.status = "unknown";
+    reconcile.error = error;
     reconcile.warnings.push(warningOf(error, { number, stage: "read-ref" }));
+    return reconcile;
   }
 
   const operations = labelOperationsFor(ctx, overrides);

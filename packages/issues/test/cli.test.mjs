@@ -5407,3 +5407,327 @@ test("releasing a token two renewals old is stale, not already-released", async 
   assert.equal(refState(context.server, refName), "UNLOCK");
   assert.equal(context.server.hasLabel(PR, "dependabot-prep:claimed"), false);
 });
+
+test("the --report file is redacted exactly as the emitted lines are", async () => {
+  // `emit` redacts; the file did not. A warning carrying a credential — a
+  // store path, a message from a failed write — was hidden on stderr and
+  // written verbatim into an artifact that outlives the run.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const reportPath = join(context.directory, "guard-report.json");
+
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--report",
+      reportPath,
+      "--",
+      "node",
+      "--version",
+    ],
+    {
+      spawn: recordingSpawn(0).spawn,
+      createStateStore: (input) => {
+        const real = createStateStore(input);
+        return {
+          ...real,
+          writeEntry(number) {
+            return {
+              path: real.pathFor(number),
+              written: false,
+              warning: {
+                stage: "write-state",
+                path: real.pathFor(number),
+                message: `the store refused ${secret}`,
+              },
+            };
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(guarded.exitCode, 0);
+  assert.ok(!guarded.stderr.includes(secret), "stderr was already redacted");
+  const written = readFileSync(reportPath, "utf8");
+  assert.ok(
+    !written.includes(secret),
+    `the report file carries the credential: ${written}`,
+  );
+  assert.match(written, /\[redacted-github-token\]/u);
+  // And it is still the same document, parseable and complete.
+  const report = JSON.parse(written);
+  assert.equal(report.command, "claims.guard");
+  assert.ok(
+    report.warnings.some((warning) => warning.stage === "write-state"),
+    "the warning itself is still there",
+  );
+});
+
+test("guard reports the warnings its runtime collected before it started", async () => {
+  // Guard bypasses `runCli`'s warning merge — its documents are its own — so
+  // a warning raised while the runtime was built (a pinned package version
+  // that is not the running one, a login that could not be read) appeared
+  // nowhere: not on stderr, not in `--report`.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    {
+      spawn: recordingSpawn(0).spawn,
+      packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+    },
+  );
+
+  assert.equal(guarded.exitCode, 0);
+  for (const line of guarded.stderrDocuments) {
+    assert.ok(
+      line.warnings.some((warning) => warning.stage === "package-version"),
+      "every guard line carries the runtime's warnings",
+    );
+  }
+});
+
+test("adopt describes an --action it does not know", async () => {
+  // The value went into the message and the details verbatim, and `--action`
+  // is a closed vocabulary, so nothing about it needed echoing.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const operationId = claimed.document.claim.operationId;
+  const runId = claimed.document.claim.runId;
+  const adoptArgv = (action) => [
+    "claims",
+    "adopt",
+    "--pr",
+    String(PR),
+    "--candidate",
+    token,
+    "--operation-id",
+    operationId,
+    "--run-id",
+    runId,
+    "--action",
+    action,
+  ];
+
+  const passphrase = "correct-horse-battery";
+  const refused = await context.run(adoptArgv(passphrase));
+  assert.equal(refused.exitCode, 2);
+  assert.ok(
+    !refused.stdout.includes(passphrase),
+    `the value is described, not echoed: ${refused.stdout}`,
+  );
+  assert.match(refused.document.error.message, /<string, 21 characters>/u);
+
+  const nearMiss = await context.run(adoptArgv("releas"));
+  assert.equal(nearMiss.exitCode, 2);
+  assert.match(nearMiss.document.error.message, /did you mean release\?/u);
+
+  // A known action still adopts.
+  const adopted = await context.run(adoptArgv("acquire"));
+  assert.equal(adopted.exitCode, 0);
+  assert.equal(adopted.document.adopted, true);
+});
+
+test("label reconcile never removes a label on a ref read it could not make", async () => {
+  // `desired` came from a read whose failure was a warning, so a timeout or a
+  // permission refusal read as "the ref is not LOCK" and `--apply` removed the
+  // label of a claim that was very much held.
+  const LABEL = "dependabot-prep:claimed";
+  for (const [label, failure, exitCode] of [
+    ["a transport timeout", { code: "GH_TIMEOUT" }, 20],
+    ["an unreadable payload", { refInvalid: true, code: "GH_REF_INVALID" }, 16],
+  ]) {
+    const context = harness();
+    await claimOnce(context);
+    assert.equal(context.server.hasLabel(PR, LABEL), true, label);
+
+    const failing = {
+      ...context.server.operations,
+      async readClaimRef() {
+        throw Object.assign(new Error(`${label} on the authoritative read`), {
+          ...failure,
+          details: {},
+        });
+      },
+    };
+    const reconciled = await context.run(
+      ["claims", "label", "reconcile", "--pr", String(PR), "--apply"],
+      { operations: { ...context.options.operations, claims: failing } },
+    );
+
+    assert.equal(reconciled.exitCode, exitCode, label);
+    assert.equal(reconciled.document.label.status, "unknown", label);
+    assert.equal(reconciled.document.label.changed, false, label);
+    assert.equal(
+      context.server.hasLabel(PR, LABEL),
+      true,
+      `${label} left the label alone`,
+    );
+  }
+});
+
+test("a family rollback whose outcome is unknown keeps every candidate", async () => {
+  // The rollback release of an acquired member lost its answer, and the family
+  // error kept only a one-line summary of it: the candidate UNLOCK, its
+  // operation id and its lease were dropped, so nothing could adopt a release
+  // that may well have landed.
+  const context = harness();
+  // 880 is held by another run, so the family's second member cannot be
+  // claimed and the first one is rolled back.
+  const peer = harness({ options: context.options });
+  const held = await peer.run(["claims", "claim", "--pr", "880"]);
+  assert.equal(held.exitCode, 0);
+
+  let lost = false;
+  const flaky = {
+    ...context.server.operations,
+    async compareAndSwapRef(ctx, repositoryId, refName, beforeOid, afterOid) {
+      await context.server.operations.compareAndSwapRef(
+        ctx,
+        repositoryId,
+        refName,
+        beforeOid,
+        afterOid,
+      );
+      // Only the rollback's UNLOCK loses its answer. A release UNLOCK names
+      // the LOCK it closes; the bootstrap UNLOCK that initializes an absent
+      // ref names none, and the acquires themselves must land.
+      const payload = context.server.commits.get(afterOid)?.payload;
+      if (payload?.state === "UNLOCK" && payload.parentLock != null) {
+        lost = true;
+        throw new Error("response lost");
+      }
+    },
+    async readClaimRef(...args) {
+      if (lost) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+
+  const family = await context.run(
+    ["claims", "family", "claim", "--prs", "872,880"],
+    { operations: { ...context.options.operations, claims: flaky } },
+  );
+
+  assert.equal(family.exitCode, 12, "do not retry; run adopt");
+  assert.equal(family.document.status, "unknown-outcome");
+  const unresolved = family.document.error.details.unresolved;
+  assert.ok(Array.isArray(unresolved), "every ambiguous member is listed");
+  assert.equal(unresolved.length, 1);
+  assert.equal(unresolved[0].number, 872);
+  assert.equal(typeof unresolved[0].candidate.oid, "string");
+
+  // And it is on disk under its own number, which is what `--from-state` reads.
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const entry = store.readEntry(872);
+  assert.equal(entry.status, "unknown-outcome");
+  assert.equal(entry.candidate.oid, unresolved[0].candidate.oid);
+});
+
+test("a release clears the state entry only while it still names that lease", async () => {
+  // The clear ran unconditionally after the compare-and-swap and the label
+  // projection, so a successor that had claimed the same item on this host in
+  // the meantime lost the entry it had just written — and with it the record
+  // `adopt --from-state` reads.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const successor = {
+    token: hexOid(77),
+    runId: "claude-code-mac-20260909T120000Z-aaaabbbbcccc",
+  };
+
+  const racing = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      const result = await context.server.operations.compareAndSwapRef(...args);
+      // A new local claim of the same item, written between the release's
+      // compare-and-swap and the clear that follows it.
+      store.writeEntry(PR, { ...successor, status: "held" });
+      return result;
+    },
+  };
+
+  const released = await context.run(
+    [
+      "claims",
+      "release",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ],
+    { operations: { ...context.options.operations, claims: racing } },
+  );
+
+  assert.equal(released.exitCode, 0);
+  const entry = store.readEntry(PR);
+  assert.ok(entry, "the successor's entry survives the release");
+  assert.equal(entry.token, successor.token);
+  assert.equal(entry.runId, successor.runId);
+
+  // The ordinary case still clears: nothing else has written the entry.
+  const again = harness();
+  const mine = await claimOnce(again);
+  const myStore = createStateStore({
+    repository: REPOSITORY,
+    root: again.options.stateRoot,
+    clock: again.clock,
+  });
+  assert.ok(myStore.readEntry(PR));
+  const plain = await again.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    mine.document.claim.token,
+    "--run-id",
+    mine.document.claim.runId,
+  ]);
+  assert.equal(plain.exitCode, 0);
+  assert.equal(myStore.readEntry(PR), null, "its own entry is cleared");
+});
