@@ -109,10 +109,28 @@ export function parseSummaryMarker(text) {
     });
   }
   const [, pr, claim, runSha256, operatorSha256, supersedes] = match;
+  const number = Number(pr);
+  // The grammar allows any run of digits, and `Number` rounds one past
+  // 2^53 - 1 without saying so: `pr=9007199254740993` parsed as
+  // `v2Present: true` carrying `9007199254740992`, a number naming a different
+  // pull request. `buildSummaryMarker` writes nothing but a positive safe
+  // integer, so anything else did not come from this package and is not a v2
+  // marker — reported as absent rather than as a rounded number.
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return Object.freeze({
+      v1Present,
+      v2Present: false,
+      pr: null,
+      claim: null,
+      runSha256: null,
+      operatorSha256: null,
+      supersedes: null,
+    });
+  }
   return Object.freeze({
     v1Present,
     v2Present: true,
-    pr: Number(pr),
+    pr: number,
     claim,
     runSha256,
     operatorSha256,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { exitCodeForError } from "../src/claims/errors.mjs";
+import { exitCodeForCliError, statusForError } from "../src/cli/exit-codes.mjs";
 import { buildClaimPayload } from "../src/claims/payload.mjs";
 import {
   claimRefName,
@@ -108,7 +109,12 @@ test("a losing initializer adopts a peer UNLOCK and proceeds", async () => {
   assert.equal(server.getRefOid(refName), lease.token);
 });
 
-test("a losing initializer rejects a peer LOCK with a conflict", async () => {
+test("a losing initializer reports a peer LOCK as contention, not a bare conflict", async () => {
+  // The winner of the create race did not stop at UNLOCK: by the time the
+  // loser looked, it had acquired. That is an ordinary lost race — exit 10,
+  // "skip this item this run" — and it answered the base `CLAIM_CONFLICT`,
+  // which the exit table has no row for, so the CLI reported `status: usage`
+  // and exit 1 for it.
   const { ctx, server } = createTestContext();
   const scope = ctx.profile.canonicalScope(ctx.options, PR);
   const refName = claimRefName(ctx, PR);
@@ -131,8 +137,46 @@ test("a losing initializer rejects a peer LOCK with a conflict", async () => {
         "2026-09-09T09:58:12.004Z",
       ),
     (error) => {
-      assert.equal(error.claimCode, "CLAIM_CONFLICT");
-      assert.match(error.message, /initialize expected an absent ref or/);
+      assert.equal(error.claimCode, "CLAIM_CONTENDED");
+      assert.equal(exitCodeForCliError(error), 10);
+      assert.equal(statusForError(error), "contended");
+      assert.match(error.message, /initialize lost the create race/u);
+      return true;
+    },
+  );
+});
+
+test("a losing initializer still reports an unreadable head as ref-invalid", async () => {
+  // Contention is a LOCK the winner took, and only that. A head this package
+  // cannot read is not a lost race: it keeps the ref-invalid verdict the
+  // reconciling read gives it, which is exit 16 rather than exit 10.
+  const { ctx, server } = createTestContext();
+  const scope = ctx.profile.canonicalScope(ctx.options, PR);
+  const refName = claimRefName(ctx, PR);
+
+  const operations = server.withOperations({
+    async compareAndSwapRef() {
+      seedRef(server, refName, {
+        ...peerPayload(ctx, scope, "LOCK"),
+        state: "SOMETHING-ELSE",
+      });
+      throw new Error("Ref did not match beforeOid");
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      initializeClaimRef(
+        ctx,
+        scope,
+        refName,
+        operations,
+        "lock-6f0a9d3e",
+        "2026-09-09T09:58:12.004Z",
+      ),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_REF_INVALID");
+      assert.equal(statusForError(error), "stale");
       return true;
     },
   );

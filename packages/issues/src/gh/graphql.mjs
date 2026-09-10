@@ -8,7 +8,7 @@
  */
 
 import { GhCommandError } from "./errors.mjs";
-import { safeStderr } from "./redact.mjs";
+import { redactSecrets, safeStderr } from "./redact.mjs";
 import { runGh } from "./run.mjs";
 
 /**
@@ -28,7 +28,17 @@ export async function ghJson(args, options = {}) {
   } catch (error) {
     throw new GhCommandError(
       `gh returned output that is not JSON: ${safeStderr(stdout, 512)}`,
-      { args: args.map(String), code: "GH_INVALID_JSON", cause: error },
+      {
+        // Redacted, exactly as `runGh` redacts the argv it attaches. This one
+        // was raw, so a credential handed to `gh` as `-H "Authorization:
+        // Bearer …"` reached `error.args` — the frozen array a caller logs or
+        // serializes into a JSON document — whenever `gh` answered with
+        // something that is not JSON, which is exactly when a caller prints
+        // the error.
+        args: args.map((arg) => redactSecrets(String(arg))),
+        code: "GH_INVALID_JSON",
+        cause: error,
+      },
     );
   }
 }

@@ -30,6 +30,7 @@ import {
   ClaimRenewRequiredError,
   ClaimSupersededError,
 } from "./errors.mjs";
+import { redactSecrets } from "../gh/redact.mjs";
 import { leaseState, payloadOwnerRunId } from "./payload.mjs";
 import { claimRefName, readClaim } from "./ref.mjs";
 import { adoptClaim, renewClaim } from "./transitions.mjs";
@@ -528,17 +529,39 @@ function normalizeGuardClaims(claims) {
   });
 }
 
+/**
+ * The guarded argv as it may be **reported**, never as it is spawned.
+ *
+ * Guard prints its report to stderr and, with `--report`, to a file that
+ * outlives the run — a CI artifact, a log a person pastes. The child's argv is
+ * in that report, and the commands guard exists for are `git push` and
+ * `gh api`, one of which is routinely handed a credential:
+ * `gh api -H "Authorization: Bearer <token>"`. The raw array was copied into
+ * both, so guarding one such command wrote the token to a persistent artifact.
+ * The same redaction the `gh` runner applies to its own diagnostics applies
+ * here; the child still receives the array untouched.
+ *
+ * @param {unknown} argv the argv, or anything at all.
+ * @returns {string[]|null} a redacted copy, or `null` when there is no argv.
+ */
+function reportableArgv(argv) {
+  if (!Array.isArray(argv)) return null;
+  return argv.map((item) => redactSecrets(String(item)));
+}
+
 function assertGuardArgv(argv) {
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new ClaimUsageError("guard needs a command to run after --", {
-      details: { argv: argv ?? null },
+      // Redacted like every other reported argv: a refusal's `details` reach
+      // the same document the report does.
+      details: { argv: reportableArgv(argv) },
     });
   }
   for (const item of argv) {
     if (typeof item !== "string" || item.length === 0) {
       throw new ClaimUsageError(
         "every guard argument must be a non-empty string",
-        { details: { argv } },
+        { details: { argv: reportableArgv(argv) } },
       );
     }
   }
@@ -717,7 +740,7 @@ export async function guardChild(ctx, claims, options = {}) {
     gate,
     advisory,
     runId: runId ?? null,
-    argv: Array.isArray(argv) ? [...argv] : null,
+    argv: reportableArgv(argv),
     spawned,
     claims: entries.map((entry) => claimLineOf(entry)),
     child,
@@ -1275,7 +1298,7 @@ export async function guardChild(ctx, claims, options = {}) {
     entries,
     spawned: true,
     child: {
-      argv: [...argv],
+      argv: reportableArgv(argv),
       pid: child.pid ?? null,
       exitCode: result.code,
       signal: result.signal ?? null,

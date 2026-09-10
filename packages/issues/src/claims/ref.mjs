@@ -20,6 +20,7 @@ import {
 } from "./constants.mjs";
 import {
   ClaimConfigError,
+  ClaimContendedError,
   ClaimRefInvalidError,
   conflict,
   unknownOutcomeError,
@@ -326,21 +327,44 @@ export async function listClaims(ctx, options = {}, overrides = {}) {
     ? { ...ctx.operations, ...overrides }
     : operationsFor(overrides);
   const pattern = claimNumberPattern(ctx.profile);
+  const skipped = [];
   let discovered;
   if (Array.isArray(numbers)) {
     discovered = numbers;
   } else if (pattern) {
     const lister =
       listRefs ??
+      // The operations bag, when it carries one: every other read this module
+      // makes is injected through it, and the namespace listing was the one
+      // that could only be replaced by an argument.
+      operations.listRefCommits ??
       (async () => {
         const { listRefCommits } = await import("../gh/rest.mjs");
         return listRefCommits(ctx.options, ctx.profile.namespace);
       });
     const entries = await lister(ctx);
-    discovered = entries
-      .map((entry) => pattern.exec(entry.ref ?? entry)?.[1])
-      .filter((value) => value != null)
-      .map(Number);
+    discovered = [];
+    for (const entry of entries) {
+      const refName = entry?.ref ?? entry;
+      const suffix = pattern.exec(refName)?.[1];
+      if (suffix == null) continue;
+      const number = Number(suffix);
+      // A canonical positive safe integer, or nothing. The pattern accepts any
+      // run of digits and `Number` rounds one past 2^53 - 1 into a value that
+      // names a different item — and `canonicalScope`/`refName` ran outside
+      // the per-entry `try` below, so a single ref like `…/9999999999999999999`
+      // threw and took the whole listing with it. Such a ref is skipped and
+      // reported instead.
+      if (
+        !Number.isSafeInteger(number) ||
+        number <= 0 ||
+        String(number) !== suffix
+      ) {
+        skipped.push(String(refName));
+        continue;
+      }
+      discovered.push(number);
+    }
   } else {
     throw new ClaimConfigError(
       `Profile ${ctx.profile.id} renders no number into its ref name, so listing needs explicit numbers`,
@@ -396,6 +420,13 @@ export async function listClaims(ctx, options = {}, overrides = {}) {
       }
     },
   );
+  // Non-enumerable, so every caller that compares or serializes the array sees
+  // exactly the summaries it always did, while `claims list` can still report
+  // what it passed over.
+  Object.defineProperty(summaries, "skippedRefs", {
+    value: Object.freeze(skipped),
+    enumerable: false,
+  });
   return summaries;
 }
 
@@ -478,13 +509,24 @@ export async function initializeClaimRef(
     if (observed?.oid === expected.oid) return observed;
     if (observed?.payload?.state === "UNLOCK") return observed;
     if (observed) {
+      // The winner of the initialize race did not stop at UNLOCK: by the time
+      // the loser looked, it had already acquired. That is contention — exit
+      // 10, "skip this item this run" — and it answered as the base
+      // `CLAIM_CONFLICT`, which the exit table has no row for, so the CLI
+      // reported `status: usage` and exit 1 for an ordinary lost race.
+      const contended = observed.payload?.state === "LOCK";
       throw conflict(
         ctx.profile,
         scope,
         refName,
         observed,
-        `initialize expected an absent ref or ${expected.oid}, but found ${observed.oid}`,
-        { cause: lastError },
+        contended
+          ? `initialize lost the create race: ${refName} is already held at ${observed.oid}`
+          : `initialize expected an absent ref or ${expected.oid}, but found ${observed.oid}`,
+        {
+          cause: lastError,
+          ...(contended ? { ErrorClass: ClaimContendedError } : {}),
+        },
       );
     }
     if (attempt < CLAIM_RECONCILE_ATTEMPTS) {

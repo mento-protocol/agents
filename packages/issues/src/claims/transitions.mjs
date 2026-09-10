@@ -26,6 +26,7 @@ import {
   ClaimStaleError,
   ClaimSupersededError,
   conflict,
+  isTransportFailure,
   staleError,
   unknownOutcomeError,
 } from "./errors.mjs";
@@ -85,6 +86,37 @@ function assertMetadataKeys(profile, values) {
         { details: { key, value } },
       );
     }
+  }
+}
+
+/**
+ * Check the inputs a transition would reject, without performing it.
+ *
+ * A dry run's whole promise is that it predicts execution, and it did not:
+ * `claim --dry-run --set lastPushedHead=not-a-sha`, and an unusable
+ * `--run-id-prefix`, both answered `status: ok` with a plan, because the checks
+ * that refuse them live inside the transition a plan never runs. The planning
+ * commands call this first, so one input is refused the same way whether or not
+ * the run goes on to write.
+ *
+ * @param {object} ctx claim context.
+ * @param {object} [input] `{ metadata, runIdPrefix }`.
+ * @returns {void}
+ * @throws {ClaimConfigError} for a metadata key or value this profile refuses,
+ *   or a run-id prefix no valid run id can be built from.
+ */
+export function assertTransitionInputs(ctx, input = {}) {
+  assertMetadataKeys(ctx.profile, input.metadata ?? {});
+  if (input.runIdPrefix != null) {
+    // Exactly what an acquire does with it: the prefix leads the run id, so
+    // this proves the lead's own rule and the finished id's grammar together.
+    generateRunId({
+      runtime: ctx.owner.runtime,
+      host: ctx.owner.hostShort,
+      prefix: input.runIdPrefix,
+      clock: ctx.clock,
+      random: ctx.random,
+    });
   }
 }
 
@@ -1024,6 +1056,13 @@ export async function releaseClaim(lease, options = {}) {
     try {
       current = await operations.readClaimRef(ctx, refName, scope);
     } catch (err) {
+      // This read precedes every compare-and-swap, so a transport failure here
+      // changed nothing on the server: it is exit 20, "retry", and the caller
+      // still holds its claim. Wrapping it as `stale` answered exit 16 —
+      // "stop and report" — for a timeout or a 5xx, stranding a claim nobody
+      // could then release. The stale verdict is for a ref this read proved
+      // unusable, and for that alone.
+      if (isTransportFailure(err) || err?.outcomeUnknown === true) throw err;
       throw staleError(
         profile,
         `${err.message}\n${releaseFailureRecoveryText(lease, false)}`,

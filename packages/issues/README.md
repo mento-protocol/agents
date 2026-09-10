@@ -57,7 +57,7 @@ belongs to the child it spawns, so its own documents go to stderr.
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--config <path>`                           | the policy or package config; required for every `claims` command                                                                                                                                                                                                                                                  |
 | `--json`                                    | the only output mode; accepted for explicitness                                                                                                                                                                                                                                                                    |
-| `--dry-run`                                 | plan and print; performs no write and no label call                                                                                                                                                                                                                                                                |
+| `--dry-run`                                 | plan and print; performs no write and no label call, and refuses every input the write would have refused                                                                                                                                                                                                          |
 | `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                                                                                                                                                                                                                                                            |
 | `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                                                                                                                                                                                                                                                        |
 | `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                                 |
@@ -82,23 +82,23 @@ uncovered exits 3 exactly as the equivalent policy would.
 
 ### `claims`
 
-| Command                                                            | Flags                                                                                                      | Writes                             |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `read --pr <n>`                                                    | —                                                                                                          | none                               |
-| `list`                                                             | `[--stale] [--prs 872,880] [--concurrency <n>]`                                                            | none                               |
-| `claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                                                    | commit, reference, label           |
-| `renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                  |
-| `takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commit, reference, label           |
-| `release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label           |
-| `verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                               |
-| `guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs |
-| `adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                               |
-| `family claim --prs 872,880,881`                                   | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commits, references                |
-| `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                                       | commits, references                |
-| `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                                                   | labels only                        |
-| `label reconcile --pr <n>`                                         | `[--apply]`                                                                                                | labels only                        |
-| `slot clear --pr <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                |
-| `doctor`                                                           | —                                                                                                          | none                               |
+| Command                                                            | Flags                                                                                                      | Writes                               |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `read --pr <n>`                                                    | —                                                                                                          | none                                 |
+| `list`                                                             | `[--stale] [--prs 872,880] [--concurrency <n>]`                                                            | none                                 |
+| `claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                                                    | commit, reference, label             |
+| `renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                    |
+| `takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commit, reference, label             |
+| `release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label             |
+| `verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                                 |
+| `guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs   |
+| `adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                                 |
+| `family claim --prs 872,880,881`                                   | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commits, references                  |
+| `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                                       | commits, references                  |
+| `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                                                   | labels only                          |
+| `label reconcile --pr <n>`                                         | `[--apply]`                                                                                                | labels only, and only with `--apply` |
+| `slot clear --pr <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                  |
+| `doctor`                                                           | —                                                                                                          | none                                 |
 
 **`claim` takes over automatically.** Against an UNLOCK it acquires; against a
 LOCK whose lease has expired past its grace it takes over in the same process
@@ -108,6 +108,18 @@ opts out and returns exit 11 `expired` with the oid a `takeover` would need.
 
 **There is no `heartbeat`.** Liveness is `renew --if-due`, which writes only
 when `renewAfter` has passed, and `guard` calls it on its own timer.
+
+**`label reconcile` writes only with `--apply`.** Without it the command
+compares the label against the ref and reports the difference, so it is a read:
+it runs under `GITHUB_ACTIONS`, in a cloud session without `allowCloudWriters`,
+and without a resolvable runtime or a login read. With `--apply` it is a write
+and every one of those restrictions applies.
+
+**A dry run refuses what the write would refuse.** `--dry-run` runs the
+transition's own input checks before it plans, so an unusable `--set` value or
+`--run-id-prefix` is the same refusal, with the same message, whether or not
+the run goes on to write. A plan that answered `ok` for an input the run would
+have rejected was worse than no plan.
 
 **`--set` writes claim metadata**, restricted to the profile's keys —
 `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl`. They survive both
@@ -352,6 +364,15 @@ Exit 3 also covers two faults that are neither the command's nor the mutex's:
 create-from-absent compare-and-swap attempts — a repository or permission fault.
 Both stop the run and reach the operator rather than inviting a retry. A guard
 that was itself signalled exits 3 for the same reason.
+
+Two classifications are worth stating because they used to be wrong. **Losing
+the create race** — the winner initialized the ref and had already acquired by
+the time the loser looked — is exit 10 `contended`, an ordinary lost race, not
+the unclassified conflict that surfaced as exit 1. And a **transport failure on
+the read that precedes a release** is exit 20 `transport`: that read runs before
+any compare-and-swap, so a timeout or a 5xx there changed nothing and the caller
+still holds its claim. Exit 16 `stale` is reserved for a reference this package
+proves it can no longer release from.
 
 ## Threat model
 

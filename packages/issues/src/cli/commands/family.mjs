@@ -16,7 +16,10 @@
 
 import { ClaimUsageError, hydrateClaimLease } from "../../claims/verify.mjs";
 import { claimFamily, releaseFamily } from "../../claims/family.mjs";
-import { classifyObservedHead } from "../../claims/transitions.mjs";
+import {
+  assertTransitionInputs,
+  classifyObservedHead,
+} from "../../claims/transitions.mjs";
 import { projectClaimLabel } from "../../claims/label.mjs";
 import { readClaim } from "../../claims/ref.mjs";
 import { assertOutcome, collectSetFlags } from "../args.mjs";
@@ -46,6 +49,11 @@ export async function runFamilyClaim(runtime) {
   const numbers = flags.prs;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
   markFailureContext(runtime, numbers[0]);
+  // The plan predicts execution, so it is refused by the same input checks.
+  assertTransitionInputs(ctx, {
+    metadata,
+    runIdPrefix: flags["run-id-prefix"] ?? null,
+  });
 
   if (ctx.options.dryRun === true) {
     const plans = [];

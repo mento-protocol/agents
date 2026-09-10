@@ -54,6 +54,16 @@ export async function runList(runtime) {
     concurrency,
     numbers: flags.prs ?? null,
   });
+  // A ref whose suffix names no usable number is skipped rather than allowed
+  // to abort the listing, and it is reported: an unreadable name inside the
+  // namespace is something an operator should see.
+  for (const refName of entries.skippedRefs ?? []) {
+    warnings.push({
+      stage: "list-claims",
+      ref: refName,
+      message: `${refName} names no usable ${ctx.profile.numberKey} number, so it was skipped`,
+    });
+  }
   const selected =
     flags.stale === true
       ? entries.filter((entry) => entry.stale === true)

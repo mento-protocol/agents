@@ -217,3 +217,56 @@ test("release finding an unparseable head is stale with recovery text", async ()
   assert.equal(server.calls.commit.length, commitsBefore, "no commit");
   assert.equal(server.getRefOid(refName), corrupt.oid);
 });
+
+test("a transport failure on the pre-release read stays retryable, and a bad ref is still stale", async () => {
+  // The ownership read runs before any compare-and-swap, so a timeout or a 5xx
+  // there changed nothing on the server and the caller still holds its claim:
+  // that is exit 20, "retry". Wrapping every failure as `stale` answered exit
+  // 16 — "stop and report" — for a transient fault, stranding a claim nobody
+  // could then release.
+  const transient = Object.assign(new Error("gh api … exceeded its budget"), {
+    code: "GH_TIMEOUT",
+    outcomeUnknown: true,
+  });
+  const timedOut = await heldLease();
+  const headBefore = timedOut.server.getRefOid(timedOut.lease.refName);
+  timedOut.lease.operations = {
+    ...timedOut.lease.operations,
+    readClaimRef: async () => {
+      throw transient;
+    },
+  };
+  await assert.rejects(releaseClaim(timedOut.lease), (error) => {
+    assert.equal(error, transient, "the transport error is passed through");
+    assert.equal(error.claimCode, undefined, "and is not a claim verdict");
+    return true;
+  });
+  assert.equal(
+    timedOut.server.getRefOid(timedOut.lease.refName),
+    headBefore,
+    "and nothing was written",
+  );
+  assert.equal(
+    timedOut.lease.status,
+    "acquired",
+    "the claim is where the acquire left it, not released",
+  );
+
+  // A ref this read proves unusable is what the stale verdict is for.
+  const invalid = await heldLease();
+  const refInvalid = Object.assign(new Error("payload is not a claim"), {
+    claimCode: "CLAIM_REF_INVALID",
+    code: "CLAIM_REF_INVALID",
+  });
+  invalid.lease.operations = {
+    ...invalid.lease.operations,
+    readClaimRef: async () => {
+      throw refInvalid;
+    },
+  };
+  await assert.rejects(releaseClaim(invalid.lease), (error) => {
+    assert.equal(error.claimCode, "CLAIM_STALE");
+    assert.equal(error.cause, refInvalid);
+    return true;
+  });
+});

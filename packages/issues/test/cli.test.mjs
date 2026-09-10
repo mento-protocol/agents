@@ -15,7 +15,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { COMMAND_SPECS, GATED_FLAGS } from "../src/cli/args.mjs";
+import {
+  COMMAND_SPECS,
+  GATED_FLAGS,
+  commandMutates,
+} from "../src/cli/args.mjs";
 import { CONFIG_SCHEMAS, normalizeConfigDocument } from "../src/cli/config.mjs";
 import { readPullRequestState } from "../src/cli/github.mjs";
 import { GUARD_SLOT_SCHEMA, createStateStore } from "../src/cli/state-file.mjs";
@@ -824,7 +828,10 @@ function mutatingInvocations() {
     ["claims label ensure", ["claims", "label", "ensure"]],
     [
       "claims label reconcile",
-      ["claims", "label", "reconcile", "--pr", String(PR)],
+      // With `--apply`, because only that writes. Without it the command
+      // reports the difference between the label and the ref and touches
+      // nothing, which is why its spec answers `mutates` from the flags.
+      ["claims", "label", "reconcile", "--pr", String(PR), "--apply"],
     ],
   ];
 }
@@ -834,7 +841,12 @@ test("every mutating command refuses under GITHUB_ACTIONS while reads still work
   assert.deepEqual(
     invocations.map(([key]) => key).sort(),
     Object.entries(COMMAND_SPECS)
-      .filter(([, spec]) => spec.mutates === true)
+      // A spec whose `mutates` is a predicate belongs in the table too: the
+      // invocation above supplies the flags that make it write.
+      .filter(
+        ([, spec]) =>
+          spec.mutates === true || commandMutates(spec, { apply: true }),
+      )
       .map(([key]) => key)
       .sort(),
     "the table must cover every mutating command",
@@ -3441,6 +3453,227 @@ test("a relative --config is resolved, so a printed line runs from anywhere", as
     }
   } finally {
     rmSync(absoluteConfig, { force: true });
+  }
+});
+
+test("a guarded command's credential reaches the child and no report", async () => {
+  // Guard prints its report to stderr and, with `--report`, to a file that
+  // outlives the run. The child's argv is in both, and the commands guard
+  // exists for include `gh api -H "Authorization: Bearer <token>"`, so the raw
+  // array made a persistent artifact out of a credential.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const secret = `ghp_${"S3cr3tT0k3nBytes0000".repeat(2)}`;
+  const reportPath = join(context.directory, "guard-report.json");
+  const spawned = recordingSpawn(0);
+
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--report",
+      reportPath,
+      "--",
+      "gh",
+      "api",
+      "-H",
+      `Authorization: Bearer ${secret}`,
+      "user",
+    ],
+    { spawn: spawned.spawn },
+  );
+
+  assert.equal(guarded.exitCode, 0);
+  // The child was given the real bytes: redaction is for the report only.
+  assert.deepEqual(spawned.calls[0].args, [
+    "api",
+    "-H",
+    `Authorization: Bearer ${secret}`,
+    "user",
+  ]);
+
+  const surfaces = {
+    stderr: guarded.stderr,
+    report: readFileSync(reportPath, "utf8"),
+  };
+  for (const [name, text] of Object.entries(surfaces)) {
+    assert.equal(text.includes(secret), false, `${name} carries the token`);
+    assert.match(text, /\[redacted-github-token\]/u, name);
+  }
+  // Both documents name the whole command, redacted, and so does the report
+  // file's `child` block.
+  const reported = [
+    "gh",
+    "api",
+    "-H",
+    "Authorization: Bearer [redacted-github-token]",
+    "user",
+  ];
+  for (const document of guarded.stderrDocuments) {
+    assert.deepEqual(document.argv, reported);
+  }
+  assert.deepEqual(JSON.parse(surfaces.report).child.argv, reported);
+  assert.deepEqual(JSON.parse(surfaces.report).argv, [
+    "gh",
+    "api",
+    "-H",
+    "Authorization: Bearer [redacted-github-token]",
+    "user",
+  ]);
+});
+
+test("a dry run refuses the inputs the write would refuse", async () => {
+  // A plan's whole promise is that it predicts execution. These two answered
+  // `status: ok` with a plan and would have failed the moment they ran,
+  // because the checks that refuse them live inside the transition.
+  const context = harness();
+  const badMetadata = ["--set", "lastPushedHead=not-a-sha"];
+  const badPrefix = ["--run-id-prefix", "a prefix with spaces"];
+
+  for (const [label, argv] of [
+    ["claim metadata", ["claims", "claim", "--pr", String(PR), ...badMetadata]],
+    ["claim prefix", ["claims", "claim", "--pr", String(PR), ...badPrefix]],
+    [
+      "takeover metadata",
+      [
+        "claims",
+        "takeover",
+        "--pr",
+        String(PR),
+        "--supersedes",
+        hexOid(4),
+        ...badMetadata,
+      ],
+    ],
+    [
+      "family claim metadata",
+      ["claims", "family", "claim", "--prs", String(PR), ...badMetadata],
+    ],
+    [
+      "family claim prefix",
+      ["claims", "family", "claim", "--prs", String(PR), ...badPrefix],
+    ],
+  ]) {
+    const planned = await context.run([...argv, "--dry-run"]);
+    assert.notEqual(
+      planned.exitCode,
+      0,
+      `${label} must refuse under --dry-run`,
+    );
+    assert.equal(context.server.calls.commit.length, 0, "nothing was written");
+
+    // And the same input refuses the same way when it is not a dry run, which
+    // is exactly what "the plan predicts execution" means.
+    const executed = await context.run(argv);
+    assert.equal(
+      executed.exitCode,
+      planned.exitCode,
+      `${label} must refuse the same way when writing`,
+    );
+    assert.equal(
+      executed.document.error.message,
+      planned.document.error.message,
+      "the plan and the run refuse for the same reason",
+    );
+  }
+
+  // A valid plan still plans.
+  const fine = await context.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--set",
+    `lastPushedHead=${hexOid(5)}`,
+    "--dry-run",
+  ]);
+  assert.equal(fine.exitCode, 0);
+  assert.equal(fine.document.status, "ok");
+});
+
+test("label reconcile writes only with --apply, and is a read without it", async () => {
+  // Statically `mutates: true`, the read-only form was refused outright under
+  // GITHUB_ACTIONS and in a cloud session without `allowCloudWriters`, and it
+  // demanded a resolved runtime and a network login read — for a report that
+  // writes nothing.
+  const context = harness();
+  await claimOnce(context);
+  const reconcile = ["claims", "label", "reconcile", "--pr", String(PR)];
+
+  const inActions = await context.run(reconcile, {
+    env: { GITHUB_ACTIONS: "true", CLAUDECODE: "1" },
+  });
+  assert.equal(inActions.exitCode, 0, "the report is not a write");
+  assert.equal(inActions.document.status, "ok");
+  assert.ok(!inActions.document.label.applied, "and it applied nothing");
+
+  const applying = await context.run([...reconcile, "--apply"], {
+    env: { GITHUB_ACTIONS: "true", CLAUDECODE: "1" },
+  });
+  assert.equal(applying.exitCode, 3, "applying is still refused there");
+  assert.match(
+    applying.document.error.message,
+    /never written from GitHub Actions/u,
+  );
+
+  // And with no such environment, `--apply` runs the write path — here the
+  // label already matches the ref, so it reports `in-sync` rather than
+  // projecting, which is the point: the refusal above was about permission to
+  // write, not about there being anything to write.
+  const applied = await context.run([...reconcile, "--apply"]);
+  assert.equal(applied.exitCode, 0);
+  assert.equal(applied.document.label.status, "in-sync");
+});
+
+test("claims list skips a ref whose suffix names no usable number", async () => {
+  // `Number` turns a suffix past 2^53 - 1 into a value naming a different pull
+  // request, and `canonicalScope`/`refName` ran outside the per-entry guard,
+  // so one such ref threw and took the whole listing with it.
+  const context = harness();
+  await claimOnce(context);
+  const namespace = "refs/mento-claims/v1/pr";
+  const listed = await context.run(["claims", "list"], {
+    operations: {
+      ...context.options.operations,
+      claims: {
+        ...context.server.operations,
+        listRefCommits: async () => [
+          { ref: `${namespace}/${PR}`, oid: hexOid(1), type: "commit" },
+          {
+            ref: `${namespace}/9007199254740993`,
+            oid: hexOid(2),
+            type: "commit",
+          },
+          { ref: `${namespace}/007`, oid: hexOid(3), type: "commit" },
+        ],
+      },
+    },
+  });
+
+  assert.equal(listed.exitCode, 0, "one unusable ref hides none of the others");
+  assert.deepEqual(
+    listed.document.claims.map((entry) => entry.number),
+    [PR],
+  );
+  const skipped = listed.document.warnings.filter(
+    (warning) => warning.stage === "list-claims",
+  );
+  assert.deepEqual(skipped.map((warning) => warning.ref).sort(), [
+    `${namespace}/007`,
+    `${namespace}/9007199254740993`,
+  ]);
+  for (const warning of skipped) {
+    assert.match(warning.message, /names no usable pr number/u);
   }
 });
 

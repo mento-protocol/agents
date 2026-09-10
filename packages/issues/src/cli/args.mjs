@@ -43,6 +43,24 @@ export const GATED_FLAGS = Object.freeze({
   now: { type: "string" },
 });
 
+/**
+ * Does this invocation write to the server?
+ *
+ * `mutates` is a boolean for every command whose answer never changes, and a
+ * predicate over the parsed flags for the one whose answer does:
+ * `label reconcile` writes only with `--apply`. Callers ask here rather than
+ * reading the field, so a predicate is never mistaken for a truthy `true`.
+ *
+ * @param {object} spec a command spec.
+ * @param {object} [flags] the parsed flags.
+ * @returns {boolean}
+ */
+export function commandMutates(spec, flags = {}) {
+  return typeof spec?.mutates === "function"
+    ? spec.mutates(flags) === true
+    : spec?.mutates === true;
+}
+
 /** Every command, its required flags and its own flag grammar. */
 export const COMMAND_SPECS = Object.freeze({
   "claims read": {
@@ -189,7 +207,13 @@ export const COMMAND_SPECS = Object.freeze({
   },
   "claims label reconcile": {
     command: "claims.label.reconcile",
-    mutates: true,
+    // Only with `--apply`. Without it the command compares the label against
+    // the ref and reports the difference, writing nothing — yet a static
+    // `true` had it refused outright under `GITHUB_ACTIONS` and in a cloud
+    // session without `allowCloudWriters`, and made it demand a resolved
+    // runtime and a network login read, for a report. Every restriction still
+    // applies when it does write.
+    mutates: (flags) => flags?.apply === true,
     requiresConfig: true,
     flags: { pr: { type: "integer" }, apply: { type: "boolean" } },
     required: ["pr"],

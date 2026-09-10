@@ -663,3 +663,29 @@ test("markers summary refuses a policy that names another summary marker schema"
   );
   assert.equal(JSON.parse(okChunks.join("")).v2Line, buildSummaryMarker(input));
 });
+
+test("a summary marker whose pr is not a safe integer does not parse as v2", () => {
+  // The grammar accepts any run of digits and `Number` rounds one past
+  // 2^53 - 1 without saying so: `pr=9007199254740993` parsed as `v2Present:
+  // true` carrying 9007199254740992, a number naming a different pull request.
+  // `buildSummaryMarker` writes nothing but a positive safe integer, so
+  // anything else did not come from this package.
+  const claim = "0123456789abcdef0123456789abcdef01234567";
+  const runSha = "a".repeat(64);
+  const operatorSha = "b".repeat(64);
+  const marker = (pr) =>
+    `<!-- mento-dependabot-preparation:v2 pr=${pr} claim=${claim} run-sha256=${runSha} operator-sha256=${operatorSha} -->`;
+
+  for (const pr of ["9007199254740993", "99999999999999999999", "0"]) {
+    const parsed = parseSummaryMarker(marker(pr));
+    assert.equal(parsed.v2Present, false, pr);
+    assert.equal(parsed.pr, null, pr);
+    assert.equal(parsed.claim, null, pr);
+  }
+
+  // The largest safe integer still parses, and round-trips.
+  const safe = parseSummaryMarker(marker(String(Number.MAX_SAFE_INTEGER)));
+  assert.equal(safe.v2Present, true);
+  assert.equal(safe.pr, Number.MAX_SAFE_INTEGER);
+  assert.equal(safe.claim, claim);
+});

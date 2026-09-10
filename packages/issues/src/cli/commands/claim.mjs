@@ -10,7 +10,10 @@
  * caller (C-1), so `--run-id` is already a usage refusal by the time this runs.
  */
 
-import { acquireClaim } from "../../claims/transitions.mjs";
+import {
+  acquireClaim,
+  assertTransitionInputs,
+} from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
@@ -31,6 +34,13 @@ export async function runClaim(runtime) {
   const { scope, ref } = markFailureContext(runtime, number);
   const takeover = flags["no-takeover"] === true ? false : undefined;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
+  // Before the plan, not merely before the write: a plan that skipped the
+  // transition's own input checks answered `ok` for inputs the run would have
+  // refused, which is the one thing a dry run must never do.
+  assertTransitionInputs(ctx, {
+    metadata,
+    runIdPrefix: flags["run-id-prefix"] ?? null,
+  });
 
   if (ctx.options.dryRun === true) {
     return {

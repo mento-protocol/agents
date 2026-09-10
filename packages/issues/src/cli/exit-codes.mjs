@@ -10,7 +10,7 @@
  * entry prompt (C-22), so it lives here as a constant rather than as prose.
  */
 
-import { exitCodeForError } from "../claims/errors.mjs";
+import { exitCodeForError, isTransportFailure } from "../claims/errors.mjs";
 
 /** Process exit codes, by name. */
 export const EXIT_CODES = Object.freeze({
@@ -128,11 +128,9 @@ export const COARSE_EXIT_RULE =
  * @returns {boolean}
  */
 export function isTransportError(error) {
-  return (
-    error?.claimCode == null &&
-    typeof error?.code === "string" &&
-    error.code.startsWith("GH_")
-  );
+  // The claims layer asks the same question before it classifies a failed
+  // read, so the rule lives beside the errors and is answered in one place.
+  return isTransportFailure(error);
 }
 
 /**

@@ -7,7 +7,10 @@
  * so it generates its own run id and `--run-id` is refused.
  */
 
-import { takeoverClaim } from "../../claims/transitions.mjs";
+import {
+  assertTransitionInputs,
+  takeoverClaim,
+} from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
 import { planTransition } from "../dry-run.mjs";
@@ -28,6 +31,11 @@ export async function runTakeover(runtime) {
   const supersedes = flags.supersedes;
   const { scope, ref } = markFailureContext(runtime, number);
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
+  // The plan predicts execution, so it is refused by the same input checks.
+  assertTransitionInputs(ctx, {
+    metadata,
+    runIdPrefix: flags["run-id-prefix"] ?? null,
+  });
 
   if (ctx.options.dryRun === true) {
     return {

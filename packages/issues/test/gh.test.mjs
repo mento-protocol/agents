@@ -24,6 +24,7 @@ import {
   createCommit,
   formatGh,
   ghGraphql,
+  ghJson,
   isUnknownOutcomeError,
   listRefCommits,
   pinnedGithubCliEnvironment,
@@ -1183,4 +1184,49 @@ test("the repository splitter requires exactly two non-empty components", () => 
       `${repo} must be refused`,
     );
   }
+});
+
+test("a non-JSON answer carries a redacted argv, never the credential it was given", async () => {
+  // `runGh` redacts the argv it attaches to every error; this one attached the
+  // raw array, so a credential passed as `-H "Authorization: Bearer …"` or as
+  // a bare token argument reached `error.args` — the frozen array a caller
+  // logs or serializes — whenever `gh` answered with something that is not
+  // JSON, which is precisely when a caller prints the error.
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const failed = await ghJson(
+    ["api", "-H", `Authorization: Bearer ${secret}`, "user", secret],
+    { run: async () => "not json at all" },
+  ).then(
+    () => assert.fail("non-JSON output must reject"),
+    (error) => error,
+  );
+
+  assert.equal(failed.code, "GH_INVALID_JSON");
+  const surfaces = {
+    args: JSON.stringify(failed.args),
+    message: failed.message,
+    properties: JSON.stringify(failed, Object.getOwnPropertyNames(failed)),
+  };
+  for (const [name, text] of Object.entries(surfaces)) {
+    assert.equal(text.includes(secret), false, `${name} carries the token`);
+  }
+  assert.deepEqual(failed.args, [
+    "api",
+    "-H",
+    "Authorization: Bearer [redacted-github-token]",
+    "user",
+    "[redacted-github-token]",
+  ]);
+
+  // A GraphQL document goes through the same path, and its variables can carry
+  // one too.
+  const graphql = await ghGraphql(
+    "query { viewer { login } }",
+    { token: secret },
+    { run: async () => "<html>proxy error</html>" },
+  ).then(
+    () => assert.fail("non-JSON output must reject"),
+    (error) => error,
+  );
+  assert.equal(JSON.stringify(graphql.args).includes(secret), false);
 });

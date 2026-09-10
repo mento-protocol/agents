@@ -795,7 +795,16 @@ inside an argument — an `Authorization: token …` header, say — used to rea
 the error message, `error.args` and the dry-run notice verbatim. Every
 diagnostic argv is redacted before it is quoted, so one choke point covers
 every message, hint and notice, and each error carries a redacted `safeArgv`
-alongside the raw argv the child was given. Live stderr is redacted before it
+alongside the raw argv the child was given.
+
+**Every argv-bearing surface goes through it, not only `runGh`'s.** Two did
+not. `ghJson` attached the raw array to the `GH_INVALID_JSON` it raises when
+`gh` answers with something unparseable — which is exactly when a caller prints
+the error. And `guard` copied the _guarded_ command's argv into its pre-spawn
+report, its final report and the `--report` file, so guarding
+`gh api -H "Authorization: Bearer …"` wrote the credential into a CI artifact
+that outlives the run. Both now report redacted copies; the child and the
+subprocess still receive the real bytes. Live stderr is redacted before it
 reaches `stderrSink`, holding back both a trailing run of token characters and
 an `Authorization` header whose value has not ended, so a secret split across
 two chunks is rejoined rather than printed in halves. Holding only the token
@@ -1222,6 +1231,17 @@ prompt:
 0 proceed; 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR
 and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 ```
+
+Two rows are worth naming, because both were once reached by the wrong path.
+**Losing the create race** is exit 10 `contended`: when the winner of an
+initialize had already advanced UNLOCK→LOCK by the time the loser looked, that
+is an ordinary lost race, and the base `CLAIM_CONFLICT` it threw has no row in
+this table at all, so the CLI answered `status: usage` and exit 1 for it. A
+**transport failure on the ownership read that precedes a release** is exit 20
+`transport`, not exit 16: that read runs before every compare-and-swap, so a
+timeout or a 5xx changed nothing on the server and the caller still holds its
+claim. Exit 16 `stale` is for a reference this package proves it can no longer
+release from.
 
 Output is exactly one JSON document on stdout, on success and on failure alike;
 `guard` is the documented exception. The error envelope adds `current`,

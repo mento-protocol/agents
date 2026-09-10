@@ -234,6 +234,25 @@ export function exitCodeForError(error) {
  * @param {unknown} err any thrown value.
  * @returns {boolean}
  */
+/**
+ * Was this raised by the transport rather than decided by a claim?
+ *
+ * Matched by code prefix and the absence of a claim code, so nothing here
+ * imports the `gh` layer. A timeout, a 5xx or an aborted call says nothing
+ * about the reference: it is retryable, and it must never be dressed up as a
+ * verdict about the claim.
+ *
+ * @param {unknown} error any thrown value.
+ * @returns {boolean}
+ */
+export function isTransportFailure(error) {
+  return (
+    error?.claimCode == null &&
+    typeof error?.code === "string" &&
+    error.code.startsWith("GH_")
+  );
+}
+
 export function isRecoverableClaimRaceError(err) {
   const seen = new Set();
   let current = err;

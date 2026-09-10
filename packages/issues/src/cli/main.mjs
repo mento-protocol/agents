@@ -29,7 +29,7 @@ import {
   createClaimContext,
 } from "../claims/context.mjs";
 import { defaultOperations } from "../claims/ref.mjs";
-import { assertObjectId, parseCommandLine } from "./args.mjs";
+import { assertObjectId, commandMutates, parseCommandLine } from "./args.mjs";
 import { assertPackageIdentity, loadClaimConfig } from "./config.mjs";
 import {
   assertRuntimeResolved,
@@ -369,7 +369,10 @@ async function createRuntime(parsed, options) {
   if (operations.labels) ctx.labelOperations = operations.labels;
   runtime.ctx = ctx;
 
-  if (spec.mutates) {
+  // A spec's `mutates` may be a predicate over the flags — `label reconcile`
+  // writes only with `--apply` — and the environment rules below belong to the
+  // write, not to the report that can precede it.
+  if (commandMutates(spec, flags)) {
     // Both refusals are environment rules rather than identity ones, so they
     // are checked against the built context and a read still works in both.
     // They come BEFORE the login read: `resolveLogin` reaches the network, and
