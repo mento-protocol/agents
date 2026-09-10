@@ -3385,6 +3385,65 @@ test("a relative --state is resolved before anything stores or prints it", async
   }
 });
 
+test("a relative --config is resolved, so a printed line runs from anywhere", async () => {
+  // `--state` was made absolute and `--config` was not, so a printed recovery
+  // carried `./config.json` and loaded whatever file that named in the
+  // directory it was run from — another config, or none at all. Both are
+  // resolved once now, before the load, so the file that is read and the path
+  // that is printed are the same file.
+  const context = harness();
+  const relativeConfig = `./${basename(context.directory)}-config.json`;
+  const absoluteConfig = resolve(process.cwd(), relativeConfig);
+  writeFileSync(absoluteConfig, readFileSync(context.configPath, "utf8"));
+
+  try {
+    const claimed = await invoke(
+      [
+        "claims",
+        "claim",
+        "--pr",
+        String(PR),
+        "--config",
+        relativeConfig,
+        "--state",
+        context.options.stateRoot,
+      ],
+      { ...context.options, stateRoot: undefined },
+    );
+    assert.equal(claimed.exitCode, 0);
+    for (const line of Object.values(claimed.document.next)) {
+      assert.ok(line.includes(`--config ${absoluteConfig}`), line);
+      assert.equal(line.includes(`--config ${relativeConfig}`), false, line);
+    }
+
+    // Run the printed `read` line from somewhere else entirely. A relative
+    // config would resolve against this directory and fail to load; the
+    // absolute one names the same file it always did.
+    const elsewhere = join(context.directory, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    const wasIn = process.cwd();
+    process.chdir(elsewhere);
+    try {
+      const printed = claimed.document.next.read.split(" ").slice(1);
+      const reread = await invoke(printed, {
+        ...context.options,
+        stateRoot: undefined,
+      });
+      assert.equal(reread.exitCode, 0, claimed.document.next.read);
+      assert.equal(reread.document.status, "ok");
+      assert.equal(
+        reread.document.claim.oid,
+        claimed.document.claim.token,
+        "the same store and the same config, from another directory",
+      );
+    } finally {
+      process.chdir(wasIn);
+    }
+  } finally {
+    rmSync(absoluteConfig, { force: true });
+  }
+});
+
 test("no takeover path exists: a paused guard keeps its slot and every other refuses", () => {
   // The shape of the four-process probe that broke every automatic reclaim:
   // one guard holds a slot and pauses indefinitely — its process alive, dead

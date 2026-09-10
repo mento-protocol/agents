@@ -507,11 +507,15 @@ globals that decide where it resolves — `--config`, `--state` when this run is
 not on the host's default state root, and any `--host`, `--runtime`, `--login`,
 `--agent` or `--timeout-seconds` the invocation supplied — and each value is
 POSIX single-quoted, so a path holding a space, a quote or a `$VARIABLE` reaches
-the CLI intact. Anything the config file itself carries is left to the config,
-since the follow-up loads that same file. This covers `next`, the `inspect`
-line, and the `adopt` command inside `error.recovery.operatorText`: a line
-printed without `--config` exited 2 for the operator who followed it, and one
-printed without `--state` would reserve its guard slot in a different store.
+the CLI intact. **Both paths are absolute**: `--config` and `--state` are
+resolved once, before the config is loaded and before the store is built, so a
+line pasted into another directory names the same two files rather than
+whatever `./config.json` happens to mean there. Anything the config file itself
+carries is left to the config, since the follow-up loads that same file. This
+covers `next`, the `inspect` line, the family `guard` line, and the `adopt`
+command inside `error.recovery.operatorText`: a line printed without `--config`
+exited 2 for the operator who followed it, and one printed without `--state`
+would reserve its guard slot in a different store.
 
 ## Using this from a repository policy
 

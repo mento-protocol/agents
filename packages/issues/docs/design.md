@@ -1236,10 +1236,14 @@ that decide where it resolves: `--config`, `--state` when the run is not on the
 host's default state root, and any `--host`, `--runtime`, `--login`, `--agent`
 or `--timeout-seconds` the invocation supplied. Values are POSIX single-quoted,
 never `JSON.stringify`-quoted, because a double-quoted argument is still
-expanded by a shell. What the config file already carries stays there, since the
-follow-up loads that same file. The rule covers `next`, the `inspect` line and
-the `adopt` line inside `operatorText`: one printed without `--config` exits 2
-for the operator running it, and one without `--state` reads a different store.
+expanded by a shell. Both paths are absolute: `--config` is resolved before the
+document is loaded and `--state` before the store is built, so what is read and
+what is printed are the same files, and a line pasted into another directory
+still names them. What the config file already carries stays there, since the
+follow-up loads that same file. The rule covers `next`, the `inspect` line, the
+family `guard` line and the `adopt` line inside `operatorText`: one printed
+without `--config` exits 2 for the operator running it, and one without
+`--state` reads a different store.
 
 ## Consumption
 

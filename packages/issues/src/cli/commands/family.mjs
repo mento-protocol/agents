@@ -25,13 +25,16 @@ import { buildNextCommands, claimBlock } from "../output.mjs";
 import { markFailureContext, recordLeaseState } from "./common.mjs";
 
 function guardCommand(runtime, members) {
-  const config =
-    runtime.configPath === null ? "" : ` --config ${runtime.configPath}`;
+  // The globals every other printed line carries, from the one renderer that
+  // makes them: a family guard needs the same `--state` and the same quoting
+  // as the rest, and a third interpolation of the raw config path was a third
+  // way to get both wrong.
+  const globals = runtime.commandGlobals ?? "";
   const pairs = members
     .map((member) => `--pr ${member.number} --token ${member.token}`)
     .join(" ");
   const runId = members[0]?.runId ?? "<run-id>";
-  return `mento-issues claims guard${config} ${pairs} --run-id ${runId} --gate push -- <command>`;
+  return `mento-issues claims guard${globals} ${pairs} --run-id ${runId} --gate push -- <command>`;
 }
 
 /**

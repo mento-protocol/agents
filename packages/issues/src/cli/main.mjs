@@ -260,7 +260,14 @@ async function createRuntime(parsed, options) {
     stderr: options.stderr,
     operations,
     warnings,
-    configPath: flags.config ?? null,
+    // Absolute from here on, for the same reason the state root is: every
+    // generated command carries this path, and a relative one names a
+    // different file for each process that runs from somewhere else — so a
+    // printed recovery loaded another config, or none. It is resolved once,
+    // before the load, so the document that is read and the path that is
+    // printed are the same file. Error messages carry the resolved path too,
+    // which tells a reader more than `./config.json` does.
+    configPath: flags.config === undefined ? null : resolve(flags.config),
     config: null,
     ctx: null,
     clock: null,
@@ -273,7 +280,7 @@ async function createRuntime(parsed, options) {
   // job whose grammar disagrees with the policy's `markerRevision`, instead of
   // accepting the flag and ignoring it.
   if (flags.config !== undefined) {
-    runtime.config = loadClaimConfig(flags.config, options);
+    runtime.config = loadClaimConfig(runtime.configPath, options);
     warnings.push(
       ...assertPackageIdentity(runtime.config, options.packageIdentity),
     );
