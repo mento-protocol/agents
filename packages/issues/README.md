@@ -299,6 +299,15 @@ child's, so a guard exit in that range is guard's own verdict; guard will run
 any argv, though, so for an arbitrary command read `status` and `killedBy` from
 the report line rather than the code alone.
 
+**A renewal that was in flight when the child exited is finished, not
+abandoned.** A read still running is dropped at once; a compare-and-swap that
+has already been issued is not, because GitHub may have applied it and lost the
+answer — it runs to a confirmed token or to an unknown outcome. A confirmed one
+is what the final report names. An unknown one is reported under `unresolved`
+with its candidate and the `adopt` line that resolves it, and recorded in the
+state file, exactly as every other unknown outcome is; it is never dropped just
+because the run was on its way out.
+
 Repeated `--pr`/`--token` pairs under one `--run-id` guard a whole family. A
 second live guard holding the same `--run-id` for the same item exits 3: guard
 is the publish gate, so two of them under one run id would each verify held and

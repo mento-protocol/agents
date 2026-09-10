@@ -715,6 +715,12 @@ function exitCodeForSignal(signalName) {
  * @param {(entry: object) => object[]|void} [options.onRenew] called after
  *   every successful renew, so a caller can follow the rotated token. Warnings
  *   it returns are added to the report; a throw becomes one.
+ * @param {(input: object) => object|object[]} [options.onUnresolved] called for
+ *   a renew whose compare-and-swap outcome is unknown, with
+ *   `{ number, error, candidate }`. The CLI records the candidate in the state
+ *   file so `adopt --from-state` can resolve it; it may return warnings, or
+ *   `{ warnings, statePath, adopt }` to put those on the report's `unresolved`
+ *   entry.
  * @param {object} [options.overrides] operations overrides.
  * @returns {Promise<{exitCode: number, report: object}>}
  */
@@ -732,11 +738,55 @@ export async function guardChild(ctx, claims, options = {}) {
     stdio = "inherit",
     detached = true,
     onRenew = null,
+    onUnresolved = null,
     overrides = {},
   } = options;
 
   const warnings = [...(options.warnings ?? [])];
   const renews = [];
+  /** Renews whose compare-and-swap outcome nobody can name yet. */
+  const unresolved = [];
+  /**
+   * Record a renew whose outcome is unknown, and say so on the report.
+   *
+   * A compare-and-swap that lost its answer may have landed a LOCK, so this is
+   * the one renew failure that must never be swallowed — least of all on the
+   * way out, which is exactly where it used to be. The candidate is handed to
+   * the caller to persist (the CLI writes the state entry `adopt --from-state`
+   * reads) and is carried on the report under `unresolved`.
+   *
+   * @param {object} entry the guarded claim.
+   * @param {Error} error the unknown-outcome failure.
+   * @returns {void}
+   */
+  const announceUnresolved = (entry, error) => {
+    const candidate = error?.details?.candidate ?? null;
+    const record = {
+      number: entry.number,
+      candidate: typeof candidate?.oid === "string" ? candidate : null,
+      message: String(error?.message ?? error).split("\n")[0],
+    };
+    if (typeof onUnresolved === "function") {
+      try {
+        const returned = onUnresolved({
+          number: entry.number,
+          error,
+          candidate: record.candidate,
+        });
+        if (Array.isArray(returned)) warnings.push(...returned);
+        else if (returned && typeof returned === "object") {
+          if (Array.isArray(returned.warnings)) {
+            warnings.push(...returned.warnings);
+          }
+          if (returned.statePath != null) record.statePath = returned.statePath;
+          if (returned.adopt != null) record.adopt = returned.adopt;
+        }
+      } catch (failure) {
+        warnings.push(warningOf(failure, { number: entry.number }));
+      }
+    }
+    unresolved.push(record);
+  };
   const announceRenew = (entry) => {
     // Belt and braces for the one rule this callback has: nothing reaches the
     // caller after the final report has been emitted. The exit path already
@@ -802,6 +852,11 @@ export async function guardChild(ctx, claims, options = {}) {
     killedBy,
     renews,
     warnings,
+    // A renew whose compare-and-swap outcome is unknown may have landed a LOCK
+    // this run cannot name. That is not a warning, it is a candidate somebody
+    // has to resolve, so it rides the report under its own key — the same
+    // shape `family release` uses — and never only in a message.
+    ...(unresolved.length > 0 ? { unresolved } : {}),
     error,
   });
 
@@ -924,16 +979,15 @@ export async function guardChild(ctx, claims, options = {}) {
   /** Set the instant the final report is emitted; nothing may run after it. */
   let reported = false;
   /**
-   * Aborted when guard starts closing, and carried by every renew call.
+   * Aborted when guard starts closing, and carried by every renew **read**.
    *
-   * The flag stops the loop **between** calls; this is what ends the call
-   * already in flight, so the exit path can wait for the tick's real
-   * settlement instead of releasing itself on a timer. It is merged with the
-   * context's own signal, so a caller that supplied one keeps it: either can
-   * end a renew.
+   * The flag stops the loop between calls; this is what ends the call already
+   * in flight, so the exit path can wait for the tick's real settlement
+   * instead of releasing itself on a timer. It is merged with the context's
+   * own signal, so a caller that supplied one keeps it.
    */
   const closingController = new AbortController();
-  const renewCtx = {
+  const readCtx = {
     ...ctx,
     options: {
       ...ctx.options,
@@ -942,6 +996,51 @@ export async function guardChild(ctx, claims, options = {}) {
         : closingController.signal,
     },
   };
+
+  /**
+   * Has this renew issued a compare-and-swap that has not been resolved yet?
+   *
+   * A write is not a read, and cutting one is not free. `updateRefs` can be
+   * applied by GitHub and the answer lost on the way back, so an abort there
+   * leaves a reference at a commit nobody has seen — and aborting the
+   * **reconcile** read as well takes away the one thing that could still find
+   * out. The renew then reported the old token while the reference held the
+   * new one: the precise staleness the closing path exists to prevent, dressed
+   * as a clean exit.
+   *
+   * So from the moment a compare-and-swap is issued, this renew's calls stop
+   * carrying the closing signal: `advanceRef` runs to a confirmed candidate or
+   * to `CLAIM_UNKNOWN_OUTCOME`, bounded by the runner's own per-call timeouts,
+   * and whichever it reaches is reported. The flag still prevents starting any
+   * *new* renew.
+   */
+  let writeIssued = false;
+
+  /**
+   * The operations a renew runs through: reads abortable, writes not.
+   *
+   * The context each call receives is chosen here rather than fixed at the
+   * lease, because the difference is per call: `readClaimRef` before a write
+   * may be abandoned, and the same function after one may not — it is the
+   * reconcile that decides what the write did.
+   */
+  const renewOverrides = (() => {
+    // The same merge every transition makes, so nothing is lost by wrapping it.
+    const base = { ...(ctx.operations ?? {}), ...overrides };
+    const bag = {};
+    for (const [name, operation] of Object.entries(base)) {
+      if (typeof operation !== "function") {
+        bag[name] = operation;
+        continue;
+      }
+      const writes = name === "compareAndSwapRef";
+      bag[name] = (_ctx, ...rest) => {
+        if (writes) writeIssued = true;
+        return operation(writeIssued ? ctx : readCtx, ...rest);
+      };
+    }
+    return bag;
+  })();
 
   const minRemainingMs =
     options.minRemainingMs ??
@@ -972,16 +1071,17 @@ export async function guardChild(ctx, claims, options = {}) {
    */
   const repairEntry = async (entry, member) => {
     try {
+      writeIssued = false;
       const hydrated = await untilAborted(
-        // `renewCtx`, not `ctx`: the lease this produces is the one the renew
-        // tick reuses while the child runs, so it has to carry the signal that
-        // ends a renew when guard closes. Before the spawn that signal is not
-        // aborted, so nothing here behaves differently.
+        // `renewOverrides`, not the caller's bag: the lease this produces is
+        // the one the renew tick reuses while the child runs, so it has to
+        // carry the read/write distinction that closing depends on. Before the
+        // spawn nothing is closing, so nothing here behaves differently.
         hydrateClaimLease(
-          renewCtx,
+          ctx,
           member.number,
           { token: entry.token, runId, current: entry.report.current },
-          overrides,
+          renewOverrides,
         ),
       );
       if (hydrated === ABORTED) return ABORTED;
@@ -1412,14 +1512,17 @@ export async function guardChild(ctx, claims, options = {}) {
         expireEntry(entry);
         return;
       }
+      // Each attempt starts with no write outstanding, so a read before this
+      // renew's compare-and-swap is abortable again.
+      writeIssued = false;
       try {
         if (!entry.lease) {
           if (closing) return;
           entry.lease = await hydrateClaimLease(
-            renewCtx,
+            ctx,
             entry.number,
             { token: entry.token, runId },
-            overrides,
+            renewOverrides,
           );
         }
         // The instant the renew was asked about, not the one it answered at:
@@ -1473,10 +1576,27 @@ export async function guardChild(ctx, claims, options = {}) {
           announceRenew(entry);
         }
       } catch (error) {
-        // A call guard itself aborted on the way out says nothing about the
-        // claim, so it is not a warning and it moves no verdict: the abort is
-        // the reason it failed. Reporting it would put "aborted" on a report
-        // that is otherwise about a child that finished normally.
+        // An **unknown outcome** is never swallowed, closing or not. A
+        // compare-and-swap that lost its answer may have landed a LOCK nobody
+        // can name, and the way out is exactly where that used to disappear:
+        // it is recorded, carried on the report under `unresolved`, and the
+        // claim is left unproven rather than reported as held at a token the
+        // reference may already have moved past.
+        const ambiguous = error?.claimCode === "CLAIM_UNKNOWN_OUTCOME";
+        if (ambiguous) {
+          warnings.push(warningOf(error, { number: entry.number }));
+          announceUnresolved(entry, error);
+          entry.unverified = true;
+          if (closing) return;
+          if (mandatory && pastLeaseDeadline(entry)) {
+            expireEntry(entry);
+          }
+          return;
+        }
+        // Anything else that failed while guard was closing says nothing about
+        // the claim: the abort is the reason, so it is not a warning and it
+        // moves no verdict. Reporting it would put "aborted" on a report that
+        // is otherwise about a child that finished normally.
         if (closing) return;
         warnings.push(warningOf(error, { number: entry.number }));
         if (mandatory && CLAIM_LOST_CLAIM_CODES.has(error?.claimCode)) {

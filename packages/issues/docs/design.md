@@ -771,10 +771,32 @@ sets a `closing` flag and aborts a signal that every renew context carries:
 - a call that failed **because** guard aborted it is not a warning and moves no
   verdict: the abort is the reason, and it says nothing about the claim.
 
-So the remaining wait is one call, bounded by the abort and by the runner's own
-per-call timeout, and "nothing runs after the report" is true by construction
-rather than by margin. `announceRenew` also refuses to run once the report is
-emitted — belt and braces for the one callback that reaches outside guard.
+**A write is not a read, and only reads are abortable.** `updateRefs` can be
+applied by GitHub and its answer lost on the way back, so cutting one leaves the
+reference at a commit nobody has seen — and cutting the **reconcile** read with
+it takes away the one thing that could still find out. The renew then reported
+the old token while the reference held the new one: the same staleness, reached
+by the mechanism meant to prevent it. So the renew operations are wrapped, and
+the context each call receives is chosen per call rather than fixed at the
+lease: from the moment `compareAndSwapRef` is issued, this renew's calls stop
+carrying the closing signal, and `advanceRef` runs to a confirmed candidate or
+to `CLAIM_UNKNOWN_OUTCOME`, bounded by the runner's own per-call timeouts. The
+flag still prevents starting a _new_ renew, and a read before the write is
+abandoned as promptly as ever.
+
+Whichever `advanceRef` reaches is then reported. A confirmed renewal applies as
+usual — token, report line, `onRenew`. An **unknown outcome** is the one renew
+failure that is never swallowed, closing or not: the candidate goes to the
+caller through `onUnresolved` (the CLI writes the state entry
+`adopt --from-state` reads), it rides the report under `unresolved` beside a
+warning, and the claim is left unproven rather than reported as held at a token
+the reference may already have moved past.
+
+So the remaining wait is one call, bounded by the abort for a read and by the
+runner's per-call timeout for a write, and "nothing runs after the report" is
+true by construction rather than by margin. `announceRenew` also refuses to run
+once the report is emitted — belt and braces for the one callback that reaches
+outside guard.
 
 Guard's report also carries the warnings its **runtime** collected, because
 guard's documents are its own and bypass `runCli`'s warning merge: a config

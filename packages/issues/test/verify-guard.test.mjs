@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { claimRefName } from "../src/claims/ref.mjs";
@@ -18,7 +20,8 @@ import {
   requireFencedWrite,
   verifyClaim,
 } from "../src/claims/verify.mjs";
-import { processIsAlive } from "../src/cli/state-file.mjs";
+import { recordUnknownOutcome } from "../src/cli/commands/common.mjs";
+import { createStateStore, processIsAlive } from "../src/cli/state-file.mjs";
 import { createFakeRefServer } from "../src/testing/fake-ref-server.mjs";
 import {
   DEFAULT_TEST_LEASE,
@@ -2076,4 +2079,260 @@ test("nothing the renew loop does can land after the final report", async () => 
     false,
     "and a call guard aborted on the way out is not reported as a fault",
   );
+});
+
+/** A promise that rejects when this context's abort signal fires. */
+function rejectOnAbort(callCtx, label = "gh call aborted") {
+  return new Promise((_resolve, reject) => {
+    const abort = callCtx.options?.signal;
+    if (abort?.aborted) {
+      reject(new Error(label));
+      return;
+    }
+    abort?.addEventListener?.("abort", () => reject(new Error(label)), {
+      once: true,
+    });
+  });
+}
+
+test("a compare-and-swap already issued is not cut short by the child exiting", async () => {
+  // Closing aborted every renew call alike, and a write is not a read.
+  // `updateRefs` can be applied by GitHub and the answer lost on the way back,
+  // so cutting one leaves the reference at a commit nobody has seen — and
+  // cutting the reconcile read with it takes away the one thing that could
+  // still find out. The renew then reported the old token while the reference
+  // held the new one.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  const recorded = [];
+  let releaseCas = () => {};
+  const casHeld = new Promise((resolve) => {
+    releaseCas = resolve;
+  });
+  let casSignal = "never called";
+  let slow = false;
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    onRenew: (entry) => {
+      recorded.push(entry.token);
+      return [];
+    },
+    overrides: server.withOperations({
+      async compareAndSwapRef(casCtx, ...rest) {
+        if (!slow) return server.operations.compareAndSwapRef(casCtx, ...rest);
+        slow = false;
+        casSignal = casCtx.options?.signal ?? null;
+        // A write that honours the closing signal is the defect: it rejects
+        // here, and the reference is left wherever the abort caught it.
+        await Promise.race([casHeld, rejectOnAbort(casCtx)]);
+        return server.operations.compareAndSwapRef(casCtx, ...rest);
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  slow = true;
+  // Past `renewAfter`, so the tick really writes, and well before the deadline.
+  clock.advance(11 * MINUTE);
+  const ticked = scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  spawned.finish();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    casSignal,
+    null,
+    "the write in flight carries no signal guard can abort",
+  );
+  releaseCas();
+  await ticked;
+
+  const result = await guarded;
+  const rotated = server.getRefOid(claimRefName(ctx, PR));
+  assert.notEqual(rotated, lease.token, "the renewal landed");
+  assert.equal(
+    result.report.claims[0].token,
+    rotated,
+    "and the report names the token the reference is at",
+  );
+  assert.deepEqual(recorded, [rotated], "the caller recorded the rotation");
+  assert.equal(result.report.renews.length, 1);
+  assert.equal(result.report.unresolved, undefined, "nothing was left unknown");
+});
+
+test("a compare-and-swap whose answer is lost is reconciled, not abandoned", async () => {
+  // The reconcile read is the only thing that can say what a lost answer did,
+  // so it is not abortable either once a write has been issued. Aborted, it
+  // turned a renewal that had landed into an unknown outcome — or worse, into
+  // a silent one.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  let releaseCas = () => {};
+  const casHeld = new Promise((resolve) => {
+    releaseCas = resolve;
+  });
+  let slow = false;
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    overrides: server.withOperations({
+      // Every read honours the abort, exactly as a real `gh` call does.
+      async readClaimRef(readCtx, ...rest) {
+        return Promise.race([
+          server.operations.readClaimRef(readCtx, ...rest),
+          rejectOnAbort(readCtx),
+        ]);
+      },
+      async compareAndSwapRef(casCtx, ...rest) {
+        if (!slow) return server.operations.compareAndSwapRef(casCtx, ...rest);
+        slow = false;
+        await casHeld;
+        // Applied, and then the answer is lost: the reference has moved and
+        // only a read can prove it.
+        await server.operations.compareAndSwapRef(casCtx, ...rest);
+        throw new Error("response lost");
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  slow = true;
+  clock.advance(11 * MINUTE);
+  const ticked = scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  spawned.finish();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseCas();
+  await ticked;
+
+  const result = await guarded;
+  const rotated = server.getRefOid(claimRefName(ctx, PR));
+  assert.notEqual(rotated, lease.token, "the write did land");
+  assert.equal(
+    result.report.claims[0].token,
+    rotated,
+    "and the reconcile found it, so the report is not stale",
+  );
+  assert.equal(result.report.unresolved, undefined);
+});
+
+test("a renew whose outcome nobody can name is recorded, not swallowed on the way out", async () => {
+  // The one renew failure that must never be dropped on the way out: the write
+  // may have landed a LOCK this run cannot name. It is recorded where
+  // `adopt --from-state` reads it, carried on the report under `unresolved`,
+  // and the claim is left unproven rather than reported as held.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  const root = mkdtempSync(join(tmpdir(), "mento-issues-guard-"));
+  const stateStore = createStateStore({
+    repository: "mento-protocol/frontend-monorepo",
+    root,
+    clock: { now: () => Date.parse("2026-09-09T09:58:12.004Z") },
+  });
+  // The CLI's own adapter, so what this asserts is what `claims guard` does.
+  const runtime = {
+    ctx,
+    stateStore,
+    warnings: [],
+    commandGlobals: " --config /tmp/config.json",
+    failureRef: claimRefName(ctx, PR),
+  };
+
+  let releaseCas = () => {};
+  const casHeld = new Promise((resolve) => {
+    releaseCas = resolve;
+  });
+  let slow = false;
+  let lost = false;
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    onUnresolved: ({ number, error }) => {
+      const recovery = recordUnknownOutcome(runtime, error, { number });
+      return {
+        statePath: recovery.statePath,
+        adopt: recovery.next?.adopt ?? null,
+      };
+    },
+    overrides: server.withOperations({
+      async readClaimRef(readCtx, ...rest) {
+        // Once the answer is lost, nothing can read the reference either: this
+        // is the shape that really is unknown.
+        if (lost) throw new Error("read failed");
+        return server.operations.readClaimRef(readCtx, ...rest);
+      },
+      async compareAndSwapRef(casCtx, ...rest) {
+        if (!slow) return server.operations.compareAndSwapRef(casCtx, ...rest);
+        slow = false;
+        await casHeld;
+        await server.operations.compareAndSwapRef(casCtx, ...rest);
+        lost = true;
+        throw new Error("response lost");
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  slow = true;
+  clock.advance(11 * MINUTE);
+  const ticked = scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  spawned.finish();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseCas();
+  await ticked;
+
+  const result = await guarded;
+  assert.ok(
+    Array.isArray(result.report.unresolved),
+    "the report carries the candidate under its own key",
+  );
+  assert.equal(result.report.unresolved.length, 1);
+  const [entry] = result.report.unresolved;
+  assert.equal(entry.number, PR);
+  assert.equal(typeof entry.candidate.oid, "string");
+  assert.equal(typeof entry.statePath, "string");
+  assert.match(entry.adopt, /claims adopt/u);
+  assert.equal(
+    result.report.warnings.some((warning) =>
+      /outcome is unknown/u.test(warning?.message ?? ""),
+    ),
+    true,
+    "and it is a warning too, not only a key",
+  );
+  assert.equal(
+    result.report.claims[0].held,
+    null,
+    "the claim is no longer proven",
+  );
+
+  // And it is on disk under its own number, which is what `--from-state` reads.
+  const recorded = stateStore.readEntry(PR);
+  assert.equal(recorded.status, "unknown-outcome");
+  assert.equal(recorded.candidate.oid, entry.candidate.oid);
+  rmSync(root, { recursive: true, force: true });
 });

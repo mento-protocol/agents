@@ -28,7 +28,11 @@ import {
   normalizeGuardClaims,
 } from "../../claims/verify.mjs";
 import { pairClaimFlags } from "../args.mjs";
-import { markFailureContext, recordLeaseState } from "./common.mjs";
+import {
+  markFailureContext,
+  recordLeaseState,
+  recordUnknownOutcome,
+} from "./common.mjs";
 
 /**
  * Reserve one host-local guard slot per pair, atomically, before any spawn.
@@ -264,6 +268,18 @@ export async function runGuard(runtime) {
       onRenew: (entry) => {
         if (!entry.lease) return [];
         return recordLeaseState(runtime, entry.number, entry.lease).warnings;
+      },
+      // A renew whose compare-and-swap outcome is unknown may have landed a
+      // LOCK this run cannot name, and a report alone cannot resolve one:
+      // `adopt --from-state` reads the state file. The candidate is written
+      // there under its own number, exactly as every other unknown outcome is,
+      // and the path plus the `adopt` line ride back onto the report entry.
+      onUnresolved: ({ number, error }) => {
+        const recovery = recordUnknownOutcome(runtime, error, { number });
+        return {
+          statePath: recovery.statePath,
+          adopt: recovery.next?.adopt ?? null,
+        };
       },
     });
   } catch (error) {
