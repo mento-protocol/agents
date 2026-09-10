@@ -31,7 +31,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { splitRepo } from "../shared/split-repo.mjs";
 import { quoteForCommand } from "../shared/text.mjs";
@@ -125,7 +125,12 @@ export function probeProcessState(pid) {
 export function createStateStore(input) {
   const {
     repository,
-    root = stateRootFor({ env: input.env, platform: input.platform }),
+    // Resolved, always. A relative root — from `--state ./somewhere`, or from
+    // a `stateRootFor` with no `HOME` to build on — points at a different
+    // directory for every process that runs from a different place, so the
+    // store, the printed `--state` and the paths in a document would all mean
+    // "wherever you happen to be".
+    root: rawRoot = stateRootFor({ env: input.env, platform: input.platform }),
     numberKey = "pr",
     isProcessAlive = processIsAlive,
     // Errno-aware, and separate on purpose: only the clear path may act on the
@@ -145,13 +150,14 @@ export function createStateStore(input) {
     clock = { now: () => Date.now() },
   } = input;
   const { owner, name } = splitRepo(repository);
+  const root = resolve(rawRoot);
   const directory = join(root, `${owner}__${name}`);
   // The root this host would use with no `--state`, so the printed recovery
-  // command carries the flag exactly when it is needed.
-  const defaultRoot = stateRootFor({
-    env: input.env,
-    platform: input.platform,
-  });
+  // command carries the flag exactly when it is needed. Resolved as well, so
+  // the comparison is between two paths of the same kind.
+  const defaultRoot = resolve(
+    stateRootFor({ env: input.env, platform: input.platform }),
+  );
 
   function pathFor(number) {
     return join(directory, `${numberKey}-${number}.json`);

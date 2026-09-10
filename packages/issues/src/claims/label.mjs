@@ -87,8 +87,14 @@ export function defaultLabelOperations() {
         ],
         false,
       );
-      const listed = flattenPaginatedJson(pages);
-      if (listed === null) return [];
+      // A page that is not an array is GitHub's error object rather than a
+      // listing. Reading it as "no labels" would have `addLabel` post a
+      // duplicate, so it throws — and the label layer turns that into the
+      // warning every other label failure becomes.
+      const listed = flattenPaginatedJson(
+        pages,
+        `labels listing for ${repositoryPath(ctx)} issue ${number}`,
+      );
       return listed
         .map((entry) => entry?.name)
         .filter((entry) => typeof entry === "string");

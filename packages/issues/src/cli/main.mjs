@@ -15,6 +15,7 @@
  */
 
 import { randomBytes, randomUUID as nodeRandomUuid } from "node:crypto";
+import { resolve } from "node:path";
 
 import { ClaimConfigError } from "../claims/errors.mjs";
 import {
@@ -284,13 +285,21 @@ async function createRuntime(parsed, options) {
 
   const config = runtime.config;
   const identity = resolveCliIdentity({ flags, env, spec });
-  const stateStore = createStateStore({
-    repository: config.repository,
-    root: stateRootFor({
+  const platform = options.platform ?? process.platform;
+  // Absolute, at the point the root is chosen. `--state ./relative` resolved
+  // against whatever directory the next command happened to run from, so a
+  // printed follow-up reached a different store and found neither the slot nor
+  // the state entry this run wrote.
+  const stateRoot = resolve(
+    stateRootFor({
       env,
-      platform: options.platform ?? process.platform,
+      platform,
       override: flags.state ?? options.stateRoot,
     }),
+  );
+  const stateStore = createStateStore({
+    repository: config.repository,
+    root: stateRoot,
     numberKey: config.profile.numberKey,
     isProcessAlive: options.isProcessAlive,
     probeProcess: options.probeProcess,
@@ -300,21 +309,19 @@ async function createRuntime(parsed, options) {
     // root the host would have used on its own.
     configPath: runtime.configPath,
     env,
-    platform: options.platform ?? process.platform,
+    platform,
     clock: runtime.clock,
   });
   runtime.stateStore = stateStore;
   // Every command line this run prints — the `next` block, the operator
   // recovery text, the guard-slot clear command — carries these, so a printed
-  // follow-up resolves the way this run did.
+  // follow-up resolves the way this run did. Both roots are absolute, so the
+  // comparison is between two comparable paths.
   runtime.commandGlobals = renderCommandGlobals({
     configPath: runtime.configPath,
     flags,
     stateRoot: stateStore.root,
-    defaultStateRoot: stateRootFor({
-      env,
-      platform: options.platform ?? process.platform,
-    }),
+    defaultStateRoot: resolve(stateRootFor({ env, platform })),
   });
 
   // The flag wins over the config, and the config over the transport default.
@@ -474,6 +481,30 @@ function recordUnknownOutcome(runtime, error) {
  * @param {Function} [options.random] run-id entropy source, for tests.
  * @returns {Promise<number>} the process exit code.
  */
+/**
+ * Did this run plan rather than write?
+ *
+ * One predicate for both documents. The success path read the flag as well as
+ * the claim context; the failure path read only the context, so a `markers`
+ * command — which builds no context at all — reported `dryRun: false` when it
+ * failed under `--dry-run`, contradicting the same command's success document.
+ *
+ * The parsed command line is the last resort: a failure early enough to leave
+ * no runtime at all — a config that will not load — still knows the flag was
+ * given, because the grammar was read before anything else ran.
+ *
+ * @param {object|null} runtime the CLI runtime, which may not exist yet.
+ * @param {object|null} [parsed] the parsed command line, which may not either.
+ * @returns {boolean}
+ */
+function isDryRun(runtime, parsed = null) {
+  return (
+    runtime?.ctx?.options?.dryRun === true ||
+    runtime?.flags?.["dry-run"] === true ||
+    parsed?.flags?.["dry-run"] === true
+  );
+}
+
 export async function runCli(argv, options = {}) {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
@@ -493,12 +524,7 @@ export async function runCli(argv, options = {}) {
       status,
       exitCode,
       body: result.body ?? {},
-      // The flag as well as the claim context: `markers` and `config` build no
-      // context, so a `--dry-run` there reported `dryRun: false` while the
-      // command went on writing its `--out` file.
-      dryRun:
-        runtime.ctx?.options?.dryRun === true ||
-        runtime.flags?.["dry-run"] === true,
+      dryRun: isDryRun(runtime),
       repository: runtime.config?.repository ?? null,
       ref: result.ref ?? null,
       scope: result.scope ?? null,
@@ -512,7 +538,7 @@ export async function runCli(argv, options = {}) {
     const { document, exitCode } = buildFailure({
       command: parsed?.spec?.command ?? "cli",
       error,
-      dryRun: runtime?.ctx?.options?.dryRun === true,
+      dryRun: isDryRun(runtime, parsed),
       repository: runtime?.config?.repository ?? null,
       ref: runtime?.failureRef ?? null,
       scope: runtime?.failureScope ?? null,

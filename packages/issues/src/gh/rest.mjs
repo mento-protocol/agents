@@ -144,20 +144,33 @@ const MATCHING_REFS_PREFIX = "refs/".length;
 export const PAGINATED_JSON_FLAGS = Object.freeze(["--paginate", "--slurp"]);
 
 /**
- * Flatten a `--slurp` result into one list.
+ * Flatten a `--slurp` result into one list, refusing anything that is not one.
  *
- * One page arrives as `[[…]]` and several as `[[…], […]]`. A flat array of
- * entries is left as it is, because `flat` unwraps only the arrays it finds:
- * that is what keeps every injected offline fake working unchanged.
+ * One page arrives as `[[…]]` and several as `[[…], […]]`. **Every page must
+ * itself be an array.** GitHub answers an error with a JSON *object*, and
+ * `--slurp` wraps that object in a page array, so `[{"message":"Not Found"}]`
+ * flattened to a single object entry — which the ref listing then dropped for
+ * carrying no `ref`, turning a 404 into an empty listing and "no claims here".
+ * A non-array page and a non-array result are both refused.
  *
  * @param {unknown} value the parsed `gh` output.
- * @returns {unknown[]|null} the flattened entries, or `null` when the value is
- *   not a list at all.
+ * @param {string} label what was being listed, for the message.
+ * @returns {unknown[]} the flattened entries.
+ * @throws {GhCommandError} `GH_UNEXPECTED_RESPONSE` for every other shape.
  */
-export function flattenPaginatedJson(value) {
+export function flattenPaginatedJson(value, label) {
   if (value == null) return [];
-  if (!Array.isArray(value)) return null;
-  return value.flat();
+  const unexpected = (message) =>
+    new GhCommandError(message, { code: "GH_UNEXPECTED_RESPONSE" });
+  if (!Array.isArray(value)) throw unexpected(`unexpected non-array ${label}`);
+  const entries = [];
+  for (const page of value) {
+    if (!Array.isArray(page)) {
+      throw unexpected(`unexpected non-array page in the ${label}`);
+    }
+    entries.push(...page);
+  }
+  return entries;
 }
 
 /**
@@ -184,13 +197,10 @@ export async function listRefCommits(
     ],
     callOptions(options, false),
   );
-  const matches = flattenPaginatedJson(pages);
-  if (matches === null) {
-    throw new GhCommandError(
-      `unexpected non-array matching-refs listing for ${nameWithOwner}`,
-      { code: "GH_UNEXPECTED_RESPONSE" },
-    );
-  }
+  const matches = flattenPaginatedJson(
+    pages,
+    `matching-refs listing for ${nameWithOwner}`,
+  );
   return matches
     .filter((entry) => typeof entry?.ref === "string")
     .map((entry) => ({

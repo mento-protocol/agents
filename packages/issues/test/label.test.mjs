@@ -412,4 +412,25 @@ test("the issue-label listing reads every page, not the first one", async () => 
     PR,
   );
   assert.deepEqual(none, []);
+
+  // GitHub answers an error with a JSON *object*, which `--slurp` wraps in a
+  // page array. Flattening that produced one nameless entry and the filter
+  // dropped it, so a 404 read as "this pull request carries no labels" — and
+  // `addLabel` would then post a label that is already there.
+  await assert.rejects(
+    defaultLabelOperations().listIssueLabels(
+      {
+        options: {
+          ...ctx.options,
+          run: async () => '[{"message":"Not Found","status":"404"}]',
+        },
+      },
+      PR,
+    ),
+    (error) => {
+      assert.equal(error.code, "GH_UNEXPECTED_RESPONSE");
+      assert.match(error.message, /unexpected non-array page in the labels/u);
+      return true;
+    },
+  );
 });

@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -3307,6 +3307,82 @@ test("claims.author is validated where a typo can still be fixed", async () => {
     context.options,
   );
   assert.equal(accepted.exitCode, 0);
+});
+
+test("a command that fails under --dry-run still says it planned", async () => {
+  // Two documents, one predicate. The success path read the flag as well as
+  // the claim context; the failure path read only the context, so a `markers`
+  // command — which builds no context at all — reported `dryRun: false` when it
+  // failed under `--dry-run`, contradicting its own success document.
+  const context = harness();
+  const missing = join(context.directory, "no-such-job.json");
+  const failed = await context.run([
+    "markers",
+    "build",
+    "--input",
+    missing,
+    "--dry-run",
+  ]);
+  assert.equal(failed.exitCode, 2);
+  assert.equal(failed.document.status, "usage");
+  assert.equal(failed.document.dryRun, true, "the failure says it planned");
+
+  // And a failure early enough to leave no runtime at all — a config that
+  // cannot be loaded — still reports the flag it was given, because the
+  // grammar was parsed before anything else ran.
+  const refused = await invoke(
+    [
+      "claims",
+      "read",
+      "--pr",
+      String(PR),
+      "--config",
+      join(context.directory, "no-such-config.json"),
+      "--dry-run",
+    ],
+    context.options,
+  );
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.dryRun, true);
+});
+
+test("a relative --state is resolved before anything stores or prints it", async () => {
+  // `stateRootFor` kept a relative override, so `--state ./somewhere` meant a
+  // different directory for every process that ran from somewhere else: a
+  // printed follow-up reached another store and found neither the guard slot
+  // nor the state entry this run had written.
+  const context = harness();
+  const relative = `./${basename(context.directory)}-relative-state`;
+  const absolute = resolve(process.cwd(), relative);
+  try {
+    const claimed = await invoke(
+      [
+        "claims",
+        "claim",
+        "--pr",
+        String(PR),
+        "--config",
+        context.configPath,
+        "--state",
+        relative,
+      ],
+      { ...context.options, stateRoot: undefined },
+    );
+    assert.equal(claimed.exitCode, 0);
+    // The entry is written under the resolved root, and named by it.
+    assert.ok(
+      claimed.document.statePath.startsWith(absolute),
+      claimed.document.statePath,
+    );
+    assert.equal(existsSync(claimed.document.statePath), true);
+    // And every generated line carries the absolute root, never `./…`.
+    for (const line of Object.values(claimed.document.next)) {
+      assert.ok(line.includes(`--state ${absolute}`), line);
+      assert.equal(line.includes(`--state ${relative}`), false, line);
+    }
+  } finally {
+    rmSync(absolute, { recursive: true, force: true });
+  }
 });
 
 test("no takeover path exists: a paused guard keeps its slot and every other refuses", () => {

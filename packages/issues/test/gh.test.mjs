@@ -414,6 +414,19 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
     }),
     /unexpected non-array matching-refs listing/u,
   );
+  // GitHub answers an error with a JSON *object*, and `--slurp` wraps it in a
+  // page array. Flattening that gave one entry with no `ref`, which the filter
+  // below dropped — so a 404 read as "this namespace holds no claims".
+  await assert.rejects(
+    listRefCommits({ repo: "owner/name" }, "refs/mento-claims/v1/pr", {
+      json: async () => [{ message: "Not Found", status: "404" }],
+    }),
+    (error) => {
+      assert.equal(error.code, "GH_UNEXPECTED_RESPONSE");
+      assert.match(error.message, /unexpected non-array page in the/u);
+      return true;
+    },
+  );
 
   // The viewer login is read once per process.
   resetViewerLoginMemo();
