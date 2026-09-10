@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 
 import { isClaimNumber } from "../shared/claim-number.mjs";
+import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { assertValidRefName } from "../shared/ref-name.mjs";
 import { splitRepo } from "../shared/split-repo.mjs";
 
@@ -290,7 +291,16 @@ export const CLAIM_PROFILES = Object.freeze({
  * @throws {Error} for an unknown id.
  */
 export function claimProfile(id, overrides = {}) {
-  const factory = CLAIM_PROFILES[id];
-  if (!factory) throw new Error(`Unknown claim profile: ${id}`);
-  return factory(overrides);
+  // Own properties only, the rule every lookup table in this package follows.
+  // `claimProfile("constructor")` found `Object.prototype.constructor`, which
+  // is truthy and callable, so the guard passed and `new Object(overrides)`
+  // was returned as a claim profile: an object with no `refName`, no
+  // `canonicalScope` and no `metadataKeys`, failing later and somewhere else.
+  if (!Object.hasOwn(CLAIM_PROFILES, id)) {
+    const described = describeGrammarWord(id, Object.keys(CLAIM_PROFILES));
+    throw new Error(
+      `Unknown claim profile: ${described}${suggestion(id, Object.keys(CLAIM_PROFILES))}`,
+    );
+  }
+  return CLAIM_PROFILES[id](overrides);
 }

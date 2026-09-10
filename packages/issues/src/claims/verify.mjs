@@ -20,6 +20,7 @@ import {
   DEFAULT_MIN_REMAINING_MS,
   GUARD_DEADLINE_CHECK_INTERVAL_MS,
   GUARD_HEARTBEAT_KILL_GRACE_MS,
+  GUARD_TICK_SETTLE_MS,
 } from "./constants.mjs";
 import { guardRenewIntervalMs } from "./context.mjs";
 import {
@@ -1332,6 +1333,8 @@ export async function guardChild(ctx, claims, options = {}) {
   // at `MIN_GUARD_RENEW_INTERVAL_MS`, so a slow transport reached that state
   // with no peer involved at all.
   let tickInFlight = false;
+  /** The tick that is running, so the exit path can wait for it to settle. */
+  let inFlightTick = null;
 
   const renewTick = async () => {
     // A skipped tick still enforces the deadline. That check needs no network,
@@ -1342,10 +1345,13 @@ export async function guardChild(ctx, claims, options = {}) {
       return;
     }
     tickInFlight = true;
+    const running = renewEntries();
+    inFlightTick = running;
     try {
-      await renewEntries();
+      await running;
     } finally {
       tickInFlight = false;
+      if (inFlightTick === running) inFlightTick = null;
     }
   };
 
@@ -1475,6 +1481,35 @@ export async function guardChild(ctx, claims, options = {}) {
   const result = await exited;
   finished = true;
   cancelRenews();
+  // Cancelling the schedule stops the **next** tick; it does nothing to the
+  // one already parked inside a read or a compare-and-swap. That tick can
+  // still rotate the reference and call `onRenew` — and it used to do so after
+  // the final report had been written and the slot released, so the report
+  // named a token one rotation stale and the recorded state entry pointed at a
+  // token nothing had printed. The exit path waits for it to settle first.
+  //
+  // The wait is bounded, because the whole reason a tick is still in flight
+  // may be a transport that has stopped answering: the bound is that
+  // transport's own timeout, after which the call is over one way or another
+  // and guard must not be held open by it.
+  if (inFlightTick) {
+    const settleMs =
+      options.tickSettleMs ?? ctx.options?.timeoutMs ?? GUARD_TICK_SETTLE_MS;
+    // The bound is a real timer, not an unref'd one: while guard waits, this
+    // is the only thing holding the loop open once the child's handle is gone,
+    // and an unref'd bound let the loop drain with the wait still pending. It
+    // is cleared the moment the race settles, so nothing of it outlives the
+    // call either.
+    let boundTimer = null;
+    const bound = new Promise((resolve) => {
+      boundTimer = setTimeout(resolve, settleMs);
+    });
+    try {
+      await Promise.race([inFlightTick.catch(() => {}), bound]);
+    } finally {
+      if (boundTimer) clearTimeout(boundTimer);
+    }
+  }
   clearSignalForwarders();
   clearAbortListener();
   // The escalation is NOT cancelled by the child's own exit. `git` and `node`
@@ -1538,7 +1573,15 @@ export async function guardChild(ctx, claims, options = {}) {
   // Ctrl-C, an operator `kill` or a caller's abort stopped a publishing command
   // mid-flight, and answering 0 told the caller the work had finished. Exit 3
   // either way, which is what the pre-spawn abort path already answers.
-  if (advisory && killedBy === null) exitCode = 0;
+  //
+  // Nor may it cover a child that never ran. `spawn` can fail natively — an
+  // executable that is not there, a working directory that is not — and the
+  // outcome it forces then is not the child's at all: guard reported
+  // `status: "spawn-failed"` beside exit 0, so a caller reading the code alone
+  // was told a command had succeeded that had never started. The same rule the
+  // pre-spawn refusals follow: `--advisory` speaks for a verdict, never for a
+  // command that did not run.
+  if (advisory && killedBy === null && !result.spawnFailed) exitCode = 0;
 
   const report = draft({
     phase: "final",

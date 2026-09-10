@@ -9,7 +9,11 @@ import {
 } from "../src/claims/errors.mjs";
 import { planFamilyClaims } from "../src/claims/family.mjs";
 import { buildClaimPayload } from "../src/claims/payload.mjs";
-import { issueBoardProfile, prClaimProfile } from "../src/claims/profile.mjs";
+import {
+  claimProfile,
+  issueBoardProfile,
+  prClaimProfile,
+} from "../src/claims/profile.mjs";
 import { claimRefName } from "../src/claims/ref.mjs";
 import { normalizeGuardClaims } from "../src/claims/verify.mjs";
 import { acquireClaim, releaseClaim } from "../src/claims/transitions.mjs";
@@ -403,4 +407,23 @@ test("a claim number is a positive safe integer everywhere it is checked", () =>
     normalizeGuardClaims([{ number: 872, token: "a".repeat(40) }])[0].number,
     872,
   );
+});
+
+test("claimProfile reads its own table, never Object.prototype", () => {
+  // `CLAIM_PROFILES[id]` found `Object.prototype.constructor`, which is truthy
+  // and callable, so the guard passed and `new Object(overrides)` came back as
+  // a claim profile: no `refName`, no `canonicalScope`, no `metadataKeys`, and
+  // a failure somewhere else entirely.
+  for (const id of ["constructor", "toString", "__proto__", "valueOf"]) {
+    assert.throws(
+      () => claimProfile(id),
+      (error) => {
+        assert.match(error.message, /Unknown claim profile/u, id);
+        return true;
+      },
+      `${id} must not resolve to a profile`,
+    );
+  }
+  assert.equal(claimProfile("pr").id, "pr");
+  assert.equal(claimProfile("issue-board").id, "issue-board");
 });

@@ -33,6 +33,10 @@ import {
 } from "./errors.mjs";
 import { describeRedactedValue } from "../gh/redact.mjs";
 import {
+  SINGLE_LINE_TEXT_MAX_LENGTH,
+  isSafeSingleLineText,
+} from "../shared/text.mjs";
+import {
   buildClaimPayload,
   leaseState,
   payloadOwnerRunId,
@@ -113,6 +117,7 @@ function assertMetadataKeys(profile, values) {
  *   or a run-id prefix no valid run id can be built from.
  */
 export function assertTransitionInputs(ctx, input = {}) {
+  assertEnvelopeFields(input.metadata ?? {});
   assertMetadataKeys(ctx.profile, input.metadata ?? {});
   if (input.runIdPrefix != null) {
     // Exactly what an acquire does with it: the prefix leads the run id, so
@@ -854,10 +859,47 @@ export async function acquireClaim(ctx, number, metadata = {}, overrides = {}) {
   });
 }
 
+/** Metadata keys that belong to the envelope rather than to the profile. */
+const ENVELOPE_KEYS = Object.freeze(["agent", "claimId", "operation"]);
+
+/**
+ * Check the envelope fields a caller supplied beside the profile's metadata.
+ *
+ * `stripEnvelopeKeys` takes these three out of `assertMetadataKeys`, because
+ * they are not profile metadata — and nothing checked them at all in their
+ * place. `metadata.agent` is copied into the LOCK payload and into the commit
+ * message of every claim, so `acquireClaim(ctx, n, { agent: "ghp_…" })` wrote a
+ * credential to a reference that cannot be unwritten. They are held to the
+ * rule every other stored identifier follows: never a credential, and a single
+ * line of at most 120 characters.
+ *
+ * @param {object} metadata the caller's metadata bag.
+ * @returns {void}
+ * @throws {ClaimConfigError} for a credential or an unusable value.
+ */
+function assertEnvelopeFields(metadata) {
+  for (const key of ENVELOPE_KEYS) {
+    if (!Object.hasOwn(metadata ?? {}, key)) continue;
+    const value = metadata[key];
+    if (value == null) continue;
+    assertNotCredential(value, `Claim ${key}`);
+    if (!isSafeSingleLineText(value, SINGLE_LINE_TEXT_MAX_LENGTH)) {
+      const described = describeRedactedValue(value);
+      throw new ClaimConfigError(
+        `Claim ${key} must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters, got: ${described}`,
+        { details: { key, value: described } },
+      );
+    }
+  }
+}
+
 function stripEnvelopeKeys(profile, metadata) {
+  // Checked here rather than by each caller: the keys this function removes
+  // from the profile's check are exactly the ones it is responsible for.
+  assertEnvelopeFields(metadata);
   const values = {};
   for (const [key, value] of Object.entries(metadata ?? {})) {
-    if (key === "agent" || key === "claimId" || key === "operation") continue;
+    if (ENVELOPE_KEYS.includes(key)) continue;
     values[key] = value;
   }
   return values;

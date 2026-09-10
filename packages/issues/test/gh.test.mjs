@@ -17,6 +17,7 @@ import {
   GhEnvError,
   GhOutputLimitError,
   GhPermissionError,
+  GhRateLimitError,
   GhTimeoutError,
   GITHUB_CLI_HOST,
   addIssueLabels,
@@ -38,6 +39,7 @@ import {
   updateRefCompareAndSwap,
 } from "../src/gh/index.mjs";
 import { callOptions } from "../src/gh/rest.mjs";
+import { exitCodeForCliError, statusForError } from "../src/cli/exit-codes.mjs";
 import { readPullRequestState, readTokenScopes } from "../src/cli/github.mjs";
 import { splitRepo } from "../src/shared/split-repo.mjs";
 
@@ -1311,4 +1313,67 @@ test("a repository refusal describes the value it rejected", () => {
       },
     );
   }
+});
+
+test("a rate-limited 403 is a retryable transport failure, not a permission one", async () => {
+  // Primary and secondary rate limits are answered 403, exactly as a refused
+  // credential is, and they ask for the opposite response: the credential is
+  // fine and the caller is early. Classified as a permission failure the run
+  // stopped and fetched an operator (exit 21) for something that clears on its
+  // own.
+  const primary = await runGh(["api", "repos/owner/name/git/matching-refs/x"], {
+    env: { PATH: "/usr/bin" },
+    spawn: respondWith({
+      stderr:
+        "gh: API rate limit exceeded for user ID 4242. (HTTP 403)\n" +
+        "x-ratelimit-remaining: 0\n",
+      status: 1,
+    }),
+  }).then(
+    () => assert.fail("a rate limit must reject"),
+    (error) => error,
+  );
+  assert.ok(primary instanceof GhRateLimitError);
+  assert.ok(primary instanceof GhCommandError);
+  assert.equal(primary.code, "GH_RATE_LIMIT");
+  assert.equal(primary.httpStatus, 403);
+  assert.equal(primary.retryAfterSeconds, null, "this one sent no retry-after");
+  assert.equal(statusForError(primary), "transport");
+  assert.equal(exitCodeForCliError(primary), 20, "retry with backoff");
+
+  const secondary = await runGh(
+    ["api", "--method", "POST", "repos/owner/name/git/commits"],
+    {
+      mutates: true,
+      env: { PATH: "/usr/bin" },
+      spawn: respondWith({
+        stderr:
+          "gh: You have exceeded a secondary rate limit and have triggered an " +
+          "abuse detection mechanism. Please wait a few minutes before you try " +
+          "again. (HTTP 403)\n" +
+          "retry-after: 47\n",
+        status: 1,
+      }),
+    },
+  ).then(
+    () => assert.fail("a secondary rate limit must reject"),
+    (error) => error,
+  );
+  assert.ok(secondary instanceof GhRateLimitError);
+  assert.equal(secondary.retryAfterSeconds, 47, "GitHub's own retry-after");
+  assert.equal(exitCodeForCliError(secondary), 20);
+
+  // A 403 that says nothing about rate limiting is still a permission failure.
+  const refused = await runGh(["api", "repos/owner/name/git/matching-refs/x"], {
+    env: { PATH: "/usr/bin" },
+    spawn: respondWith({
+      stderr: "gh: Resource not accessible by integration (HTTP 403)\n",
+      status: 1,
+    }),
+  }).then(
+    () => assert.fail("a 403 must reject"),
+    (error) => error,
+  );
+  assert.ok(refused instanceof GhPermissionError);
+  assert.equal(exitCodeForCliError(refused), 21, "stop and report");
 });

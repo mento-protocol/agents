@@ -31,6 +31,7 @@ import {
   transportRefNameProblem,
 } from "../shared/ref-name.mjs";
 import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
+import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
 import { isExactSemanticVersion } from "../shared/exact-version.mjs";
 import {
   SINGLE_LINE_TEXT_MAX_LENGTH,
@@ -140,6 +141,72 @@ function configError(message, options = {}) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** How deep the credential walk descends before it stops. */
+const CONFIG_WALK_MAX_DEPTH = 12;
+
+/**
+ * Refuse a credential anywhere in the document this run will persist.
+ *
+ * Individual keys had individual rules, and the rules did not cover the whole
+ * surface: `claims.kind` is copied into `payload.kind` and into the commit
+ * message of every claim, `claims.author` into the commit identity, the label
+ * into the board — and any of them accepted a `ghp_…` because none of their
+ * grammars excludes one. A config value is written to references that cannot
+ * be unwritten and printed in every report built from them, so the rule is the
+ * whole document's rather than each key's, and it is applied once over the
+ * normalized shape.
+ *
+ * @param {unknown} value the normalized section.
+ * @param {string} path the key path, for the refusal.
+ * @param {number} [depth] the current depth.
+ * @returns {void}
+ * @throws {ClaimConfigError} when any string is a credential.
+ */
+function assertNoConfigCredential(value, path, depth = 0) {
+  if (depth > CONFIG_WALK_MAX_DEPTH) return;
+  if (typeof value === "string") {
+    if (!containsSecret(value)) return;
+    throw configError(
+      `${path} looks like a credential; config values are written into claim payloads, commit messages and reports, so none of them may be one`,
+      { details: { key: path, value: describeRedactedValue(value) } },
+    );
+  }
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries()) {
+      assertNoConfigCredential(entry, `${path}[${index}]`, depth + 1);
+    }
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    assertNoConfigCredential(entry, `${path}.${key}`, depth + 1);
+  }
+}
+
+/**
+ * A stable JSON rendering: object keys sorted, everything else as written.
+ *
+ * Two documents that say the same thing must compare equal however their keys
+ * are ordered. `JSON.stringify` preserves insertion order, so a policy whose
+ * `claims` and `coordination.claims` held identical settings in a different
+ * order was refused as contradictory.
+ *
+ * @param {unknown} value any JSON value.
+ * @returns {string} the canonical rendering.
+ */
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  }
+  if (isPlainObject(value)) {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 function assertPositiveInteger(claims, key) {
@@ -475,9 +542,14 @@ function normalizeClaimsBlock(rawClaims) {
     }
   }
   if (!MARKER_REVISIONS.includes(claims.markerRevision)) {
+    // A closed vocabulary, described rather than echoed, like every other one.
+    const described = describeGrammarWord(
+      claims.markerRevision,
+      MARKER_REVISIONS,
+    );
     throw configError(
-      `claims.markerRevision must be one of ${MARKER_REVISIONS.join(", ")}, got: ${JSON.stringify(claims.markerRevision ?? null)}`,
-      { details: { markerRevision: claims.markerRevision ?? null } },
+      `claims.markerRevision must be one of ${MARKER_REVISIONS.join(", ")}, got: ${described}${suggestion(claims.markerRevision, MARKER_REVISIONS)}`,
+      { details: { markerRevision: described } },
     );
   }
 
@@ -625,7 +697,7 @@ function readPolicyClaims(document) {
       { details: { schema: document.schema } },
     );
   }
-  if (top !== undefined && JSON.stringify(nested) !== JSON.stringify(top)) {
+  if (top !== undefined && canonicalJson(nested) !== canonicalJson(top)) {
     throw configError(
       "The policy carries both claims and coordination.claims and they differ",
       { details: { schema: document.schema } },
@@ -712,12 +784,19 @@ export function normalizeConfigDocument(document, options = {}) {
     markers.revision !== undefined &&
     !MARKER_REVISIONS.includes(markers.revision)
   ) {
+    const described = describeGrammarWord(markers.revision, MARKER_REVISIONS);
     throw configError(
-      `markers.revision must be one of ${MARKER_REVISIONS.join(", ")}, got: ${JSON.stringify(markers.revision)}`,
-      { details: { revision: markers.revision } },
+      `markers.revision must be one of ${MARKER_REVISIONS.join(", ")}, got: ${described}${suggestion(markers.revision, MARKER_REVISIONS)}`,
+      { details: { revision: described } },
     );
   }
   const summarySchema = readSummaryMarkerSchema(document);
+  // One pass over everything this document persists, after each section has
+  // been normalized and before any of it is handed to a profile.
+  assertNoConfigCredential(repository, "repository");
+  assertNoConfigCredential(claims, "claims");
+  assertNoConfigCredential(markers, "markers");
+  assertNoConfigCredential(summarySchema, "markers.summarySchema");
 
   return {
     schema,

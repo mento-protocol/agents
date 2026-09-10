@@ -113,6 +113,24 @@ export class GhPermissionError extends GhCommandError {
 }
 
 /**
+ * GitHub refused this call for **rate limiting**, primary or secondary.
+ *
+ * It answers 403 exactly as a permission refusal does and means the opposite
+ * thing: the credential is fine and the caller is early. Classified as a
+ * permission failure it stopped the run and fetched an operator (exit 21) for
+ * a condition that clears on its own. It is a retryable transport failure
+ * (exit 20), and `retryAfterSeconds` carries GitHub's own `retry-after` when
+ * the response sent one.
+ */
+export class GhRateLimitError extends GhCommandError {
+  constructor(message, details = {}) {
+    super(message, { code: "GH_RATE_LIMIT", ...details });
+    this.name = "GhRateLimitError";
+    this.retryAfterSeconds = details.retryAfterSeconds ?? null;
+  }
+}
+
+/**
  * Was this failure produced by terminating the child rather than by GitHub
  * answering? Such a call's server-side effect is unknown.
  *

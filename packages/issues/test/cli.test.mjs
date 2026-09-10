@@ -6799,3 +6799,93 @@ test("a rejected claims.profile is described, not echoed", async () => {
   assert.equal(suggested.exitCode, 3);
   assert.match(suggested.document.error.message, /did you mean pr\?/u);
 });
+
+test("a credential anywhere in the config is refused when it loads", async () => {
+  // Each key had its own rule and none of the rules excluded a token:
+  // `claims.kind` is copied into `payload.kind` and into the commit message of
+  // every claim, and `claims.author` into the commit identity. A config value
+  // is written to references that cannot be unwritten.
+  const TOKEN = `ghp_${"B".repeat(36)}`;
+  for (const [key, claims] of [
+    ["kind", { kind: TOKEN }],
+    ["label", { label: TOKEN }],
+    ["author.name", { author: { name: TOKEN, email: "c@example.com" } }],
+  ]) {
+    const context = harness({ claims });
+    const refused = await context.run(["claims", "read", "--pr", String(PR)]);
+    assert.equal(refused.exitCode, 3, `${key} must be refused`);
+    assert.equal(refused.document.status, "config");
+    assert.match(refused.document.error.message, /looks like a credential/u);
+    assert.equal(
+      JSON.stringify(refused.document).includes(TOKEN),
+      false,
+      `${key} must not be echoed`,
+    );
+  }
+
+  // The ordinary document still loads.
+  const plain = harness();
+  const read = await plain.run(["claims", "read", "--pr", String(PR)]);
+  assert.equal(read.exitCode, 0);
+});
+
+test("a rejected claims.markerRevision is described, not echoed", async () => {
+  const SENTINEL = "correct-horse-battery-staple";
+  const context = harness({ claims: { markerRevision: SENTINEL } });
+
+  const refused = await context.run(["claims", "read", "--pr", String(PR)]);
+
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.status, "config");
+  assert.match(
+    refused.document.error.message,
+    /markerRevision must be one of/u,
+  );
+  assert.equal(
+    JSON.stringify(refused.document).includes(SENTINEL),
+    false,
+    "the rejected revision reaches no message and no detail",
+  );
+
+  const typo = harness({ claims: { markerRevision: "v3" } });
+  const suggested = await typo.run(["claims", "read", "--pr", String(PR)]);
+  assert.equal(suggested.exitCode, 3);
+  assert.match(suggested.document.error.message, /did you mean v1\?/u);
+});
+
+test("a policy saying the same thing twice is not a contradiction", async () => {
+  // `claims` and `coordination.claims` were compared with `JSON.stringify`,
+  // which preserves insertion order: two blocks with identical settings in a
+  // different key order were refused as contradictory, and a document that
+  // says one thing cannot be made to say it in the right order by an operator
+  // who cannot see the comparison.
+  const directory = temporaryDirectory();
+  const nested = policyDocument();
+  const reordered = Object.fromEntries(
+    Object.entries(nested.coordination.claims).reverse(),
+  );
+  const agreeing = await invoke([
+    "config",
+    "validate",
+    "--config",
+    writeJson(directory, "reordered.json", {
+      ...nested,
+      claims: reordered,
+    }),
+  ]);
+  assert.equal(agreeing.exitCode, 0, "the same settings, written in reverse");
+  assert.equal(agreeing.document.valid, true);
+
+  // A block that really differs is still refused.
+  const contradictory = await invoke([
+    "config",
+    "validate",
+    "--config",
+    writeJson(directory, "differing.json", {
+      ...nested,
+      claims: { ...reordered, ttlMinutes: 29 },
+    }),
+  ]);
+  assert.equal(contradictory.exitCode, 3);
+  assert.match(contradictory.document.error.message, /and they differ/u);
+});

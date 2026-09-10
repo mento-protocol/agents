@@ -1120,6 +1120,11 @@ test("a renew tick parked on a dead transport does not outlive the lease it prov
     reportSink: stderr.write,
     stdio: [...LONG_LIVED_STDIO],
     killGraceMs: 50,
+    // The exit path waits for a tick that is still in flight, bounded by the
+    // transport's own timeout — which is what ends a hung call in production.
+    // This transport never answers at all, so the bound is what ends the wait,
+    // and this test names a short one rather than sitting out the default.
+    tickSettleMs: 20,
     overrides: server.withOperations({
       async readClaimRef(...args) {
         if (!hangReads) return server.operations.readClaimRef(...args);
@@ -1780,4 +1785,106 @@ test("a signal delivered while the spawn is in flight still reaches the child", 
     baseline,
     "the handler is removed when guard returns",
   );
+});
+
+test("a renew still in flight when the child exits is waited for, not abandoned", async () => {
+  // `cancelRenews()` clears the schedule, which stops the **next** tick and
+  // does nothing to the one already parked inside a compare-and-swap. That
+  // tick went on to rotate the reference and call `onRenew` after the final
+  // report had been written and the slot released: the report named a token
+  // one rotation stale, and `adopt --from-state` was pointed at a token
+  // nothing had printed.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  const recorded = [];
+
+  let releaseCas = () => {};
+  const casHeld = new Promise((resolve) => {
+    releaseCas = resolve;
+  });
+  let slow = false;
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    onRenew: (entry) => {
+      recorded.push(entry.token);
+      return [];
+    },
+    overrides: server.withOperations({
+      async compareAndSwapRef(...args) {
+        if (slow) await casHeld;
+        return server.operations.compareAndSwapRef(...args);
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  slow = true;
+  // Past `renewAfter`, so the tick really writes, and well before the deadline.
+  clock.advance(11 * MINUTE);
+  const ticked = scheduler.tick();
+  // The child exits while that compare-and-swap is still in flight.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  spawned.finish();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseCas();
+  await ticked;
+
+  const result = await guarded;
+  const rotated = server.commits.get(server.getRefOid(claimRefName(ctx, PR)));
+  assert.equal(
+    result.report.claims[0].token,
+    rotated.oid,
+    "the final report names the token the reference is actually at",
+  );
+  assert.notEqual(result.report.claims[0].token, lease.token);
+  assert.equal(result.report.renews.at(-1).token, rotated.oid);
+  assert.deepEqual(
+    recorded,
+    [rotated.oid],
+    "and the caller recorded the rotation before the report was built",
+  );
+});
+
+test("--advisory does not force exit 0 for a child that never started", async () => {
+  // The override covers what the child did. A native spawn failure is not
+  // that: nothing ran, and reporting `status: "spawn-failed"` beside exit 0
+  // told a caller reading the code alone that a command had succeeded which
+  // had never started.
+  const { ctx, lease } = await heldLease();
+  const stderr = sink();
+
+  const result = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "wait",
+    advisory: true,
+    argv: ["/nonexistent/mento-issues-no-such-command", "--version"],
+    scheduleRenews: () => () => {},
+    reportSink: stderr.write,
+    stdio: "ignore",
+  });
+
+  assert.equal(result.report.status, "spawn-failed");
+  assert.equal(result.exitCode, 2, "fix the command, not 0");
+  assert.equal(result.report.exitCode, 2, "and the report agrees with it");
+
+  // A child that really ran is still covered by the override.
+  const ran = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "wait",
+    advisory: true,
+    argv: exitingArgv(97),
+    scheduleRenews: () => () => {},
+    reportSink: sink().write,
+    stdio: "ignore",
+  });
+  assert.equal(ran.report.status, "child-failed");
+  assert.equal(ran.exitCode, 0);
 });

@@ -550,3 +550,46 @@ test("a credential in any owner field is refused by the library, not only by the
   assert.equal(server.calls.cas.length, casBefore, "no reference is written");
   assert.equal(server.getRefOid(refName), null, "and none was created");
 });
+
+test("an envelope field a caller supplies is checked before anything is written", async () => {
+  // `stripEnvelopeKeys` takes `agent`, `claimId` and `operation` out of the
+  // profile's metadata check because they are not profile metadata — and
+  // nothing checked them in their place. `metadata.agent` is copied into the
+  // LOCK payload and into the commit message of every claim, so a token
+  // supplied there was written to a reference that cannot be unwritten.
+  const TOKEN = `ghp_${"C".repeat(36)}`;
+  const { ctx, server } = createTestContext();
+  const refName = claimRefName(ctx, PR);
+  const commitsBefore = server.calls.commit.length;
+  const casBefore = server.calls.cas.length;
+
+  await assert.rejects(
+    () => acquireClaim(ctx, PR, { agent: TOKEN }),
+    (error) => {
+      assert.match(error.message, /looks like a credential/u);
+      assert.equal(
+        JSON.stringify({
+          message: error.message,
+          details: error.details,
+        }).includes(TOKEN),
+        false,
+        "and it is not echoed",
+      );
+      return true;
+    },
+  );
+  // A multiline agent is refused by the same check, for the same reason: it
+  // lands in a commit message.
+  await assert.rejects(
+    () => acquireClaim(ctx, PR, { agent: "dependabot-prep\nrm -rf /" }),
+    /single-line characters/u,
+  );
+
+  assert.equal(server.calls.commit.length, commitsBefore, "no commit is made");
+  assert.equal(server.calls.cas.length, casBefore, "no reference is written");
+  assert.equal(server.getRefOid(refName), null, "and none was created");
+
+  // An ordinary agent still claims.
+  const lease = await acquireClaim(ctx, PR, { agent: "dependabot-prep" });
+  assert.equal(lease.payload.agent, "dependabot-prep");
+});

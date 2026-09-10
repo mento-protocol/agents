@@ -13,6 +13,7 @@ export {
   GhError,
   GhOutputLimitError,
   GhPermissionError,
+  GhRateLimitError,
   GhTimeoutError,
   isUnknownOutcomeError,
 } from "./errors.mjs";

@@ -42,6 +42,7 @@ import {
   GhEnvError,
   GhOutputLimitError,
   GhPermissionError,
+  GhRateLimitError,
   GhTimeoutError,
 } from "./errors.mjs";
 import { pinnedGithubCliEnvironment } from "./env.mjs";
@@ -57,6 +58,55 @@ export const GH_KILL_GRACE_MS = 5_000;
 
 const HTTP_STATUS_PATTERN = /\bHTTP\s+(\d{3})\b/;
 const MISSING_SCOPE_PATTERN = /requires one of the following scopes/i;
+
+/**
+ * GitHub's own wording for a primary or secondary rate limit.
+ *
+ * Both are answered 403, which is why they have to be recognized by what the
+ * response says rather than by its status: "API rate limit exceeded for …" for
+ * the primary limit, and "You have exceeded a secondary rate limit" for the
+ * secondary one.
+ */
+const RATE_LIMIT_MESSAGE_PATTERN = /\b(?:secondary\s+)?rate limit\b/i;
+
+/** The header that says the primary budget is spent, when `gh` prints headers. */
+const RATE_LIMIT_REMAINING_PATTERN = /^\s*x-ratelimit-remaining:\s*0\s*$/im;
+
+/** GitHub's `retry-after`, in seconds, when the response carries one. */
+const RETRY_AFTER_PATTERN = /^\s*retry-after:\s*(\d{1,6})\s*$/im;
+
+/**
+ * How long GitHub asked the caller to wait, if it said.
+ *
+ * @param {string} stderr the captured, redacted stderr.
+ * @returns {number|null} seconds, or `null`.
+ */
+function parseRetryAfterSeconds(stderr) {
+  const match = RETRY_AFTER_PATTERN.exec(String(stderr ?? ""));
+  if (!match) return null;
+  const seconds = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(seconds) ? seconds : null;
+}
+
+/**
+ * Is this 403 a rate limit rather than a refusal of the credential?
+ *
+ * The two are indistinguishable by status, and they ask for opposite things:
+ * a refused credential stops the run and fetches an operator (exit 21), and a
+ * rate limit clears on its own (exit 20, retry with backoff).
+ *
+ * @param {string} stderr the captured, redacted stderr.
+ * @param {number|null} httpStatus the parsed status.
+ * @returns {boolean}
+ */
+function isRateLimited(stderr, httpStatus) {
+  if (httpStatus !== 403 && httpStatus !== 429) return false;
+  return (
+    RATE_LIMIT_MESSAGE_PATTERN.test(stderr) ||
+    RATE_LIMIT_REMAINING_PATTERN.test(stderr) ||
+    RETRY_AFTER_PATTERN.test(stderr)
+  );
+}
 
 /**
  * Shell-safe rendering of one argv entry, for messages and logs only. Nothing
@@ -508,6 +558,17 @@ export function runGh(
           httpStatus,
           hint,
         };
+        // Rate limiting is checked first, because it answers 403 exactly as a
+        // refused credential does and asks for the opposite response.
+        if (isRateLimited(safe, httpStatus)) {
+          settleReject(
+            new GhRateLimitError(message, {
+              ...details,
+              retryAfterSeconds: parseRetryAfterSeconds(safe),
+            }),
+          );
+          return;
+        }
         settleReject(
           isPermissionFailure(safe, httpStatus)
             ? new GhPermissionError(message, details)

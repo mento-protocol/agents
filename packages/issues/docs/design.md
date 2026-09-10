@@ -734,7 +734,10 @@ its statement.
    enforce, never a guard that was terminated: an abort or a forwarded signal
    stays exit 3 with `--advisory` exactly as without it, because a publishing
    command stopped mid-flight did not finish, and the pre-spawn abort already
-   answers 3.
+   answers 3. Nor does it cover a child that never **started**: `spawn` can
+   fail natively — an executable that is not there — and `status:
+"spawn-failed"` beside exit 0 told a caller reading the code alone that a
+   command had succeeded which had never run. That stays exit 2.
 
 Every renew refreshes the **report**, not only the token: `remainingMs`, the
 expiry and `renewCount` on a claim line come from the last renewal, so the
@@ -743,6 +746,17 @@ caller that records the rotation — the CLI writes it to the state file —
 returns its warnings from `onRenew`, which puts them on the report: a renewal
 the host could not record is exactly what the next `adopt --from-state` needs
 to know about.
+
+A tick that is still **in flight** when the child exits is waited for before
+the report is built. Cancelling the schedule stops the next tick and does
+nothing to the one parked inside a compare-and-swap, so that tick rotated the
+reference and called `onRenew` after the report had been written and the slot
+released: the report named a token one rotation stale, and the recorded state
+entry pointed at a token nothing had printed. The wait is **bounded**, because
+the reason a tick is still running may be a transport that has stopped
+answering — the bound is that transport's own timeout (`ctx.options.timeoutMs`,
+or `GUARD_TICK_SETTLE_MS`), after which the call is over one way or the other
+and guard must not be held open by it.
 
 Guard's report also carries the warnings its **runtime** collected, because
 guard's documents are its own and bypass `runCli`'s warning merge: a config
@@ -1092,13 +1106,36 @@ and its refusal is printed, logged and pasted onward exactly like the CLI's. A
 `requiredBefore` or `advisoryBefore` entry that names no fence purpose goes
 through `describeGrammarWord` against the purposes and their aliases, so a real
 purpose is echoed and a passphrase is described, with the same `did you mean`
-that makes a typo actionable.
+that makes a typo actionable. `claims.profile` and both marker revisions follow
+the same rule.
+
+A key-by-key rule was not enough for the credential half, though, because a
+config value is **persisted**: `claims.kind` is copied into `payload.kind` and
+into the commit message of every claim, `claims.author` into the commit
+identity, the label onto the board — and none of their grammars excludes a
+`ghp_…`. So the whole normalized document is walked once, and any string the
+detector recognizes is refused at load, exit 3, described rather than echoed.
+It is the same argument as `resolveOwner`'s: what is written to a reference
+cannot be unwritten, so the check belongs where the value enters rather than to
+whichever key happens to carry it.
+
+The **envelope** fields a transition is called with are checked the same way.
+`stripEnvelopeKeys` takes `agent`, `claimId` and `operation` out of the
+profile's metadata check because they are not profile metadata, and nothing
+checked them in their place: `acquireClaim(ctx, n, { agent: "ghp_…" })` wrote a
+credential into the LOCK payload and into the commit message. They are held to
+the rule every stored identifier follows — never a credential, and a single
+line of at most 120 characters — before any transition writes.
 
 Every one of those tables is read with `Object.hasOwn`, never with a bare index
 or `in`. A flag named after an `Object.prototype` member — `--constructor`,
 `--toString` — found an inherited function and was accepted as a declared flag
 whose `type` was `undefined`; the same hazard is closed in the fence-purpose
-aliases and in the claim-code-to-exit-code and claim-code-to-status tables,
+aliases, in the profile table — `claimProfile("constructor")` found
+`Object.prototype.constructor`, which is truthy and callable, so the guard
+passed and `new Object(overrides)` came back as a claim profile with no
+`refName` and no `canonicalScope` — and in the claim-code-to-exit-code and
+claim-code-to-status tables,
 where an error carrying such a `claimCode` would have produced a function where
 an exit code or a status slug belongs.
 
@@ -1147,6 +1184,18 @@ finished string can eat the closing quote of the value it rewrites.
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,
 `GhAbortError` and `GhOutputLimitError` all carry `outcomeUnknown: true`.
+
+**Rate limiting is not a permission refusal**, though GitHub answers both with 403. A refused credential stops the run and fetches an operator (exit 21); a
+rate limit clears on its own and asks for a retry with backoff (exit 20), so
+reading the first as the second sent an agent to a human for something that
+would have passed on the next attempt. The two are told apart by what the
+response says rather than by its status: GitHub's own wording — "API rate limit
+exceeded", "You have exceeded a secondary rate limit" — plus
+`x-ratelimit-remaining: 0` and `retry-after` when `gh` prints headers.
+`GhRateLimitError` carries `code: "GH_RATE_LIMIT"` and surfaces GitHub's
+`retryAfterSeconds` when the response sent one. It is deliberately **not** a
+definitive write failure: a rate-limited compare-and-swap still reconciles, so
+the reference decides what landed.
 
 The five reference calls are monitoring's, byte-for-byte:
 
@@ -1378,7 +1427,16 @@ Every failure exits 3 **before any network call**:
   `coordination.lockPath`, or `coordination.allWriters ===
 "same-atomic-lock-before-writes"`, without a claims block is rejected as
   `CLAIM_CONFIG_RETIRED_COORDINATION`.
+- A policy that carries **both** `claims` and `coordination.claims` must say the
+  same thing in both, and "the same thing" is decided structurally: the two are
+  rendered with their object keys sorted before they are compared.
+  `JSON.stringify` preserves insertion order, so two blocks holding identical
+  settings in a different order were refused as contradictory — a refusal an
+  operator could not act on, because the document did not disagree with itself.
 - Unknown keys inside `claims` are rejected.
+- No string anywhere in the document may be a credential; see the redaction
+  section. It is checked over the whole normalized shape rather than key by
+  key, because a config value is written into payloads and commit messages.
 - `scopeTemplate` starts with `refs/`, contains `{pr}` exactly once, renders
   through `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
   not the whole rule: the rendered name and the namespace are each checked

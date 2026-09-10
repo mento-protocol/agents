@@ -138,6 +138,14 @@ included, so `projectClaimLabel`, `ensureClaimLabel` and an applying
 `reconcileClaimLabel` refuse to write from GitHub Actions or from an
 unapproved cloud session, exactly as the commands that wrap them do.
 
+The same rule covers what a **config** persists and what a transition is
+**called** with. Every string in the loaded document is checked, because
+`claims.kind` reaches `payload.kind` and the commit message of every claim, and
+`claims.author` the commit identity: a credential anywhere in it is exit 3 at
+load. And `agent`, `claimId` and `operation` supplied in a transition's
+metadata are checked before it writes, because they are copied into the LOCK
+payload.
+
 **`label reconcile` writes only with `--apply`.** Without it the command
 compares the label against the ref and reports the difference, so it is a read:
 it runs under `GITHUB_ACTIONS`, in a cloud session without `allowCloudWriters`,
@@ -283,7 +291,9 @@ after the child exits; `--report <path>` also writes the final one to a file.
 It forwards the child's exit code unchanged, unless `--advisory` is set, which
 forces exit 0 (and is refused on a mandatory gate). `--advisory` covers the
 child's outcome, never a guard that was terminated: an abort or a forwarded
-`SIGINT`/`SIGTERM`/`SIGHUP` is exit 3 with it exactly as without it. For the `git` and `gh`
+`SIGINT`/`SIGTERM`/`SIGHUP` is exit 3 with it exactly as without it, and a
+child that never started — a `spawn` that failed natively — stays exit 2
+`spawn-failed` rather than being reported as a success. For the `git` and `gh`
 commands this package is designed to guard, exit codes 10–16 are never the
 child's, so a guard exit in that range is guard's own verdict; guard will run
 any argv, though, so for an arbitrary command read `status` and `killedBy` from
@@ -454,6 +464,12 @@ write was an acquire, a renew, a release or the first create of a reference,
 and whether or not the reconciling read that follows can answer at all. A
 refused **renew** matters most: read as `superseded`, it told a guard its claim
 was gone, so the guard killed the child and called the work in flight forfeit.
+
+**Rate limiting is not a refusal.** GitHub answers a primary or secondary rate
+limit with 403, exactly as it answers a credential it will not accept, and the
+two ask for opposite things. A rate limit is `transport` at exit 20 — retry
+with backoff — and carries GitHub's own `retry-after` when the response sent
+one; only a real credential or session problem is exit 21.
 
 A family aborts with `family-aborted` at exit 10 — skip the family this run —
 except when the rollback left a LOCK behind: that is `stale` at exit 16, the
