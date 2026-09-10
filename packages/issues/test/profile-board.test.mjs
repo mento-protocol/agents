@@ -7,9 +7,11 @@ import {
   ClaimFamilyAbortedError,
   isRecoverableClaimRaceError,
 } from "../src/claims/errors.mjs";
+import { planFamilyClaims } from "../src/claims/family.mjs";
 import { buildClaimPayload } from "../src/claims/payload.mjs";
-import { issueBoardProfile } from "../src/claims/profile.mjs";
+import { issueBoardProfile, prClaimProfile } from "../src/claims/profile.mjs";
 import { claimRefName } from "../src/claims/ref.mjs";
+import { normalizeGuardClaims } from "../src/claims/verify.mjs";
 import { acquireClaim, releaseClaim } from "../src/claims/transitions.mjs";
 import {
   buildTestLock,
@@ -305,4 +307,100 @@ test("a refused acquire writes nothing: the profile's payload rules run before t
   const lease = await acquireClaim(ctx, ISSUE, { operation: "prepare" });
   assert.equal(typeof lease.token, "string");
   assert.notEqual(server.getRefOid(refName), null);
+});
+
+test("a ref template and its namespace are one setting, and the factory holds them together", () => {
+  // `refTemplate: "refs/custom/{pr}/claim"` beside the default namespace
+  // acquired under one prefix while `listClaims`, `list --stale` and every
+  // sweep read another: a mutex whose own inventory cannot see the claims it
+  // holds. The config loader always required the template's prefix to be the
+  // namespace; the factory is exported, so it requires the same thing.
+  assert.throws(
+    () =>
+      prClaimProfile({
+        namespace: "refs/mento-claims/v1/pr",
+        refTemplate: "refs/custom/{pr}/claim",
+      }),
+    /must render under the namespace/u,
+  );
+  assert.throws(
+    () =>
+      prClaimProfile({
+        namespace: "refs/mento-claims/v1/pr",
+        refTemplate: "refs/other/v1/pr/{pr}",
+      }),
+    /must render under the namespace/u,
+  );
+
+  // Given only a template, the namespace is derived from it rather than paired
+  // with a default it does not match. A suffix after `{pr}` is fine: the
+  // rendered ref still sits under the derived namespace, which is what the
+  // listing reads.
+  const suffixed = prClaimProfile({ refTemplate: "refs/custom/{pr}/claim" });
+  assert.equal(suffixed.namespace, "refs/custom");
+  assert.equal(suffixed.refName({ pr: 872 }), "refs/custom/872/claim");
+
+  const derived = prClaimProfile({ refTemplate: "refs/custom/v2/{pr}" });
+  assert.equal(derived.namespace, "refs/custom/v2");
+  assert.equal(derived.refName({ pr: 872 }), "refs/custom/v2/872");
+
+  // Given only a namespace, the template is built from it, as before.
+  const fromNamespace = prClaimProfile({ namespace: "refs/custom/v3" });
+  assert.equal(fromNamespace.refTemplate, "refs/custom/v3/{pr}");
+  assert.equal(fromNamespace.refName({ pr: 872 }), "refs/custom/v3/872");
+
+  // And a matching pair is still accepted.
+  const paired = prClaimProfile({
+    namespace: "refs/custom/v4",
+    refTemplate: "refs/custom/v4/{pr}",
+  });
+  assert.equal(paired.namespace, "refs/custom/v4");
+  assert.equal(paired.refName({ pr: 1 }), "refs/custom/v4/1");
+});
+
+test("a claim number is a positive safe integer everywhere it is checked", () => {
+  // `Number.isInteger(9007199254740993)` is true and the value is already
+  // `…992`: the number a caller named and the number spliced into the
+  // reference are different, so the claim is taken on a reference nobody asked
+  // for. One predicate, at every boundary that renders a number.
+  const UNSAFE = 9007199254740993;
+  assert.equal(String(UNSAFE), "9007199254740992", "the premise of the bug");
+
+  const pr = prClaimProfile();
+  assert.throws(
+    () => pr.canonicalScope({ repo: "owner/name" }, UNSAFE),
+    /positive safe integer/u,
+  );
+  assert.equal(pr.canonicalScope({ repo: "owner/name" }, 872).pr, 872);
+
+  const board = issueBoardProfile();
+  const options = {
+    repo: "owner/name",
+    projectOwner: "mento-protocol",
+    projectNumber: 12,
+  };
+  assert.throws(
+    () => board.canonicalScope(options, UNSAFE),
+    /positive safe integer/u,
+  );
+  assert.throws(
+    () => board.canonicalScope({ ...options, projectNumber: UNSAFE }, 2255),
+    /positive safe integer/u,
+  );
+  assert.equal(board.canonicalScope(options, 2255).issue, 2255);
+
+  assert.throws(
+    () => planFamilyClaims([872, UNSAFE]),
+    /positive safe integer/u,
+  );
+  assert.deepEqual(planFamilyClaims([880, 872]), [872, 880]);
+
+  assert.throws(
+    () => normalizeGuardClaims([{ number: UNSAFE, token: "a".repeat(40) }]),
+    /positive safe integer/u,
+  );
+  assert.equal(
+    normalizeGuardClaims([{ number: 872, token: "a".repeat(40) }])[0].number,
+    872,
+  );
 });

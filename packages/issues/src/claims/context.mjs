@@ -15,7 +15,7 @@ import {
   isSafeSingleLineText,
   SINGLE_LINE_TEXT_MAX_LENGTH,
 } from "../shared/text.mjs";
-import { describeRedactedValue } from "../gh/redact.mjs";
+import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
 import {
   DEFAULT_LEASE,
   DEFAULT_MIN_REMAINING_MS,
@@ -154,6 +154,39 @@ export function generateRunId({
 }
 
 /**
+ * Refuse an identifier that is a credential.
+ *
+ * The claim-id grammar accepts `ghp_…` and `github_pat_…`, and the host, the
+ * login, the agent and the run-id prefix have no grammar narrow enough to
+ * reject one either. Every one of them is recorded in the payload, printed in
+ * reports, and — through the generated run id — written into a Git commit. So
+ * a value the detector recognizes is refused where it enters, and the refusal
+ * names the source rather than the value.
+ *
+ * It lives here rather than in the CLI because `createClaimContext` and
+ * `resolveOwner` are exported: a library caller reaches them without passing
+ * through `resolveCliIdentity`, and the protection has to be on the boundary
+ * every caller crosses.
+ *
+ * @param {unknown} value the supplied identifier.
+ * @param {string} source the field, flag or variable it came from.
+ * @param {typeof ClaimConfigError} [ErrorClass] which refusal to raise.
+ * @returns {void}
+ * @throws {ClaimConfigError} when the value is a credential.
+ */
+export function assertNotCredential(
+  value,
+  source,
+  ErrorClass = ClaimConfigError,
+) {
+  if (!containsSecret(value)) return;
+  throw new ErrorClass(
+    `${source} looks like a credential; it is recorded in the claim payload and printed in reports, so it must never be one`,
+    { details: { source, value: describeRedactedValue(value) } },
+  );
+}
+
+/**
  * Resolve and validate the owner identity.
  *
  * `ownerLogin` is recorded and never compared: every ownership decision reads
@@ -179,6 +212,15 @@ export function resolveOwner(partial = {}, options = {}) {
 
   const host =
     partial.host ?? env.MENTO_CLAIM_HOST ?? shortHostLabel(hostname());
+  // The credential rule belongs **here**, not to the CLI that used to hold it.
+  // Every field below is recorded in the payload every later reader trusts,
+  // printed in reports, and — for the host — spliced into the generated run id
+  // and written into a Git commit that cannot be unwritten. `resolveCliIdentity`
+  // applied the rule, so a command line was safe; `createClaimContext` is
+  // exported, so a library caller reached `resolveOwner` directly and a host
+  // holding a `ghp_…` was persisted. The refusal names the source, never the
+  // value.
+  assertNotCredential(host, "The claim host");
   if (!isSafeSingleLineText(host, SINGLE_LINE_TEXT_MAX_LENGTH)) {
     // A **shape** refusal describes its value too. The vocabulary refusals
     // below always did; these did not, and they are the ones that catch a
@@ -194,6 +236,7 @@ export function resolveOwner(partial = {}, options = {}) {
   const runtime =
     partial.runtime ?? env.MENTO_CLAIM_RUNTIME ?? detectRuntime(env);
   if (runtime != null) {
+    assertNotCredential(runtime, "The claim runtime");
     if (!isSafeSingleLineText(runtime, SINGLE_LINE_TEXT_MAX_LENGTH)) {
       throw new ClaimConfigError(
         `Claim runtime must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters, got: ${describeRedactedValue(runtime)}`,
@@ -219,6 +262,7 @@ export function resolveOwner(partial = {}, options = {}) {
   }
 
   const login = partial.login ?? env.MENTO_CLAIM_LOGIN ?? null;
+  if (login != null) assertNotCredential(login, "The claim login");
   if (login != null && !isGithubLogin(login)) {
     // Described, never echoed. A login is not a closed vocabulary, so there is
     // no word to print back, and a value that failed the grammar has nothing
@@ -232,6 +276,7 @@ export function resolveOwner(partial = {}, options = {}) {
   }
 
   const agent = partial.agent ?? null;
+  if (agent != null) assertNotCredential(agent, "The claim agent");
   if (
     agent != null &&
     !isSafeSingleLineText(agent, SINGLE_LINE_TEXT_MAX_LENGTH)
@@ -243,7 +288,20 @@ export function resolveOwner(partial = {}, options = {}) {
   }
 
   const runId = partial.runId ?? null;
+  // The claim-id grammar accepts `ghp_…`, so a token pasted here is a
+  // perfectly valid run id — checked before the grammar, because the grammar
+  // is exactly what fails to catch it.
+  if (runId != null) assertNotCredential(runId, "The claim run id");
   if (runId != null) validateClaimId(runId);
+
+  const runIdPrefix = partial.runIdPrefix ?? null;
+  // The prefix leads the generated run id, so it is stored in every payload
+  // just as surely as the host is.
+  if (runIdPrefix != null) {
+    assertNotCredential(runIdPrefix, "The claim run-id prefix");
+  }
+  const hostShort = partial.hostShort ?? host;
+  if (hostShort !== host) assertNotCredential(hostShort, "The claim host");
 
   return {
     runId,
@@ -251,11 +309,11 @@ export function resolveOwner(partial = {}, options = {}) {
     host,
     // And the same host as a run id can carry it. A supplied `hostShort` goes
     // through the same encoder, because it lands in the same place.
-    hostShort: runIdHostLabel(partial.hostShort ?? host),
+    hostShort: runIdHostLabel(hostShort),
     runtime,
     login,
     agent,
-    runIdPrefix: partial.runIdPrefix ?? null,
+    runIdPrefix,
   };
 }
 

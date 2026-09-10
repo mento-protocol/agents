@@ -20,6 +20,7 @@
  * is `guard` with repeated `--pr`/`--token` pairs.
  */
 
+import { isClaimNumber } from "../shared/claim-number.mjs";
 import { ClaimFamilyAbortedError, isTransportFailure } from "./errors.mjs";
 import { acquireClaim, releaseClaim } from "./transitions.mjs";
 import { ClaimUsageError } from "./verify.mjs";
@@ -39,9 +40,9 @@ export function planFamilyClaims(numbers) {
   }
   const seen = new Set();
   for (const number of numbers) {
-    if (!Number.isInteger(number) || number <= 0) {
+    if (!isClaimNumber(number)) {
       throw new ClaimUsageError(
-        `A family member must be a positive integer, got ${JSON.stringify(number ?? null)}`,
+        `A family member must be a positive safe integer, got ${JSON.stringify(number ?? null)}`,
         { details: { numbers: [...numbers] } },
       );
     }

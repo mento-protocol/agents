@@ -12,6 +12,7 @@
 import {
   assertMutationAllowed,
   assertNoLiveDuplicateRunId,
+  assertNotCredential,
   generateRunId,
 } from "./context.mjs";
 import {
@@ -492,10 +493,15 @@ function prepareAcquireOwner(ctx, number, overrides = {}) {
       { details: { runtime: null } },
     );
   }
+  // `resolveOwner` checks the prefix a context carries; this one arrives with
+  // the call, so it is checked with the call. It leads the generated run id,
+  // which is recorded in the payload and written into a Git commit.
+  const prefix = overrides.runIdPrefix ?? ctx.owner.runIdPrefix;
+  if (prefix != null) assertNotCredential(prefix, "The claim run-id prefix");
   const runId = generateRunId({
     runtime: ctx.owner.runtime,
     host: ctx.owner.hostShort,
-    prefix: overrides.runIdPrefix ?? ctx.owner.runIdPrefix,
+    prefix,
     clock: ctx.clock,
     random: ctx.random,
   });

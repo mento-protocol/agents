@@ -499,3 +499,54 @@ test("listClaims discovers through an injected lister when the context carries n
     [[PR, "LOCK"]],
   );
 });
+
+test("a credential in any owner field is refused by the library, not only by the CLI", async () => {
+  // `resolveCliIdentity` applied the rule, so a command line was safe.
+  // `createClaimContext` and `acquireClaim` are exported, so a library caller
+  // reached `resolveOwner` directly: a host holding a token was persisted as
+  // `ownerHost`, spliced into the generated `ownerRunId`, and written into a
+  // Git commit that cannot be unwritten. The rule belongs to the boundary
+  // every caller crosses.
+  const TOKEN = `ghp_${"A".repeat(36)}`;
+  const { ctx, server } = createTestContext();
+  const refName = claimRefName(ctx, PR);
+  const commitsBefore = server.calls.commit.length;
+  const casBefore = server.calls.cas.length;
+
+  for (const [field, owner] of [
+    ["host", { host: TOKEN }],
+    ["hostShort", { hostShort: TOKEN }],
+    ["runtime", { runtime: TOKEN }],
+    ["login", { login: TOKEN }],
+    ["agent", { agent: TOKEN }],
+    ["runIdPrefix", { runIdPrefix: TOKEN }],
+    ["runId", { runId: TOKEN }],
+  ]) {
+    assert.throws(
+      () => createTestContext({ server, owner }),
+      (error) => {
+        assert.match(error.message, /looks like a credential/u, field);
+        assert.equal(
+          JSON.stringify({
+            message: error.message,
+            details: error.details,
+          }).includes(TOKEN),
+          false,
+          `${field} must not be echoed`,
+        );
+        return true;
+      },
+      `${field} must be refused`,
+    );
+  }
+
+  // And the prefix that arrives with the call rather than with the context.
+  await assert.rejects(
+    () => acquireClaim(ctx, PR, {}, { runIdPrefix: TOKEN }),
+    /looks like a credential/u,
+  );
+
+  assert.equal(server.calls.commit.length, commitsBefore, "no commit is made");
+  assert.equal(server.calls.cas.length, casBefore, "no reference is written");
+  assert.equal(server.getRefOid(refName), null, "and none was created");
+});

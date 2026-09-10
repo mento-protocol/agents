@@ -434,3 +434,71 @@ test("the issue-label listing reads every page, not the first one", async () => 
     },
   );
 });
+
+test("no label entry point writes from an environment this package refuses", async () => {
+  // The environment rules are enforced by `assertMutationAllowed` against the
+  // built context, and the CLI applied them to its mutating commands. These
+  // three are exported, so a library caller moved the board's labels straight
+  // out of GitHub Actions — the one environment this package never writes
+  // from.
+  const { ctx, server } = createTestContext({
+    label: LABEL,
+    env: { GITHUB_ACTIONS: "true" },
+  });
+  const api = createLabelApi(server);
+  ctx.labelOperations = api.operations;
+
+  await assert.rejects(
+    () => projectClaimLabel(ctx, PR, { present: true }, api.operations),
+    /never written from GitHub Actions/u,
+  );
+  await assert.rejects(
+    () => ensureClaimLabel(ctx, {}, api.operations),
+    /never written from GitHub Actions/u,
+  );
+  await assert.rejects(
+    () => reconcileClaimLabel(ctx, PR, { apply: true }, api.operations),
+    /never written from GitHub Actions/u,
+  );
+  assert.deepEqual(api.calls, [], "not one label call was made");
+
+  // The read-only reconcile is a read, and reads work in every environment.
+  seedRef(server, claimRefName(ctx, PR), buildTestLock(ctx, PR));
+  const reported = await reconcileClaimLabel(ctx, PR, {}, api.operations);
+  assert.equal(reported.status, "drifted");
+  assert.equal(reported.desired, true);
+  assert.equal(reported.actual, false);
+  assert.equal(reported.changed, false);
+  assert.ok(
+    api.calls.every((entry) => entry.operation === "listIssueLabels"),
+    "and it made only the listing it reports from",
+  );
+
+  // A cloud session is the same rule, and `allowCloudWriters` is what lifts it.
+  const refused = createTestContext({
+    label: LABEL,
+    env: { CLAUDE_CODE_REMOTE: "true" },
+  });
+  await assert.rejects(
+    () =>
+      projectClaimLabel(
+        refused.ctx,
+        PR,
+        { present: true },
+        createLabelApi(refused.server).operations,
+      ),
+    /may not write claims unless the config sets allowCloudWriters/u,
+  );
+  const allowed = createTestContext({
+    label: LABEL,
+    env: { CLAUDE_CODE_REMOTE: "true" },
+    allowCloudWriters: true,
+  });
+  const projected = await projectClaimLabel(
+    allowed.ctx,
+    PR,
+    { present: true },
+    createLabelApi(allowed.server).operations,
+  );
+  assert.equal(projected.status, "added");
+});

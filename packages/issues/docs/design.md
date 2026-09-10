@@ -218,12 +218,35 @@ Validation happens once, fail-closed:
 - `host`, `runtime`, `agent` — monitoring's `isSafeSingleLineText(value, 120)`.
 - `login` — `^(?=.{1,39}$)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$`.
 - `runtime ∈ {openclaw, codex, claude-code}` unless explicitly allowed.
+- **No stored owner field is ever a credential.** `host`, `hostShort`,
+  `runtime`, `login`, `agent`, `runIdPrefix` and a supplied `runId` all go
+  through `containsSecret` where they are resolved, and the refusal names the
+  source rather than the value.
 - `GITHUB_ACTIONS === "true"` refuses every mutating operation; reads work.
 - `CLAUDE_CODE_REMOTE === "true"` refuses every mutating operation unless the
   loaded config sets `allowCloudWriters: true`.
 
+Every one of those rules lives in **`resolveOwner`**, not in the CLI that used
+to hold some of them. `createClaimContext`, `resolveOwner` and every transition
+are exported, so a library caller reaches them without passing through
+`resolveCliIdentity`: a host holding a `ghp_…` was persisted as `ownerHost`,
+spliced into the generated `ownerRunId`, and written into a Git commit that
+cannot be unwritten. The CLI keeps a wrapper of its own, because a flag it
+supplied is a usage refusal (exit 2) where an identity field is configuration
+(exit 3), but the rule is the claims layer's. A `runIdPrefix` an acquire is
+**called** with rather than configured with is checked at that call for the
+same reason: it leads the generated run id.
+
 `ownerLogin` is recorded and never compared. Every ownership decision reads
 `ownerRunId`.
+
+The same reasoning covers the **label** calls. The environment refusals were
+enforced by the CLI against each mutating command, and `projectClaimLabel`,
+`ensureClaimLabel` and an applying `reconcileClaimLabel` are exported: a
+library caller moved the board's labels straight out of GitHub Actions. Each of
+them calls `assertMutationAllowed` before it writes. The read-only
+`reconcileClaimLabel` is exempt, as every read is — it compares and reports,
+which is what makes it usable from a workflow that may not write.
 
 ## Payload schema
 
@@ -1358,7 +1381,21 @@ Every failure exits 3 **before any network call**:
   malformed namespace. Without this a policy naming `refs/x#y` passed
   `config validate` and then failed on every read, which is the one outcome a
   validator exists to prevent. Both grammars live in `shared/ref-name.mjs`, so
-  the loader and the transport cannot drift apart.
+  the loader and the transport cannot drift apart. `prClaimProfile` enforces
+  the namespace-is-the-prefix half itself, because the factory is exported: a
+  library-supplied `refTemplate` beside the default `namespace` acquired under
+  one prefix while `listClaims` and every sweep read another — a mutex whose
+  own inventory could not see the claims it held. Given only a template, the
+  namespace is derived from it rather than paired with a default it does not
+  match.
+- A claim number is a positive **safe** integer, at every boundary that renders
+  one: both profiles' canonical scope, the guard pair validator and the family
+  membership check, through one shared `isClaimNumber`.
+  `Number.isInteger(9007199254740993)` is true and the value is already
+  `…992`, so the number a caller named and the number spliced into the
+  reference name were different.
+- `claims.profile` is a closed vocabulary, so a value outside it is described
+  rather than echoed, with the nearest real profile suggested.
 - `repository` is `owner/name`, exactly two halves, each starting on an
   alphanumeric and continuing in letters, digits, `.`, `_` or `-`. That is the
   whole grammar GitHub allows, and it is a **grammar** rather than a pair of

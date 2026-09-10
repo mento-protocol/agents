@@ -354,9 +354,15 @@ function normalizeClaimsBlock(rawClaims) {
     );
   }
   if (!Object.hasOwn(CLAIM_PROFILES, rawClaims.profile)) {
+    // A closed vocabulary, described rather than echoed — the rule every other
+    // refusal in this package follows. This one printed whatever the document
+    // held, in the message and in `details`, and a policy is exactly where a
+    // wrong variable gets pasted.
+    const profiles = Object.keys(CLAIM_PROFILES);
+    const described = describeGrammarWord(rawClaims.profile, profiles);
     throw configError(
-      `claims.profile must be one of ${Object.keys(CLAIM_PROFILES).join(", ")}, got: ${String(rawClaims.profile)}`,
-      { details: { profile: rawClaims.profile ?? null } },
+      `claims.profile must be one of ${profiles.join(", ")}, got: ${described}${suggestion(rawClaims.profile, profiles)}`,
+      { details: { profile: described } },
     );
   }
   if (!CONFIGURABLE_PROFILES.includes(rawClaims.profile)) {

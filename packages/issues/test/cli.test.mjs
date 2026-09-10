@@ -2351,7 +2351,10 @@ test("a pull request number that is not positive never reaches a REST path", asy
   const context = harness();
   const listed = await context.run(["claims", "list", "--prs", "0"]);
   assert.equal(listed.exitCode, 2);
-  assert.match(listed.document.error.message, /must be a positive integer/u);
+  assert.match(
+    listed.document.error.message,
+    /must be a positive safe integer/u,
+  );
 });
 
 test("family release plans under --dry-run and releases the members it can prove", async () => {
@@ -6744,4 +6747,32 @@ test("a namespace the transport cannot carry is refused when the config loads", 
   const validated = await context.run(["config", "validate"]);
   assert.equal(validated.exitCode, 3);
   assert.match(validated.document.error.message, /usable ref name/u);
+});
+
+test("a rejected claims.profile is described, not echoed", async () => {
+  // The last vocabulary refusal in the loader that still printed what it
+  // rejected, in the message and in `details`.
+  const SENTINEL = "correct-horse-battery-staple";
+  const context = harness({ claims: { profile: SENTINEL } });
+
+  const refused = await context.run(["claims", "read", "--pr", String(PR)]);
+
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.status, "config");
+  assert.match(
+    refused.document.error.message,
+    /claims.profile must be one of/u,
+  );
+  assert.equal(
+    JSON.stringify(refused.document).includes(SENTINEL),
+    false,
+    "the rejected profile reaches no message and no detail",
+  );
+
+  // A typo of a real profile is still named, because naming it is what makes
+  // the refusal actionable.
+  const typo = harness({ claims: { profile: "pr2" } });
+  const suggested = await typo.run(["claims", "read", "--pr", String(PR)]);
+  assert.equal(suggested.exitCode, 3);
+  assert.match(suggested.document.error.message, /did you mean pr\?/u);
 });

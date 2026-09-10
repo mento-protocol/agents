@@ -20,9 +20,13 @@ import { hostname as osHostname } from "node:os";
 
 import { ClaimConfigError } from "../claims/errors.mjs";
 import { ClaimUsageError } from "../claims/verify.mjs";
-import { detectRuntime, shortHostLabel } from "../claims/context.mjs";
+import {
+  assertNotCredential as assertClaimFieldNotCredential,
+  detectRuntime,
+  shortHostLabel,
+} from "../claims/context.mjs";
 import { validateClaimId } from "../claims/payload.mjs";
-import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
+import { describeRedactedValue } from "../gh/redact.mjs";
 
 /** The environment variables identity reads. */
 export const IDENTITY_ENVIRONMENT_KEYS = Object.freeze({
@@ -96,11 +100,11 @@ export function assertNotCredential(
   source,
   ErrorClass = ClaimUsageError,
 ) {
-  if (!containsSecret(value)) return;
-  throw new ErrorClass(
-    `${source} looks like a credential; it is recorded in the claim payload and printed in reports, so it must never be one`,
-    { details: { source, value: describeRedactedValue(value) } },
-  );
+  // The rule itself lives in `claims/context.mjs`, where `resolveOwner` applies
+  // it to every stored field so a library caller gets it too. This wrapper
+  // keeps the CLI's own default: a flag this command line supplied is a usage
+  // refusal (exit 2), where an identity field is configuration (exit 3).
+  assertClaimFieldNotCredential(value, source, ErrorClass);
 }
 
 /**

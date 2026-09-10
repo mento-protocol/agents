@@ -7,13 +7,20 @@
  * takeover, removed after a confirmed release, and always **after** the
  * compare-and-swap, never before.
  *
- * Nothing here throws. A label API failure is a `warnings[]` entry on an
- * otherwise successful claim: losing a cosmetic label must never fail a claim
- * that the ref already proves, and must never turn a successful release into a
- * non-zero exit.
+ * No label **failure** throws. A label API failure is a `warnings[]` entry on
+ * an otherwise successful claim: losing a cosmetic label must never fail a
+ * claim that the ref already proves, and must never turn a successful release
+ * into a non-zero exit.
+ *
+ * One thing does throw, and it is not a label failure: an environment this
+ * package refuses to write from. Every function here that mutates a label
+ * calls `assertMutationAllowed` first, because these are exported and a
+ * library caller reaches them without passing the CLI's own gate. The read-only
+ * form of `reconcileClaimLabel` is exempt, as every read is.
  */
 
 import { splitRepo } from "../shared/split-repo.mjs";
+import { assertMutationAllowed } from "./context.mjs";
 import { readClaim } from "./ref.mjs";
 
 /** Attempts a label call gets: one, plus one retry (PLAN §2.13). */
@@ -150,7 +157,8 @@ async function attemptTwice(action) {
  * @param {number} number PR or issue number.
  * @param {{present: boolean}} input the desired projection.
  * @param {object} [overrides] label operations overrides.
- * @returns {Promise<object>} a `LabelResult`; never throws.
+ * @returns {Promise<object>} a `LabelResult`; never throws for a label
+ *   failure. An environment this package will not write from is refused.
  */
 export async function projectClaimLabel(ctx, number, input, overrides = {}) {
   const present = input?.present === true;
@@ -166,6 +174,14 @@ export async function projectClaimLabel(ctx, number, input, overrides = {}) {
     warnings: [],
   };
   if (name == null) return result;
+  // A label call is a **write**, and the environment rules belong to the write
+  // rather than to the command that happens to make it. The CLI refuses a
+  // mutating command under `GITHUB_ACTIONS` or an unapproved cloud session, but
+  // this function is exported: a library caller reached it directly and moved
+  // the board's labels from an environment this package refuses to write from.
+  // It is asserted before the dry-run branch for the same reason the CLI
+  // asserts before it plans — a dry run refuses what the write would refuse.
+  assertMutationAllowed(ctx);
   if (ctx.options?.dryRun === true) {
     // §2.13: no label call at all under a dry run.
     result.status = "dry-run";
@@ -243,7 +259,9 @@ export async function projectClaimLabelAfter(
  * @param {object} [options] `{ apply, operations }` — `operations` overrides
  *   the reference read, `overrides` the label calls.
  * @param {object} [overrides] label operations overrides.
- * @returns {Promise<object>} a `LabelReconcile`; never throws.
+ * @returns {Promise<object>} a `LabelReconcile`; never throws for a label
+ *   failure. With `apply`, an environment this package will not write from is
+ *   refused.
  */
 export async function reconcileClaimLabel(
   ctx,
@@ -266,6 +284,11 @@ export async function reconcileClaimLabel(
     warnings: [],
   };
   if (name == null) return reconcile;
+  // Only with `--apply`: without it this is a comparison and a report, which
+  // is a read and runs in every environment. With it, it is a write, and the
+  // refusal comes before the two reads rather than after them — there is
+  // nothing to report from an environment this package will not write from.
+  if (apply) assertMutationAllowed(ctx);
 
   try {
     const state = await readClaim(ctx, number, options.operations ?? {});
@@ -373,7 +396,8 @@ export async function reconcileClaimLabel(
  * @param {object} ctx claim context.
  * @param {object} [input] `{ color, description }`.
  * @param {object} [overrides] label operations overrides.
- * @returns {Promise<object>} a `LabelResult`; never throws.
+ * @returns {Promise<object>} a `LabelResult`; never throws for a label
+ *   failure. An environment this package will not write from is refused.
  */
 export async function ensureClaimLabel(ctx, input = {}, overrides = {}) {
   const name = ctx.label ?? null;
@@ -386,6 +410,9 @@ export async function ensureClaimLabel(ctx, input = {}, overrides = {}) {
     warnings: [],
   };
   if (name == null) return result;
+  // Creating a repository label is a write, so the same environment rule
+  // applies here as to the projection above.
+  assertMutationAllowed(ctx);
   if (ctx.options?.dryRun === true) {
     result.status = "dry-run";
     return result;

@@ -130,7 +130,13 @@ it. The reported `label.changed` is what the reconcile actually did.
 `--agent` and every `--set` value are refused when they carry a credential
 shape. Every one of them is recorded in the claim payload and printed in
 reports, and the claim-id grammar would otherwise accept a `ghp_…` as a
-perfectly good run id.
+perfectly good run id. The rule is enforced by the claims layer, not by the
+argument parser, so a program using this package as a **library** gets it too:
+`createClaimContext`, `resolveOwner` and every transition refuse the same
+values. The environment rules are enforced the same way — the label calls
+included, so `projectClaimLabel`, `ensureClaimLabel` and an applying
+`reconcileClaimLabel` refuse to write from GitHub Actions or from an
+unapproved cloud session, exactly as the commands that wrap them do.
 
 **`label reconcile` writes only with `--apply`.** Without it the command
 compares the label against the ref and reports the difference, so it is a read:

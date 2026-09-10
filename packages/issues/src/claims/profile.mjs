@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 
+import { isClaimNumber } from "../shared/claim-number.mjs";
 import { assertValidRefName } from "../shared/ref-name.mjs";
 import { splitRepo } from "../shared/split-repo.mjs";
 
@@ -64,8 +65,11 @@ function isGithubUrlOrNull(value) {
  * @throws {Error} when `refTemplate` does not contain `{pr}` exactly once.
  */
 export function prClaimProfile(overrides = {}) {
-  const namespace = overrides.namespace ?? "refs/mento-claims/v1/pr";
-  const refTemplate = overrides.refTemplate ?? `${namespace}/{pr}`;
+  const suppliedNamespace = overrides.namespace ?? null;
+  const suppliedTemplate = overrides.refTemplate ?? null;
+  const refTemplate =
+    suppliedTemplate ??
+    `${suppliedNamespace ?? "refs/mento-claims/v1/pr"}/{pr}`;
   // The template is checked here, at construction, because both of its failure
   // modes are silent and late. A template with no `{pr}` renders one ref name
   // for every pull request, so every claim contends with every other claim on
@@ -84,6 +88,21 @@ export function prClaimProfile(overrides = {}) {
   ) {
     throw new Error(
       `The pull-request ref template must contain {pr} exactly once, got: ${JSON.stringify(refTemplate ?? null)}`,
+    );
+  }
+  // The namespace and the template are one setting in two parts, and nothing
+  // used to hold them together here. A `refTemplate` of `refs/custom/{pr}/claim`
+  // beside the default namespace acquired under one prefix while `listClaims`,
+  // `list --stale` and every sweep read another — a mutex whose own inventory
+  // cannot see the claims it holds. `loadClaimConfig` has always required the
+  // template's prefix to be the namespace; the factory is exported, so it
+  // requires the same thing, and derives the namespace when only the template
+  // is given rather than pairing it with a default it does not match.
+  const prefix = refTemplate.slice(0, refTemplate.indexOf("{pr}"));
+  const namespace = suppliedNamespace ?? prefix.replace(/\/$/u, "");
+  if (prefix !== `${namespace}/`) {
+    throw new Error(
+      `The pull-request ref template must render under the namespace ${JSON.stringify(namespace)}, got: ${JSON.stringify(refTemplate)}`,
     );
   }
   return Object.freeze({
@@ -115,9 +134,12 @@ export function prClaimProfile(overrides = {}) {
     subjectNoun: "pull request",
 
     canonicalScope(options, number) {
-      if (!Number.isInteger(number) || number <= 0) {
+      // Safe integers only: the number is spliced into the reference name, and
+      // `9007199254740993` is already `9007199254740992` by the time anything
+      // renders it — a claim on a reference the caller never named.
+      if (!isClaimNumber(number)) {
         throw new Error(
-          `Pull request number must be a positive integer, got: ${number}`,
+          `Pull request number must be a positive safe integer, got: ${number}`,
         );
       }
       return {
@@ -195,20 +217,20 @@ export function issueBoardProfile(overrides = {}) {
     subjectNoun: "issue",
 
     canonicalScope(options, number) {
-      if (!Number.isInteger(number) || number <= 0) {
+      // The same rule as the pull-request profile's, and it matters here too:
+      // the issue number is hashed into the reference name, so a number that
+      // is not its own decimal rendering hashes to a different reference.
+      if (!isClaimNumber(number)) {
         throw new Error(
-          `Issue number must be a positive integer, got: ${number}`,
+          `Issue number must be a positive safe integer, got: ${number}`,
         );
       }
       const projectOwner = String(options.projectOwner ?? "")
         .trim()
         .toLowerCase();
       if (!projectOwner) throw new Error("Project owner must not be empty");
-      if (
-        !Number.isInteger(options.projectNumber) ||
-        options.projectNumber <= 0
-      ) {
-        throw new Error("Project number must be a positive integer");
+      if (!isClaimNumber(options.projectNumber)) {
+        throw new Error("Project number must be a positive safe integer");
       }
       return {
         repo: splitRepo(options.repo).nameWithOwner.toLowerCase(),
@@ -230,8 +252,7 @@ export function issueBoardProfile(overrides = {}) {
         observed?.issue === expected.issue &&
         typeof observed?.projectOwner === "string" &&
         observed.projectOwner.length > 0 &&
-        Number.isInteger(observed.projectNumber) &&
-        observed.projectNumber > 0
+        isClaimNumber(observed.projectNumber)
       );
     },
 

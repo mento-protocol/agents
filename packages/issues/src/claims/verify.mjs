@@ -30,6 +30,7 @@ import {
   ClaimRenewRequiredError,
   ClaimSupersededError,
 } from "./errors.mjs";
+import { isClaimNumber } from "../shared/claim-number.mjs";
 import { redactDocument, redactSecrets } from "../gh/redact.mjs";
 import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { leaseState, payloadOwnerRunId } from "./payload.mjs";
@@ -543,9 +544,9 @@ export function normalizeGuardClaims(claims) {
   return list.map((entry) => {
     const number = entry?.number;
     const token = entry?.token;
-    if (!Number.isInteger(number) || number <= 0) {
+    if (!isClaimNumber(number)) {
       throw new ClaimUsageError(
-        `guard needs a positive integer number, got ${JSON.stringify(number ?? null)}`,
+        `guard needs a positive safe integer number, got ${JSON.stringify(number ?? null)}`,
         { details: { number: number ?? null } },
       );
     }
