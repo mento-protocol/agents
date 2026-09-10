@@ -64,6 +64,46 @@ export function shortHostLabel(value) {
   return String(value).split(".")[0].toLowerCase();
 }
 
+/** How much of a host label a run id carries. */
+const HOST_LABEL_MAX_LENGTH = 64;
+
+/** Characters the claim-id grammar allows inside a lowercased label. */
+const HOST_LABEL_ALLOWED = /[^a-z0-9._:-]+/gu;
+
+/**
+ * The host label as a run id can carry it.
+ *
+ * `resolveOwner` accepts any single-line host — `--host` and
+ * `MENTO_CLAIM_HOST` are operator input, and a real `os.hostname()` is DNS
+ * shaped — but `generateRunId` embeds this label in an id that
+ * `validateClaimId` then checks against a narrower grammar. `--host
+ * 'builder east'` therefore passed every check it met and failed at the end of
+ * the acquire, with a message about a claim id nobody had typed. Encoding it
+ * here is the fix: every run of characters the grammar refuses becomes one
+ * dash, so the label is deterministic, readable and valid. Two hosts can
+ * encode to one label; that costs nothing, because a run id is made unique by
+ * its timestamp and its 12 hex of entropy, and `ownerHost` still records the
+ * host exactly as it was given.
+ *
+ * @param {string} value a hostname or an operator-supplied label.
+ * @returns {string} a label the claim-id grammar accepts.
+ * @throws {ClaimConfigError} when nothing in the label survives the grammar.
+ */
+export function runIdHostLabel(value) {
+  const encoded = shortHostLabel(value)
+    .replace(HOST_LABEL_ALLOWED, "-")
+    .replace(/-{2,}/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, HOST_LABEL_MAX_LENGTH);
+  if (encoded.length === 0) {
+    throw new ClaimConfigError(
+      "Claim host has no characters a run id can carry; use letters, digits, dots, colons, underscores or hyphens",
+      { details: { host: value } },
+    );
+  }
+  return encoded;
+}
+
 /**
  * Generate a run id.
  *
@@ -185,8 +225,11 @@ export function resolveOwner(partial = {}, options = {}) {
 
   return {
     runId,
+    // The host as it was given, for the payload and every document.
     host,
-    hostShort: partial.hostShort ?? shortHostLabel(host),
+    // And the same host as a run id can carry it. A supplied `hostShort` goes
+    // through the same encoder, because it lands in the same place.
+    hostShort: runIdHostLabel(partial.hostShort ?? host),
     runtime,
     login,
     agent,

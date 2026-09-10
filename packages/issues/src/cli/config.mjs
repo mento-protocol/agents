@@ -28,6 +28,7 @@ import {
   SINGLE_LINE_TEXT_MAX_LENGTH,
   isSafeSingleLineText,
 } from "../shared/text.mjs";
+import { MAX_TIMEOUT_SECONDS } from "./args.mjs";
 
 /** The document schemas this loader knows. */
 export const CONFIG_SCHEMAS = Object.freeze({
@@ -649,10 +650,18 @@ export function normalizeConfigDocument(document, options = {}) {
     "markers",
   );
   if (gh.timeoutSeconds !== undefined) {
-    if (!Number.isSafeInteger(gh.timeoutSeconds) || gh.timeoutSeconds <= 0) {
-      throw configError("gh.timeoutSeconds must be a positive integer", {
-        details: { timeoutSeconds: gh.timeoutSeconds },
-      });
+    // The same bound `--timeout-seconds` has, and for the same reason: a
+    // timeout whose millisecond conversion outgrows a 32-bit signed integer
+    // fires immediately rather than late, so a huge value is no timeout at all.
+    if (
+      !Number.isSafeInteger(gh.timeoutSeconds) ||
+      gh.timeoutSeconds <= 0 ||
+      gh.timeoutSeconds > MAX_TIMEOUT_SECONDS
+    ) {
+      throw configError(
+        `gh.timeoutSeconds must be a positive integer of at most ${MAX_TIMEOUT_SECONDS}`,
+        { details: { timeoutSeconds: gh.timeoutSeconds } },
+      );
     }
   }
   if (

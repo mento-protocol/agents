@@ -192,6 +192,7 @@ async function invoke(argv, options = {}) {
     random: options.random,
     isProcessAlive: options.isProcessAlive,
     probeProcess: options.probeProcess,
+    createStateStore: options.createStateStore,
     packageIdentity: options.packageIdentity,
     platform: "linux",
   });
@@ -4319,8 +4320,9 @@ test("a rejected object id is never echoed back verbatim", async () => {
     assert.match(refused.document.error.message, /40 lowercase hex/u);
   }
 
-  // A value that is not a credential is still described, so an ordinary typo
-  // is still readable: short values whole, long ones by preview and length.
+  // A value with no credential shape is not echoed either. A short one is
+  // exactly as likely to be a secret — the patterns only recognize GitHub's
+  // own — so the refusal reports the type and the length and nothing else.
   const typo = await context.run([
     "claims",
     "release",
@@ -4332,8 +4334,13 @@ test("a rejected object id is never echoed back verbatim", async () => {
     RUN_ID,
   ]);
   assert.equal(typo.exitCode, 2);
-  assert.match(typo.document.error.message, /not-a-token/u);
-  assert.equal(typo.document.error.details.value, "not-a-token");
+  assert.equal(typo.document.error.details.value, "<string, 11 characters>");
+  assert.ok(
+    !typo.stdout.includes("not-a-token") &&
+      !typo.stderr.includes("not-a-token"),
+    "even a value that looks harmless is described rather than echoed",
+  );
+  assert.match(typo.document.error.message, /<string, 11 characters>/u);
 
   const long = await context.run([
     "claims",
@@ -4347,10 +4354,183 @@ test("a rejected object id is never echoed back verbatim", async () => {
   ]);
   assert.equal(long.exitCode, 2);
   assert.ok(
-    !long.document.error.message.includes("z".repeat(64)),
-    "a long value is previewed, never reprinted whole",
+    !long.document.error.message.includes("zz"),
+    "a long value is described, never reprinted",
   );
   assert.match(long.document.error.message, /64 characters/u);
+});
+
+test("no grammar refusal echoes the value it rejected", async () => {
+  // Every one of these copied its raw input into the message and the details,
+  // and `writeDocument`'s pattern pass only recognizes GitHub's own token
+  // shapes: a credential of any other shape — or a short one — survived it.
+  const context = harness();
+  const secret = "s3cr3tPaste";
+  const cases = [
+    [
+      "object id",
+      [
+        "claims",
+        "release",
+        "--pr",
+        String(PR),
+        "--token",
+        secret,
+        "--run-id",
+        RUN_ID,
+      ],
+    ],
+    ["integer flag", ["claims", "read", "--pr", secret]],
+    [
+      "number flag",
+      ["claims", "read", "--pr", String(PR), "--timeout-seconds", secret],
+    ],
+    [
+      "key=value flag",
+      ["claims", "claim", "--pr", String(PR), "--set", secret],
+    ],
+    ["positional argument", ["claims", "read", "--pr", String(PR), secret]],
+    ["unknown flag", ["claims", "read", "--pr", String(PR), `--${secret}`]],
+    [
+      "unknown flag with an inline value",
+      ["claims", "read", "--pr", String(PR), `--${secret}=${secret}`],
+    ],
+    ["unknown command", ["claims", secret]],
+    [
+      "outcome",
+      [
+        "claims",
+        "release",
+        "--pr",
+        String(PR),
+        "--token",
+        hexOid(3),
+        "--run-id",
+        RUN_ID,
+        "--outcome",
+        secret,
+      ],
+    ],
+  ];
+
+  for (const [label, argv] of cases) {
+    const refused = await context.run(argv);
+    assert.equal(refused.exitCode, 2, label);
+    assert.ok(
+      !refused.stdout.includes(secret) && !refused.stderr.includes(secret),
+      `${label} must not echo the rejected value: ${refused.stdout}${refused.stderr}`,
+    );
+    assert.ok(
+      !JSON.stringify(refused.documents).includes(secret),
+      `${label} must not carry it in the document either`,
+    );
+  }
+
+  // A credential shape is still named as one, because "you pasted a token
+  // here" is the useful half of the message.
+  const pasted = await context.run([
+    "claims",
+    "read",
+    "--pr",
+    `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+  ]);
+  assert.equal(pasted.exitCode, 2);
+  assert.match(pasted.document.error.message, /\[redacted-github-token\]/u);
+
+  // And an ordinary typo of a flag or a command is still readable, because a
+  // grammar word — lowercase letters and dashes — is not a credential shape.
+  const misspelled = await context.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--not-a-flag",
+  ]);
+  assert.match(misspelled.document.error.message, /--not-a-flag/u);
+  const unknownCommand = await context.run(["claims", "frobnicate"]);
+  assert.match(unknownCommand.document.error.message, /claims frobnicate/u);
+});
+
+test("a state write that throws still releases the guard slots it reserved", async () => {
+  // `recordGuardState` ran outside the scope whose failure path releases the
+  // slots, so a store that threw — a path it could not build, an entry it
+  // could not read — left the slot behind and every later guard of that run id
+  // refused on a reservation nothing was holding.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const slotPath = store.guardSlotPathFor(PR, runId);
+  const spawned = recordingSpawn(0);
+
+  const failed = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    {
+      spawn: spawned.spawn,
+      createStateStore: (input) => {
+        const real = createStateStore(input);
+        return {
+          ...real,
+          writeEntry() {
+            throw new Error("the state store is unusable");
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(failed.exitCode, 2);
+  assert.equal(spawned.calls.length, 0, "nothing was spawned");
+  assert.equal(
+    existsSync(slotPath),
+    false,
+    "the slot the failed guard reserved is released",
+  );
+  const document = failed.stderrDocuments.at(-1);
+  assert.equal(document.command, "claims.guard");
+  assert.match(document.error.message, /state store is unusable/u);
+
+  // And the next guard of the same run id starts cleanly.
+  const ran = recordingSpawn(0);
+  const guarded = await context.run(
+    [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+      "--gate",
+      "push",
+      "--",
+      "node",
+      "--version",
+    ],
+    { spawn: ran.spawn },
+  );
+  assert.equal(guarded.exitCode, 0);
+  assert.equal(ran.calls.length, 1);
 });
 
 test("a family release that ends unknown reports exit 12 and records its candidates", async () => {
@@ -4551,4 +4731,244 @@ test("a guard command line the grammar refuses still reports on stderr", async (
   assert.equal(other.exitCode, 2);
   assert.equal(other.document.command, "claims.read");
   assert.equal(other.stderr, "");
+});
+
+test("guard validates every pair before it reserves a single slot", async () => {
+  // `pairClaimFlags` zips the pairs and checks nothing about them, so
+  // `--pr 872 --token <oid> --pr 0 --token <oid>` reserved both slots and then
+  // threw deriving the ref for 0. The refusal belongs before the first
+  // reservation, and it is `guardChild`'s own rule, applied earlier.
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const token = claimed.document.claim.token;
+  const runId = claimed.document.claim.runId;
+  const store = createStateStore({
+    repository: REPOSITORY,
+    root: context.options.stateRoot,
+    clock: context.clock,
+  });
+  const guardArgv = (pairs) => [
+    "claims",
+    "guard",
+    ...pairs,
+    "--run-id",
+    runId,
+    "--gate",
+    "push",
+    "--",
+    "node",
+    "--version",
+  ];
+
+  for (const [label, pairs] of [
+    [
+      "an impossible number",
+      ["--pr", String(PR), "--token", token, "--pr", "0", "--token", hexOid(7)],
+    ],
+    [
+      "the same number twice",
+      [
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+        "--pr",
+        String(PR),
+        "--token",
+        token,
+      ],
+    ],
+  ]) {
+    const spawned = recordingSpawn(0);
+    const refused = await context.run(guardArgv(pairs), {
+      spawn: spawned.spawn,
+    });
+    assert.equal(refused.exitCode, 2, label);
+    assert.equal(spawned.calls.length, 0, `${label} spawns nothing`);
+    assert.equal(
+      existsSync(store.guardSlotPathFor(PR, runId)),
+      false,
+      `${label} reserves no slot`,
+    );
+    assert.equal(existsSync(store.guardSlotPathFor(0, runId)), false, label);
+  }
+
+  // And the valid guard that follows still reserves and spawns.
+  const ran = recordingSpawn(0);
+  const guarded = await context.run(
+    guardArgv(["--pr", String(PR), "--token", token]),
+    { spawn: ran.spawn },
+  );
+  assert.equal(guarded.exitCode, 0);
+  assert.equal(ran.calls.length, 1, "nothing was left in the way");
+});
+
+test("family release validates its whole membership before it releases anything", async () => {
+  // Only the two list lengths were compared, so an invalid member became one
+  // collected failure while every valid member was released: a command the
+  // grammar refuses with exit 2 had already mutated three references.
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const runId = claimed.document.family.runId;
+  const tokens = claimed.document.family.members.map((member) => member.token);
+  const held = () => [
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    refState(context.server, "refs/mento-claims/v1/pr/880"),
+  ];
+  assert.deepEqual(held(), ["LOCK", "LOCK"]);
+
+  for (const [label, prs, list] of [
+    [
+      "a member that is not a positive integer",
+      "872,0,880",
+      [tokens[0], hexOid(9), tokens[1]],
+    ],
+    ["a member named twice", "872,872", [tokens[0], tokens[0]]],
+  ]) {
+    const refused = await context.run([
+      "claims",
+      "family",
+      "release",
+      "--prs",
+      prs,
+      "--tokens",
+      list.join(","),
+      "--run-id",
+      runId,
+    ]);
+    assert.equal(refused.exitCode, 2, label);
+    assert.equal(refused.document.status, "usage", label);
+    assert.deepEqual(held(), ["LOCK", "LOCK"], `${label} released nothing`);
+
+    // The plan refuses it too, which is what "the plan predicts execution"
+    // means for a membership this command can never act on.
+    const planned = await context.run([
+      "claims",
+      "family",
+      "release",
+      "--prs",
+      prs,
+      "--tokens",
+      list.join(","),
+      "--run-id",
+      runId,
+      "--dry-run",
+    ]);
+    assert.equal(planned.exitCode, 2, `${label} under --dry-run`);
+  }
+
+  // The valid release still releases both members.
+  const released = await context.run([
+    "claims",
+    "family",
+    "release",
+    "--prs",
+    "872,880",
+    "--tokens",
+    tokens.join(","),
+    "--run-id",
+    runId,
+  ]);
+  assert.equal(released.exitCode, 0);
+  assert.deepEqual(held(), ["UNLOCK", "UNLOCK"]);
+});
+
+test("--timeout-seconds must name a timer that can actually fire", async () => {
+  // `runGh` arms its wall-clock timer only for a finite, positive `timeoutMs`,
+  // so 0 and -1 disabled it silently and 1e308 seconds overflowed the
+  // conversion to Infinity and disabled it too — a guarded `gh` call with no
+  // timeout at all, which is the one thing the flag exists to bound.
+  const context = harness();
+  for (const value of ["0", "-1", "1e308", "1e12"]) {
+    const refused = await context.run([
+      "claims",
+      "read",
+      "--pr",
+      String(PR),
+      "--timeout-seconds",
+      value,
+    ]);
+    assert.equal(refused.exitCode, 2, value);
+    assert.match(refused.document.error.message, /--timeout-seconds/u, value);
+  }
+
+  const seen = [];
+  const observing = {
+    ...context.server.operations,
+    async readClaimRef(ctx, refName, scope) {
+      seen.push(ctx.options.timeoutMs);
+      return context.server.operations.readClaimRef(ctx, refName, scope);
+    },
+  };
+  const fine = await context.run(
+    ["claims", "read", "--pr", String(PR), "--timeout-seconds", "30"],
+    { operations: { ...context.options.operations, claims: observing } },
+  );
+  assert.equal(fine.exitCode, 0);
+  assert.deepEqual(seen, [30_000]);
+
+  // The config's own timeout is bounded by the same rule, in the loader.
+  const configured = harness({
+    document: { ...packageDocument(), gh: { timeoutSeconds: 1e12 } },
+  });
+  const refusedConfig = await configured.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+  ]);
+  assert.equal(refusedConfig.exitCode, 3);
+  assert.match(refusedConfig.document.error.message, /gh\.timeoutSeconds/u);
+});
+
+test("a host label the run-id grammar cannot carry is encoded before it is used", async () => {
+  // `--host 'builder east'` passed the single-line check, `generateRunId`
+  // embedded it, and `validateClaimId` rejected the finished run id: the
+  // command failed after the config, the identity and the context were built,
+  // with a message about a claim id nobody had typed.
+  for (const [host, label] of [
+    ["builder east", "builder-east"],
+    ["builder/east", "builder-east"],
+    ["Builder.East", "builder"],
+  ]) {
+    const context = harness();
+    const claimed = await context.run([
+      "claims",
+      "claim",
+      "--pr",
+      String(PR),
+      "--host",
+      host,
+    ]);
+    assert.equal(claimed.exitCode, 0, host);
+    assert.equal(
+      claimed.document.claim.runId.startsWith(`claude-code-${label}-`),
+      true,
+      claimed.document.claim.runId,
+    );
+    // The host itself is recorded as it was given: the encoding exists for the
+    // run id's grammar, not to rewrite what the operator said.
+    assert.equal(claimed.document.claim.host, host);
+  }
+
+  // A host with nothing the grammar accepts is refused where it is resolved,
+  // with a message about the host rather than about a run id.
+  const empty = harness();
+  const refused = await empty.run([
+    "claims",
+    "claim",
+    "--pr",
+    String(PR),
+    "--host",
+    "///",
+  ]);
+  assert.equal(refused.exitCode, 3);
+  assert.match(refused.document.error.message, /host/iu);
 });

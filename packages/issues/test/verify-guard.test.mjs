@@ -1286,3 +1286,63 @@ test("a renew failure guard cannot classify leaves the claim unverified, not hel
   assert.equal(result.report.claims[0].expiresAt, lease.payload.expiresAt);
   assert.equal(result.report.warnings.at(-1).number, PR);
 });
+
+test("an aborted guard kills the child's whole group and says it was aborted", async () => {
+  // `options.signal` went straight to `spawn`, so an abort took the one path
+  // guard exists to avoid: Node signals the direct child pid and nothing else,
+  // the detached grandchild — this repository's pre-push `trunk check --all` —
+  // keeps publishing, and the `error` listener reports `spawn-failed` for a
+  // guard that had spawned. The grandchild here ignores SIGTERM, so only the
+  // group escalation can end it.
+  const { ctx, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const controller = new AbortController();
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [
+      process.execPath,
+      "-e",
+      "const {spawn} = require('node:child_process');" +
+        "const grandchild = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)\"], {stdio: 'ignore'});" +
+        "process.stdout.write(String(grandchild.pid));" +
+        "process.stdin.resume();",
+    ],
+    spawn: spawned.spawn,
+    signal: controller.signal,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: sink().write,
+    stdio: ["pipe", "pipe", "ignore"],
+    killGraceMs: 50,
+  });
+
+  // Nothing is asserted between the spawn and the abort: a failed assertion
+  // there would leave `guarded` pending and a detached child running, and the
+  // whole file would then hang on an event loop that never empties.
+  await scheduler.registered;
+  const grandchildPid = Number(await firstChunk(spawned.children[0].stdout));
+  const aliveBeforeAbort = processIsAlive(grandchildPid);
+
+  controller.abort();
+
+  const result = await guarded;
+  assert.ok(grandchildPid > 0);
+  assert.equal(aliveBeforeAbort, true, "the grandchild was running");
+  assert.equal(
+    spawned.calls[0].options.signal,
+    undefined,
+    "the signal is guard's to act on, never the spawn's",
+  );
+  assert.equal(result.exitCode, 3, "an aborted guard is exit 3, never 13");
+  assert.equal(result.report.status, "guard-aborted");
+  assert.equal(result.report.killedBy, "guard-aborted");
+  assert.equal(result.report.spawned, true);
+  await waitUntilDead(grandchildPid);
+  assert.equal(
+    hasTerminated(grandchildPid),
+    true,
+    "the grandchild died with the group, not just the direct child",
+  );
+});

@@ -461,3 +461,41 @@ test("PRs 872 and 880 claimed from two contexts with different hosts, fully inte
     "two bootstraps and two acquires, all applied",
   );
 });
+
+test("listClaims discovers through an injected lister when the context carries no operations bag", async () => {
+  // `operationsFor` built the bag without `listRefCommits`, so a caller that
+  // injects its own transport and has no `ctx.operations` — the shape a
+  // library consumer starts from — fell through to the REST reader and reached
+  // the network for a listing it had supplied a reader for.
+  const { ctx: base, server } = createTestContext();
+  const refName = claimRefName(base, PR);
+  seedRef(server, refName, buildTestLock(base, PR));
+  // No bag at all, so `listClaims` builds one from the overrides alone. The
+  // environment is empty as well: if the REST reader is ever reached again it
+  // cannot even find `gh`, so this test can only pass by using what it
+  // injected.
+  const ctx = {
+    ...base,
+    operations: null,
+    options: { ...base.options, env: {} },
+  };
+
+  let listed = 0;
+  const summaries = await listClaims(
+    ctx,
+    {},
+    {
+      ...server.operations,
+      listRefCommits: async () => {
+        listed += 1;
+        return [{ ref: refName }];
+      },
+    },
+  );
+
+  assert.equal(listed, 1, "the injected lister is the one that ran");
+  assert.deepEqual(
+    summaries.map((entry) => [entry.number, entry.state]),
+    [[PR, "LOCK"]],
+  );
+});

@@ -24,6 +24,7 @@ import {
   ClaimUsageError,
   canonicalFencePurpose,
   guardChild,
+  normalizeGuardClaims,
 } from "../../claims/verify.mjs";
 import { pairClaimFlags } from "../args.mjs";
 import { markFailureContext, recordLeaseState } from "./common.mjs";
@@ -136,7 +137,13 @@ function recordGuardState(runtime, pair, runId) {
  */
 export async function runGuard(runtime) {
   const { ctx, flags } = runtime;
-  const pairs = pairClaimFlags(runtime.order);
+  // Zipped, then validated — `guardChild`'s own rule, applied before anything
+  // acts on a pair. `pairClaimFlags` only pairs the flags up: it accepts
+  // `--pr 0`, and it accepts one number twice. Both reached the reservation
+  // loop, which created a slot file per pair and then threw deriving the ref
+  // for the impossible member, so an invocation the grammar refuses left
+  // reservations behind that only `claims slot clear` could remove.
+  const pairs = normalizeGuardClaims(pairClaimFlags(runtime.order));
   const purpose = canonicalFencePurpose(flags.gate);
   const runId = flags["run-id"];
   markFailureContext(runtime, pairs[0].number);
@@ -166,6 +173,7 @@ export async function runGuard(runtime) {
   // second check refuses, so a refusal on either path spawns nothing and
   // leaves nothing behind.
   const releaseSlots = reserveGuardSlots(runtime, pairs, runId);
+  let stateWarnings;
   try {
     // C-1, defence in depth, and guard needs it more than `renew` does: guard
     // is the publish gate, so two invocations under one run id and token would
@@ -174,19 +182,26 @@ export async function runGuard(runtime) {
     for (const pair of pairs) {
       assertNoLiveDuplicateRunId(ctx, pair.number, runId);
     }
+    // Inside the same scope, because it can throw. `writeEntry` turns a failed
+    // write into a warning, but the path it builds and the entry it merges
+    // over are read before that, and `claimRefName` validates the ref: any of
+    // them throwing outside this try left every reserved slot on disk, so the
+    // next guard of this run id refused on a reservation nobody held.
+    stateWarnings = pairs.flatMap((pair) =>
+      recordGuardState(runtime, pair, runId),
+    );
   } catch (error) {
     // Same rule as the reservation loop: a slot this refusal could not give
     // back is what the next guard of this run will meet, so it travels with
-    // the refusal instead of being discarded.
+    // the refusal instead of being discarded. It is attached even to a failure
+    // that carries no details of its own — a store that threw is exactly that
+    // kind of failure.
     const leftover = releaseSlots();
-    if (leftover.length > 0 && error?.details) {
-      error.details.slotWarnings = leftover;
+    if (leftover.length > 0 && error !== null && typeof error === "object") {
+      error.details = { ...(error.details ?? {}), slotWarnings: leftover };
     }
     throw error;
   }
-  const stateWarnings = pairs.flatMap((pair) =>
-    recordGuardState(runtime, pair, runId),
-  );
 
   // Guard is the only command with a second output surface, so it is the only
   // place `--quiet` can act without breaking "exactly one JSON document on

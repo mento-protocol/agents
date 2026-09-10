@@ -636,7 +636,13 @@ its statement.
    signal to that group and exit **3**, `killedBy: "guard-<signal>"`.
    `detached` takes the child out of the terminal's foreground group, so
    without this a Ctrl-C would kill guard and leave the child publishing with
-   nothing renewing the lease. It is not a 13: the claim was never lost.
+   nothing renewing the lease. It is not a 13: the claim was never lost. An
+   `options.signal` abort takes the same path — `killedBy: "guard-aborted"`,
+   `status: "guard-aborted"`, exit 3 — and is deliberately **not** handed to
+   `spawn`: Node's own support signals the direct child pid and nothing else,
+   so the detached grandchild survived the abort and kept publishing, the
+   renew timer was never cancelled, and the report called a child that had run
+   `spawn-failed`.
 9. Otherwise forward the child's exit code, unchanged — unless `--advisory` is
    set, which forces exit 0 and is refused outright on a mandatory gate.
 
@@ -713,8 +719,17 @@ timer safe for a whole family.
 `family release` is the mirror image and collects rather than aborts: every
 member is classified from one read, an already-released member is reported as
 released, and a member whose lease cannot be rebuilt no longer keeps the others
-locked until their leases expire. What it reports for those failures is decided
-in two steps. A member whose UNLOCK compare-and-swap ended unknown may hold a
+locked until their leases expire.
+
+Collecting is for what the references say, never for what the command line
+says. The membership goes through `planFamilyClaims` before the first read and
+before the plan — the same check the claim side makes — so a member that is not
+a positive integer, or one named twice, is exit 2 and nothing is released.
+Comparing only the two list lengths meant such a member became one collected
+failure while every valid member was released: a command the grammar refuses
+had already written three references.
+
+What it reports for the failures it does collect is decided in two steps. A member whose UNLOCK compare-and-swap ended unknown may hold a
 LOCK this run cannot name, so its candidate is recorded under **its own**
 number — the record `adopt --from-state` reads — and the family answers
 `unknown-outcome` exit 12 with every such member under `unresolved`, each
@@ -738,7 +753,11 @@ zero label calls and a successful takeover sees the final applied count.
 
 A label failure is a `warnings[]` entry, never a non-zero exit: one attempt plus
 one retry, remove tolerates 404, and a takeover reports `alreadyPresent` rather
-than an error. No label call happens under `--dry-run`.
+than an error. Under `--dry-run` no label is added, removed or created:
+`projectClaimLabel` and `ensureClaimLabel` both answer `status: "dry-run"`
+before their first call. `reconcileClaimLabel` still lists the item's labels,
+because listing is a read and the difference it reports is the command's whole
+output; it stops before the projection that would apply it.
 
 `reconcileClaimLabel` computes `desired === (refState === "LOCK")` from the
 reference only, which is invariant I-G in code. `ensureClaimLabel` is
@@ -852,19 +871,33 @@ redacted by **position** rather than by shape, keeping only the scheme word,
 which is what covers a GitHub App JWT or a `Basic` credential handed to the
 exported `runGh`.
 
-The CLI's own inputs are the third surface. `--token`, `--supersedes`,
-`--candidate` and `--parent-lock` are where a credential lands when an agent
-pastes the wrong variable, and the refusal that rejects one is printed, logged
-and stored: `assertObjectId` therefore describes the value rather than echoing
-it. A credential shape is replaced outright and reported by length only; any
-other value is shown whole while it is short enough to be an ordinary typo, and
-by an eight-character preview plus its length beyond that, because a secret
-this package has no pattern for is still a secret. The description goes into
-`details.value` as well as the message, because the details are copied into the
-failure document verbatim. And `writeDocument` runs one last `redactSecrets`
-pass over every document it writes — over the tree, never over the serialized
-JSON, since positional redaction of a finished string can eat the closing quote
-of the value it rewrites.
+The CLI's own inputs are the third surface, and the rule there is stronger:
+**no refusal from the grammar ever echoes the value it rejected.** `--token`,
+`--supersedes`, `--candidate` and `--parent-lock` are where a credential lands
+when an agent pastes the wrong variable, and a refusal is printed, logged,
+stored and pasted onward. Every rejected value therefore goes through
+`describeRejectedValue`, which reports its type and its length and nothing
+else — `<string, 11 characters>` — and names a recognized credential shape as
+one, `[redacted-github-token] (48 characters)`, because "you pasted a token
+here" is the useful half of the message and reveals nothing. Reporting short
+values verbatim was not safe: the patterns recognize GitHub's own token shapes
+and nothing else, so a credential of any other shape, or a short one, went
+straight through them. `assertObjectId`, `parseIntegerValue`,
+`parseNumberValue`, `parseKeyValue`, `assertOutcome` and the
+unexpected-argument branch all report through it, in `details` as well as in
+the message, because the details are copied into the failure document verbatim.
+
+What the caller typed where this CLI's own **vocabulary** belongs is different,
+because a misspelling has to stay readable or the refusal cannot be acted on. A
+flag name, a command word and an outcome slug go through `describeGrammarWord`,
+which keeps a word of lowercase letters and dashes — every flag and command in
+this CLI is one — and describes anything else. A command is judged word by
+word, so `claims <secret>` keeps the half that names a real command. An
+`--flag=value` refusal reports only the name; the inline value never reaches
+the document. And `writeDocument` runs one last `redactSecrets` pass over every
+document it writes — over the tree, never over the serialized JSON, since
+positional redaction of a finished string can eat the closing quote of the
+value it rewrites.
 
 A timeout on a `mutates: true` call is an **unknown outcome** feeding
 `advanceRef`'s reconcile path, never a definitive failure. `GhTimeoutError`,
@@ -1124,7 +1157,12 @@ Every failure exits 3 **before any network call**:
   owner and number that no command line supplies. Lease keys on a
   `leaseCapable: false` profile are refused.
 - `gh.timeoutSeconds`, when given, is the per-`gh` wall-clock default that
-  `--timeout-seconds` overrides.
+  `--timeout-seconds` overrides. Both are bounded the same way: more than 0 and
+  at most 86400 seconds. `runGh` arms its timer only for a finite, positive
+  `timeoutMs`, so 0 and a negative disabled it silently, and a value whose
+  conversion to milliseconds overflows — or simply outgrows the 32-bit signed
+  delay `setTimeout` takes — fires immediately instead of late. Either way an
+  unbounded `gh` call, which is the one thing the setting exists to prevent.
 
 Both revision directions fail closed:
 
@@ -1142,6 +1180,17 @@ Both revision directions fail closed:
 | `host`    | `--host`                                                            | `MENTO_CLAIM_HOST`                                | `os.hostname()` first label, lowercased                   |
 | `runtime` | `--runtime`                                                         | `MENTO_CLAIM_RUNTIME`                             | detected; `GITHUB_ACTIONS` is refused; otherwise an error |
 | `login`   | `--login`                                                           | `MENTO_CLAIM_LOGIN`                               | one memoized `gh api user --jq .login`                    |
+
+`host` is recorded exactly as it was given, and the label a run id carries is
+encoded from it: lowercased, first dot-label only, every run of characters the
+claim-id grammar refuses replaced with one dash, capped at 64. `--host` and
+`MENTO_CLAIM_HOST` are operator input, so `--host 'builder east'` used to pass
+the single-line check, reach `generateRunId`, and fail at the end of the
+acquire with `validateClaimId` complaining about an id nobody typed. Two hosts
+can encode to one label, which costs nothing: a run id is made unique by its
+timestamp and its 12 hex of entropy, and `ownerHost` still carries the original.
+A host with nothing the grammar accepts is refused where it is resolved, with a
+message about the host.
 
 The state file lives at
 `${XDG_STATE_HOME:-$HOME/.local/state}/mento-issues/<owner>__<repo>/pr-<n>.json`
@@ -1165,6 +1214,15 @@ is the check the state entry cannot make — two guards starting together both
 read the previous, dead pid, both pass `assertNoLiveDuplicateRunId`, both
 overwrite the entry, and both spawn a publishing child. The document carries the
 pid, a per-reservation `nonce` and `reservedAt`.
+
+Two rules keep a reservation from outliving the command that made it. The pairs
+are validated before the first one is taken — `normalizeGuardClaims`, the same
+check `guardChild` makes, run early: a positive number, a token, no number
+twice — because `--pr 872 --token <oid> --pr 0 --token <oid>` reserved both
+slots and only then threw deriving the ref for `0`. And the state entry is
+written inside the scope whose failure path releases the slots, because
+`writeEntry` builds a path and merges over an existing entry before its own
+try: anything throwing there left every reservation on disk.
 
 A holder removes its own slot when the child exits, on every exit path, and only
 its own: `release` opens the file, reads the nonce back through that descriptor,
@@ -1342,6 +1400,13 @@ monitoring's compare-and-swap semantics exactly: assert the repository id;
 `observed = refs.get(refName) ?? ZERO_OID`; a mismatch against `beforeOid`
 fails; a missing after-commit or a wrong parent fails as a non-fast-forward;
 otherwise assign.
+
+The bag carries one more entry, `listRefCommits`, which is the namespace
+listing behind `claims list`. `operationsFor` defaults it like the other five,
+so a caller that injects its own transport and passes no `ctx.operations` lists
+through what it injected; without that entry the lister was dropped and the
+call fell through to the REST reader — a network read a fully injected caller
+never asked for. Tests either supply it in the overrides or pass `listRefs`.
 
 Three deltas from monitoring's fake, each earning its place: a **reference map**
 rather than a single oid, so two claims can be interleaved; an **injectable

@@ -288,19 +288,93 @@ export const COMMAND_SPECS = Object.freeze({
 
 const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
 
+/**
+ * A word this file's own grammar could plausibly have accepted.
+ *
+ * Every flag name and every command word in this CLI is lowercase letters and
+ * dashes, so a value of that shape is a typo of one of them and is safe to
+ * print back. Anything else — a digit, an underscore, a capital, or more than
+ * 32 characters — is not a flag name anybody meant to type, and a credential
+ * pasted where a flag name belongs looks exactly like that.
+ */
+const GRAMMAR_WORD_PATTERN = /^[a-z][a-z-]*$/u;
+const GRAMMAR_WORD_MAX_LENGTH = 32;
+
 function usage(message, details = {}) {
   return new ClaimUsageError(message, { details });
 }
 
+/**
+ * Describe a rejected input without echoing it.
+ *
+ * A refusal is printed, logged, stored and often pasted into a chat, so it is
+ * the last place a credential should be copied to — and `--token` is exactly
+ * where one lands when an agent pastes the wrong variable. The redaction
+ * patterns recognize GitHub's own token shapes and nothing else, so a value of
+ * any other shape, or a short one, would survive them: this reports the type
+ * and the length and never a single byte of the content. A recognized
+ * credential is still named as one, because "you pasted a token here" is the
+ * useful half of the message and reveals nothing.
+ *
+ * @param {unknown} value the rejected value.
+ * @returns {string} a description safe to print.
+ */
+function describeRejectedValue(value) {
+  if (typeof value !== "string") {
+    return value === null || value === undefined
+      ? String(value)
+      : `<${typeof value}>`;
+  }
+  if (value.length === 0) return "<empty>";
+  if (redactSecrets(value) !== value) {
+    return `${REDACTION} (${value.length} characters)`;
+  }
+  return `<string, ${value.length} characters>`;
+}
+
+/**
+ * Describe a rejected grammar word — a flag name, a command word, a slug.
+ *
+ * These are not values: they are what the caller typed where this CLI's own
+ * vocabulary belongs, so a misspelling has to be readable or the refusal
+ * cannot be acted on. One that could be a word of that vocabulary is kept;
+ * every other one is described like any rejected value. A multi-word command
+ * is judged word by word, so `claims <secret>` keeps the half that names a
+ * real command.
+ *
+ * @param {unknown} word the rejected word.
+ * @returns {string} a description safe to print.
+ */
+function describeGrammarWord(word) {
+  if (typeof word !== "string" || word.length === 0) {
+    return describeRejectedValue(word);
+  }
+  return word
+    .split(" ")
+    .map((part) =>
+      GRAMMAR_WORD_PATTERN.test(part) && part.length <= GRAMMAR_WORD_MAX_LENGTH
+        ? part
+        : describeRejectedValue(part),
+    )
+    .join(" ");
+}
+
+// Every refusal below describes the value it rejected rather than repeating
+// it. The flag name says what was expected, the description says what arrived,
+// and the one thing neither of them prints is the value itself — which is the
+// only part that can be a credential.
 function parseIntegerValue(name, raw) {
   if (!/^[0-9]+$/u.test(raw)) {
-    throw usage(`--${name} needs a non-negative integer, got: ${raw}`, {
+    const described = describeRejectedValue(raw);
+    throw usage(`--${name} needs a non-negative integer, got: ${described}`, {
       flag: name,
-      value: raw,
+      value: described,
     });
   }
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) {
+    // Digits only by now, so there is nothing here a credential could hide in,
+    // and the number itself is the whole diagnostic.
     throw usage(`--${name} is not a safe integer: ${raw}`, {
       flag: name,
       value: raw,
@@ -312,9 +386,10 @@ function parseIntegerValue(name, raw) {
 function parseNumberValue(name, raw) {
   const value = Number(raw);
   if (!Number.isFinite(value)) {
-    throw usage(`--${name} needs a number, got: ${raw}`, {
+    const described = describeRejectedValue(raw);
+    throw usage(`--${name} needs a number, got: ${described}`, {
       flag: name,
-      value: raw,
+      value: described,
     });
   }
   return value;
@@ -323,9 +398,10 @@ function parseNumberValue(name, raw) {
 function parseKeyValue(name, raw) {
   const index = raw.indexOf("=");
   if (index <= 0) {
-    throw usage(`--${name} needs key=value, got: ${raw}`, {
+    const described = describeRejectedValue(raw);
+    throw usage(`--${name} needs key=value, got: ${described}`, {
       flag: name,
-      value: raw,
+      value: described,
     });
   }
   return { key: raw.slice(0, index), value: raw.slice(index + 1) };
@@ -373,11 +449,17 @@ export function resolveCommand(head) {
     }
   }
   const attempted = words.join(" ");
+  // Described word by word: `claims` survives, and anything in the position of
+  // a command word that is not shaped like one does not.
+  const described = describeGrammarWord(attempted);
   throw usage(
     attempted.length === 0
       ? `mento-issues needs a command; expected one of: ${Object.keys(COMMAND_SPECS).join(", ")}`
-      : `Unknown command: ${attempted}`,
-    { command: attempted || null, known: Object.keys(COMMAND_SPECS) },
+      : `Unknown command: ${described}`,
+    {
+      command: attempted.length === 0 ? null : described,
+      known: Object.keys(COMMAND_SPECS),
+    },
   );
 }
 
@@ -436,16 +518,26 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      throw usage(`Unexpected argument: ${token}`, { command: key, token });
+      // A bare argument is a value, and this CLI takes none: it is as likely to
+      // be a pasted credential as anything else on the line, so it is
+      // described rather than repeated.
+      throw usage(`Unexpected argument: ${describeRejectedValue(token)}`, {
+        command: key,
+        token: describeRejectedValue(token),
+      });
     }
     const equals = token.indexOf("=");
     const name = equals === -1 ? token.slice(2) : token.slice(2, equals);
     const inline = equals === -1 ? null : token.slice(equals + 1);
     const declared = grammar[name];
     if (!declared) {
-      throw usage(`Unknown flag --${name} for ${key}`, {
+      // The name only, and only when it is shaped like a flag name. An inline
+      // `--flag=value` never reaches this message: the value is the half that
+      // can be a credential, and naming the flag is what the caller needs.
+      const described = describeGrammarWord(name);
+      throw usage(`Unknown flag --${described} for ${key}`, {
         command: key,
-        flag: name,
+        flag: described,
       });
     }
     if (Object.hasOwn(GATED_FLAGS, name) && !gated.includes(name)) {
@@ -516,6 +608,49 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
 }
 
 /**
+ * The longest `gh` timeout this CLI accepts, in seconds (24 hours).
+ *
+ * The bound is not taste. `runGh` arms its wall-clock timer with
+ * `setTimeout(…, timeoutMs)`, whose delay is a 32-bit signed integer of
+ * milliseconds: anything past that fires immediately instead of late, which
+ * turns a huge timeout into no timeout at all. A day is far past any `gh` call
+ * this package makes and far short of that limit.
+ */
+export const MAX_TIMEOUT_SECONDS = 86_400;
+
+/**
+ * Refuse a timeout that would leave the transport unbounded.
+ *
+ * `runGh` arms its timer only for a finite, positive `timeoutMs`, so `0` and a
+ * negative disabled it silently, and a value large enough for `× 1000` to
+ * overflow to `Infinity` disabled it the same way — a guarded `gh` call with
+ * no wall clock at all, which is the one thing the flag exists to give it.
+ *
+ * @param {unknown} seconds the `--timeout-seconds` value, or undefined.
+ * @returns {number|undefined} the same value.
+ * @throws {ClaimUsageError} for anything that cannot arm a timer.
+ */
+export function assertTimeoutSeconds(seconds) {
+  if (seconds === undefined) return seconds;
+  if (
+    typeof seconds !== "number" ||
+    !Number.isFinite(seconds) ||
+    seconds <= 0 ||
+    seconds > MAX_TIMEOUT_SECONDS
+  ) {
+    const described =
+      typeof seconds === "number" && Number.isFinite(seconds)
+        ? String(seconds)
+        : describeRejectedValue(seconds);
+    throw usage(
+      `--timeout-seconds must be more than 0 and at most ${MAX_TIMEOUT_SECONDS}, got: ${described}`,
+      { flag: "timeout-seconds", value: described },
+    );
+  }
+  return seconds;
+}
+
+/**
  * Zip repeated `--pr`/`--token` occurrences into ordered pairs.
  *
  * AMENDMENTS §D: guard accepts a family as repeated pairs under one run id.
@@ -556,36 +691,6 @@ export function pairClaimFlags(order) {
     });
   }
   return pairs;
-}
-
-/** How much of a rejected value a refusal is allowed to print. */
-const REJECTED_VALUE_PREVIEW = 8;
-
-/**
- * Describe a rejected flag value without reprinting a credential.
- *
- * `--token` is where a credential lands when an agent pastes the wrong
- * variable, and a refusal is printed, logged and stored: it is the last place
- * a secret should be copied to. So a value carrying a credential shape is
- * replaced outright, and anything else is described rather than echoed — short
- * values whole, because an ordinary typo has to stay readable, and longer ones
- * by a preview and a length, because a secret this package has no pattern for
- * is still a secret.
- *
- * @param {unknown} value the rejected value.
- * @returns {string} a description safe to print.
- */
-function describeRejectedValue(value) {
-  if (typeof value !== "string") {
-    return value === null || value === undefined
-      ? String(value)
-      : `<${typeof value}>`;
-  }
-  const redacted = redactSecrets(value);
-  if (redacted !== value) return `${REDACTION} (${value.length} characters)`;
-  if (value.length === 0) return "<empty>";
-  if (value.length <= REJECTED_VALUE_PREVIEW + 4) return value;
-  return `${value.slice(0, REJECTED_VALUE_PREVIEW)}… (${value.length} characters)`;
 }
 
 /**
@@ -643,9 +748,12 @@ export function collectSetFlags(entries, allowed) {
 export function assertOutcome(outcome) {
   if (outcome === undefined) return "completed";
   if (!CLAIM_OUTCOMES.includes(outcome)) {
+    // A slug from a closed vocabulary, so a misspelling is printed back and
+    // anything not shaped like one of those words is described instead.
+    const described = describeGrammarWord(outcome);
     throw usage(
-      `--outcome must be one of ${CLAIM_OUTCOMES.join(", ")}, got: ${outcome}`,
-      { outcome },
+      `--outcome must be one of ${CLAIM_OUTCOMES.join(", ")}, got: ${described}`,
+      { outcome: described },
     );
   }
   return outcome;

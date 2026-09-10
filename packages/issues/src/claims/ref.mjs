@@ -185,11 +185,20 @@ async function defaultSleep(ms) {
   return sleep(ms);
 }
 
+async function listRefCommitsFromGitHub(ctx) {
+  const { listRefCommits } = await import("../gh/rest.mjs");
+  return listRefCommits(ctx.options, ctx.profile.namespace);
+}
+
 /**
- * The five-function operations contract, with production defaults.
+ * The operations contract, with production defaults.
  *
  * Ported from monitoring's `operationsFor` (lines 1040-1056) with the
- * Projects V2 owner-target reader removed.
+ * Projects V2 owner-target reader removed, plus the namespace listing
+ * `listClaims` reads. That one has to be in the bag: a caller that injects a
+ * transport and has no `ctx.operations` — every library consumer, and every
+ * offline test that builds its own context — had its lister dropped here and
+ * reached the REST reader for a listing it had already supplied.
  *
  * @param {object} [overrides] per-call replacements.
  * @returns {object} the operations bag.
@@ -201,6 +210,7 @@ export function operationsFor(overrides = {}) {
     readDefaultBranchCommit:
       overrides.readDefaultBranchCommit ?? readDefaultBranchCommitFromGitHub,
     readClaimRef: overrides.readClaimRef ?? readClaimRefFromGitHub,
+    listRefCommits: overrides.listRefCommits ?? listRefCommitsFromGitHub,
     sleep: overrides.sleep ?? defaultSleep,
   };
 }
@@ -334,14 +344,13 @@ export async function listClaims(ctx, options = {}, overrides = {}) {
   } else if (pattern) {
     const lister =
       listRefs ??
-      // The operations bag, when it carries one: every other read this module
-      // makes is injected through it, and the namespace listing was the one
-      // that could only be replaced by an argument.
+      // The operations bag, which now always carries one: every other read this
+      // module makes is injected through it, and the namespace listing was the
+      // one that could only be replaced by an argument. The REST reader stays
+      // as the last resort for a caller-supplied `ctx.operations` that predates
+      // this entry, so an old bag lists rather than throws.
       operations.listRefCommits ??
-      (async () => {
-        const { listRefCommits } = await import("../gh/rest.mjs");
-        return listRefCommits(ctx.options, ctx.profile.namespace);
-      });
+      listRefCommitsFromGitHub;
     const entries = await lister(ctx);
     discovered = [];
     for (const entry of entries) {

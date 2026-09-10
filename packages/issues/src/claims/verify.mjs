@@ -497,7 +497,21 @@ function defaultScheduleRenews(intervalMs, tick) {
   return () => clearInterval(timer);
 }
 
-function normalizeGuardClaims(claims) {
+/**
+ * Order and validate the pairs a guard was given, before anything acts on one.
+ *
+ * `guardChild` calls it, and so does the CLI — earlier, before it reserves a
+ * host-local slot for each pair. That is not belt and braces: the CLI reserved
+ * one slot per pair and only then derived each ref, so a pair naming `0`
+ * created real files on disk and threw afterwards, leaving reservations no
+ * later guard of that run id could get past.
+ *
+ * @param {object|object[]} claims one `{number, token}` pair, or many.
+ * @returns {Array<{number: number, token: string}>} the validated pairs.
+ * @throws {ClaimUsageError} for an empty list, a number that is not a positive
+ *   integer, a missing token, or one number named twice.
+ */
+export function normalizeGuardClaims(claims) {
   const list = Array.isArray(claims) ? claims : [claims];
   if (list.length === 0) {
     throw new ClaimUsageError("guard needs at least one --pr/--token pair", {
@@ -661,7 +675,9 @@ function exitCodeForSignal(signalName) {
  * @param {string[]} options.argv the child command.
  * @param {boolean} [options.renewIfNeeded] repair one repairable verdict.
  * @param {boolean} [options.advisory] force exit 0; refused on a mandatory gate.
- * @param {AbortSignal} [options.signal] aborts the child.
+ * @param {AbortSignal} [options.signal] stops the guard: the child's whole
+ *   process group is terminated the way a lost claim terminates it, and the
+ *   report says `guard-aborted` with exit 3.
  * @param {(line: string) => void} [options.reportSink] one JSON line per call.
  * @param {Function} [options.spawn] `child_process.spawn` injection point.
  * @param {Function} [options.scheduleRenews] renew-timer injection point.
@@ -943,7 +959,10 @@ export async function guardChild(ctx, claims, options = {}) {
     child = spawn(argv[0], argv.slice(1), {
       shell: false,
       stdio,
-      signal,
+      // `signal` is deliberately NOT passed here; guard acts on it itself,
+      // below. Node's own support signals the direct child pid and nothing
+      // else, which is the exact failure the process group exists to prevent.
+      //
       // The child leads its own process group so a kill reaches everything it
       // started. Killing only the direct child is not a fence: this
       // repository's `git push` runs a pre-push hook that spawns
@@ -1049,6 +1068,30 @@ export async function guardChild(ctx, claims, options = {}) {
       };
       signalForwarders.set(name, handler);
       process.on?.(name, handler);
+    }
+  }
+
+  // An abort is a stop like any other, so it goes through the same path. It
+  // used to be handed to `spawn`, where Node signals the direct child pid and
+  // nothing else: the detached grandchild this guard exists to stop — a
+  // pre-push hook's `trunk check --all` — outlived the abort and kept
+  // publishing, the renew timer was never cancelled, and the `error` listener
+  // reported `spawn-failed` for a child that had spawned and run. Routed here
+  // it gets the group SIGTERM, the SIGKILL escalation after the grace, the
+  // cancelled renews and a verdict of its own.
+  let abortListener = null;
+  const clearAbortListener = () => {
+    if (abortListener !== null) {
+      signal?.removeEventListener?.("abort", abortListener);
+      abortListener = null;
+    }
+  };
+  if (signal) {
+    if (signal.aborted === true) {
+      killChild("guard-aborted");
+    } else {
+      abortListener = () => killChild("guard-aborted");
+      signal.addEventListener?.("abort", abortListener, { once: true });
     }
   }
 
@@ -1238,6 +1281,7 @@ export async function guardChild(ctx, claims, options = {}) {
   finished = true;
   cancelRenews();
   clearSignalForwarders();
+  clearAbortListener();
   // The escalation is NOT cancelled by the child's own exit. `git` and `node`
   // die on SIGTERM in milliseconds, so cancelling here meant the group only
   // ever received SIGTERM and a SIGTERM-ignoring grandchild — the pre-push
@@ -1271,6 +1315,13 @@ export async function guardChild(ctx, claims, options = {}) {
     // forfeit. `killedBy` is what distinguishes the two in the report.
     exitCode = CLAIM_EXIT_CODES.CLAIM_SUPERSEDED;
     status = "lease-expired";
+  } else if (killedBy === "guard-aborted") {
+    // The caller withdrew the operation. Same reading as a signalled guard —
+    // the claim was never lost, and a publishing command was stopped from
+    // outside — with a status of its own, because "who stopped this" is the
+    // one thing the two cases do not share.
+    exitCode = GUARD_SIGNALLED_EXIT_CODE;
+    status = "guard-aborted";
   } else if (killedBy != null) {
     // Guard itself was signalled and passed the signal on. The claim was never
     // lost, so this is not a 13; under the coarse rule 3 is the right reading

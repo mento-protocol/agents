@@ -29,7 +29,12 @@ import {
   createClaimContext,
 } from "../claims/context.mjs";
 import { defaultOperations } from "../claims/ref.mjs";
-import { assertObjectId, commandMutates, parseCommandLine } from "./args.mjs";
+import {
+  assertObjectId,
+  assertTimeoutSeconds,
+  commandMutates,
+  parseCommandLine,
+} from "./args.mjs";
 import { assertPackageIdentity, loadClaimConfig } from "./config.mjs";
 import {
   assertRuntimeResolved,
@@ -240,6 +245,7 @@ async function createRuntime(parsed, options) {
   const warnings = [];
 
   assertObjectIdFlags(flags);
+  assertTimeoutSeconds(flags["timeout-seconds"]);
   // Both sources, one check: the resolved value is what reaches the payload.
   resolveRunId({ flags, env, spec });
   if (spec.requiresConfig && flags.config === undefined) {
@@ -304,7 +310,11 @@ async function createRuntime(parsed, options) {
       override: flags.state ?? options.stateRoot,
     }),
   );
-  const stateStore = createStateStore({
+  // The factory is a seam, not a store: every input below still flows through
+  // it, so a test can wrap the real store — one whose write throws, say — and
+  // keep everything else exactly as production builds it.
+  const buildStateStore = options.createStateStore ?? createStateStore;
+  const stateStore = buildStateStore({
     repository: config.repository,
     root: stateRoot,
     numberKey: config.profile.numberKey,
@@ -425,6 +435,8 @@ function failureStream(spec, stdout, stderr) {
  *   injected operations bags: the five reference operations, the label calls,
  *   and the CLI's own GitHub reads.
  * @param {string} [options.stateRoot] state-file root, for tests.
+ * @param {Function} [options.createStateStore] the state-store factory, for a
+ *   test that needs a store which fails the way a real one can.
  * @param {string} [options.platform] `process.platform`, for tests.
  * @param {(pid: number) => boolean} [options.isProcessAlive] liveness probe.
  * @param {{now: () => number}} [options.clock] the clock.

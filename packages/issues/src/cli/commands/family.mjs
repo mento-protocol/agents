@@ -163,6 +163,14 @@ export async function runFamilyRelease(runtime) {
       { details: { numbers, tokens: tokens.length } },
     );
   }
+  // The whole membership, before the first read and before the plan. Only the
+  // two list lengths were compared, so a member that is not a positive integer
+  // — or one named twice — became a single collected failure while every valid
+  // member was released: a command exit 2 refuses had already written three
+  // references. `planFamilyClaims` is the same check the claim side makes; the
+  // order it returns is not used here, because a release reports in the
+  // caller's own order.
+  planFamilyClaims(numbers);
   markFailureContext(runtime, numbers[0]);
 
   if (ctx.options.dryRun === true) {

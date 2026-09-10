@@ -57,8 +57,8 @@ belongs to the child it spawns, so its own documents go to stderr.
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--config <path>`                           | the policy or package config; required for every `claims` command                                                                                                                                                                                                                                                  |
 | `--json`                                    | the only output mode; accepted for explicitness                                                                                                                                                                                                                                                                    |
-| `--dry-run`                                 | plan and print; performs no write and no label call, and refuses every input the write would have refused                                                                                                                                                                                                          |
-| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60                                                                                                                                                                                                                                                                            |
+| `--dry-run`                                 | plan and print; performs no write and no label mutation, though `label reconcile` still reads the labels it compares, and refuses every input the write would have refused                                                                                                                                         |
+| `--timeout-seconds <n>`                     | per-`gh` wall-clock timeout, default 60; more than 0 and at most 86400, because a value outside that arms no timer at all                                                                                                                                                                                          |
 | `--quiet`                                   | drops `guard`'s pre-spawn verdict line; no effect elsewhere                                                                                                                                                                                                                                                        |
 | `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                                 |
 | `--state <path>`                            | state-file root                                                                                                                                                                                                                                                                                                    |
@@ -124,11 +124,13 @@ goes on to write. `family claim` validates membership first as well, so
 plan that answered `ok` for an input the run would have rejected was worse than
 no plan.
 
-**A dry run leaves nothing behind.** No ref is written and no label call is
-made, and the host-local state file is not touched either: `guard --dry-run` is
-refused before it reserves a slot, records a `guarding` entry or replaces a
+**A dry run leaves nothing behind.** No ref is written, no label is added or
+removed, and the host-local state file is not touched either: `guard --dry-run`
+is refused before it reserves a slot, records a `guarding` entry or replaces a
 `--report` file, and `adopt --dry-run` names the entry it would write without
-writing it.
+writing it. Reads still happen, and one of them is a label read:
+`label reconcile` lists the pull request's labels to report the difference it
+would apply. Nothing under `--dry-run` mutates a label.
 
 **`--set` writes claim metadata**, restricted to the profile's keys —
 `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl`. They survive both
@@ -194,8 +196,11 @@ instant another run becomes free to publish.
 
 If guard itself is signalled (`SIGINT`, `SIGTERM`, `SIGHUP`) it forwards the
 signal to that group and exits **3**, with `killedBy: "guard-<signal>"` in the
-report. `detached` takes the child out of the terminal's foreground group, so
-without that forwarding a Ctrl-C would kill guard and leave the child
+report. A library caller's `AbortSignal` stops it the same way, reported as
+`killedBy: "guard-aborted"` and `status: "guard-aborted"`: the abort reaches
+the whole process group, not the direct child alone, so a detached grandchild
+cannot outlive it. `detached` takes the child out of the terminal's foreground
+group, so without that forwarding a Ctrl-C would kill guard and leave the child
 publishing under a lease nothing renews. The same `detached` gives the child no
 controlling terminal, so a guarded command must be non-interactive: a
 credential prompt fails rather than hanging, which is the right failure for an
@@ -227,7 +232,12 @@ each spawn a publishing child.
 
 #### The guard slot, and `claims slot clear`
 
-Before it spawns, guard creates one host-local file per guarded pair —
+Every `--pr`/`--token` pair is validated first — a positive number, a token, and
+no number named twice — because everything below creates files: a pair naming
+`0` used to reserve a slot for each valid pair and then fail deriving its ref,
+leaving reservations only `claims slot clear` could remove.
+
+Before it spawns, guard then creates one host-local file per guarded pair —
 `<state dir>/<owner>__<repo>/pr-<n>.guard-<digest of run id>.json`, with owner
 and repository lowercased so one repository has one directory however it is
 spelled — with an **exclusive create**. That create is the whole reservation: exactly one of any
@@ -476,7 +486,8 @@ they must together name every fence purpose exactly once, and `verify` and
 `guard` use them. `markerRevision` (and the optional top-level
 `markers.revision`) must be `v1` or `v2`, and `markers build`/`markers verify`
 refuse a job whose schema disagrees with it. `gh.timeoutSeconds` is the
-per-`gh` wall-clock default that `--timeout-seconds` overrides.
+per-`gh` wall-clock default that `--timeout-seconds` overrides, and the loader
+bounds it exactly as the flag is bounded: a positive integer of at most 86400.
 
 `profile: "issue-board"` is a valid **library** profile — it is the executable
 proof that this package is a byte-for-byte drop-in for monitoring's mutex — but
