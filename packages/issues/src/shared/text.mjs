@@ -37,3 +37,28 @@ export function isSafeSingleLineText(value, maxLength) {
     !hasUnsafeSingleLineCharacter(value)
   );
 }
+
+/** Characters a shell leaves alone, so they need no quoting at all. */
+const SHELL_SAFE_PATTERN = /^[A-Za-z0-9_./:@=-]+$/u;
+
+/**
+ * Render one value for a command line a human will paste into a shell.
+ *
+ * Single quotes, never `JSON.stringify`: a double-quoted argument is still
+ * expanded by every POSIX shell, so a path holding `$SOMETHING_UNSET` reached
+ * the CLI with that segment replaced by nothing and the printed command acted
+ * on the wrong file. Inside single quotes a shell expands nothing; the only
+ * character needing care is the single quote itself, which is closed, escaped
+ * and reopened.
+ *
+ * Every generated command line in this package goes through here: the
+ * guard-slot recovery command, the `next` block and the operator recovery text.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function quoteForCommand(value) {
+  const text = String(value);
+  if (SHELL_SAFE_PATTERN.test(text)) return text;
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}

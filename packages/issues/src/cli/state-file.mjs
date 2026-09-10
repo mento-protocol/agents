@@ -34,6 +34,7 @@ import {
 import { join } from "node:path";
 
 import { splitRepo } from "../shared/split-repo.mjs";
+import { quoteForCommand } from "../shared/text.mjs";
 
 /** The state document schema. */
 export const STATE_SCHEMA = "mento-issues-lease:v1";
@@ -112,26 +113,6 @@ export function probeProcessState(pid) {
     if (error?.code === "EPERM") return "restricted";
     return "unknown";
   }
-}
-
-/**
- * Render one value for a command line a human will copy into a shell.
- *
- * Single quotes, not `JSON.stringify`. A double-quoted argument is still
- * expanded by every POSIX shell, so a state root holding
- * `$ISSUES_REVIEW_UNSET` reached the CLI with that segment replaced by
- * nothing, and the printed command answered `absent` while the slot it named
- * stayed exactly where it was. A single-quoted one expands nothing at all, and
- * the only character needing care is the single quote itself: closed, escaped,
- * reopened.
- *
- * @param {string} value
- * @returns {string}
- */
-function quoteForCommand(value) {
-  const text = String(value);
-  if (/^[A-Za-z0-9_./:@=-]+$/u.test(text)) return text;
-  return `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
 /**

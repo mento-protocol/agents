@@ -72,16 +72,23 @@ export function defaultLabelOperations() {
     },
 
     async listIssueLabels(ctx, number) {
-      const listed = await ghJsonFor(
+      const { PAGINATED_JSON_FLAGS, flattenPaginatedJson } =
+        await import("../gh/rest.mjs");
+      // `--paginate` on its own emits one JSON body per page, and the parse
+      // then fails on the concatenation: a pull request with more labels than
+      // one page answered `GH_INVALID_JSON` rather than listing them. `--slurp`
+      // makes the pages a single array, flattened here.
+      const pages = await ghJsonFor(
         ctx,
         [
           "api",
-          "--paginate",
+          ...PAGINATED_JSON_FLAGS,
           `repos/${repositoryPath(ctx)}/issues/${number}/labels`,
         ],
         false,
       );
-      if (!Array.isArray(listed)) return [];
+      const listed = flattenPaginatedJson(pages);
+      if (listed === null) return [];
       return listed
         .map((entry) => entry?.name)
         .filter((entry) => typeof entry === "string");

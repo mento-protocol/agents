@@ -2077,7 +2077,14 @@ test("the printed adopt recovery for an unknown outcome runs verbatim and adopts
   const withoutRunId = argv.filter(
     (item, index) => item !== "--run-id" && argv[index - 1] !== "--run-id",
   );
-  const elsewhere = await invoke(withoutRunId, {
+  // The printed line pins `--state` as well, which is the whole point of it:
+  // it resolves to the store this run used. Simulating another host therefore
+  // means dropping that flag too, not only pointing `stateRoot` elsewhere.
+  const onAnotherHost = withoutRunId.filter(
+    (item, index) =>
+      item !== "--state" && withoutRunId[index - 1] !== "--state",
+  );
+  const elsewhere = await invoke(onAnotherHost, {
     ...context.options,
     stateRoot: join(context.directory, "another-host"),
   });
@@ -3085,6 +3092,221 @@ test("a slot a refusal could not give back is named in that refusal", async () =
     foreign,
     "and the slot it could not give back is still there",
   );
+});
+
+test("every generated command carries the globals that decide where it runs", async () => {
+  // A printed line is meant to be run as written, and a follow-up that
+  // resolves differently from the run that printed it is worse than none: a
+  // `guard` without `--state` reserves its slot in another store, a `renew`
+  // without the `--runtime` this run needed records a different owner, and a
+  // `--config` interpolated raw is taken apart by the first shell that sees a
+  // space or a `$` in the path.
+  const context = harness();
+  const claimed = await claimOnce(context, [
+    "--runtime",
+    "openclaw",
+    "--agent",
+    "codex",
+    "--timeout-seconds",
+    "30",
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const next = claimed.document.next;
+  const expected =
+    ` --config ${context.configPath}` +
+    ` --state ${context.options.stateRoot}` +
+    " --runtime openclaw --agent codex --timeout-seconds 30";
+  for (const [name, line] of Object.entries(next)) {
+    assert.ok(
+      line.startsWith(`mento-issues claims ${name.replace("read", "read")}`) ||
+        line.startsWith("mento-issues claims"),
+      `${name} is a claims command: ${line}`,
+    );
+    assert.ok(line.includes(expected), `${name} carries the globals: ${line}`);
+  }
+  // `--host` and `--login` were not given, so they are not invented; the
+  // config's own values need no flag, because the follow-up loads that config.
+  assert.equal(next.read.includes("--host"), false);
+  assert.equal(next.read.includes("--login"), false);
+
+  // A failure document's own `next` block is rendered by the same globals,
+  // rather than by a second interpolation of its own.
+  const refused = await context.run([
+    "claims",
+    "renew",
+    "--pr",
+    String(PR),
+    "--token",
+    hexOid(9),
+    "--run-id",
+    RUN_ID,
+    "--runtime",
+    "openclaw",
+  ]);
+  assert.notEqual(refused.exitCode, 0);
+  assert.ok(
+    refused.document.next.read.includes(
+      ` --config ${context.configPath} --state ${context.options.stateRoot} --runtime openclaw`,
+    ),
+    refused.document.next.read,
+  );
+});
+
+test("a config path a shell would take apart is quoted in every printed line", async () => {
+  // The same POSIX single-quoting the slot-recovery command uses. A raw path
+  // holding a space or an unset variable reference reached the follow-up
+  // command as a different path, or as two arguments.
+  const context = harness();
+  const awkward = join(context.directory, "config $UNSET dir it's here.json");
+  mkdirSync(dirname(awkward), { recursive: true });
+  writeFileSync(awkward, readFileSync(context.configPath, "utf8"));
+
+  const claimed = await invoke(
+    ["claims", "claim", "--pr", String(PR), "--config", awkward],
+    context.options,
+  );
+  assert.equal(claimed.exitCode, 0);
+  const quoted = `'${awkward.replaceAll("'", `'\\''`)}'`;
+  for (const line of Object.values(claimed.document.next)) {
+    assert.ok(line.includes(`--config ${quoted}`), line);
+  }
+  assert.ok(claimed.document.next.read.includes("$UNSET"), "unexpanded");
+});
+
+test("the printed adopt recovery carries the config it must be run with", async () => {
+  // `operatorText` says "Run `<line>`", and the line was a `claims adopt`
+  // without a `--config`: every `claims` command needs one, so following the
+  // instruction verbatim exited 2 for an operator already handling an unknown
+  // outcome.
+  const context = harness();
+  await claimOnce(context);
+  let reads = 0;
+  const flaky = {
+    ...context.server.operations,
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads > 2) throw new Error("read failed");
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+  context.server.applyThenThrow("compareAndSwapRef", "response lost", 2);
+  const unknown = await context.run(["claims", "claim", "--pr", "880"], {
+    operations: { ...context.options.operations, claims: flaky },
+  });
+  assert.equal(unknown.exitCode, 12);
+  const operatorText = unknown.document.error.recovery.operatorText;
+  assert.match(operatorText, /Run `mento-issues claims adopt --config /u);
+  assert.ok(
+    operatorText.includes(
+      `--config ${context.configPath} --state ${context.options.stateRoot}`,
+    ),
+    operatorText,
+  );
+});
+
+test("markers honour --dry-run instead of writing the file anyway", async () => {
+  // `--dry-run` is a global flag and these commands ignored it: the `--out`
+  // file was overwritten and the document then said `dryRun: false`, which is
+  // the one thing a planning run must never do. The bytes are still built and
+  // still reported.
+  const context = harness();
+  const job = writeJson(context.directory, "summary-job.json", {
+    pr: PR,
+    claim: hexOid(3),
+    ownerRunId: RUN_ID,
+    operator: { id: 42, login: "chapati23", type: "User" },
+  });
+  const out = join(context.directory, "summary-block.txt");
+  writeFileSync(out, "the bytes that were already there\n");
+
+  const planned = await context.run([
+    "markers",
+    "summary",
+    "--input",
+    job,
+    "--out",
+    out,
+    "--dry-run",
+  ]);
+  assert.equal(planned.exitCode, 0);
+  assert.equal(planned.document.dryRun, true, "the run says it planned");
+  assert.equal(planned.document.written, false);
+  assert.equal(planned.document.out, out, "and names what it would write");
+  assert.ok(planned.document.block.length > 0, "the bytes are still built");
+  assert.equal(
+    readFileSync(out, "utf8"),
+    "the bytes that were already there\n",
+    "the file is untouched",
+  );
+
+  // Without the flag it writes, and says so.
+  const written = await context.run([
+    "markers",
+    "summary",
+    "--input",
+    job,
+    "--out",
+    out,
+  ]);
+  assert.equal(written.exitCode, 0);
+  assert.equal(written.document.dryRun, false);
+  assert.equal(written.document.written, true);
+  assert.equal(readFileSync(out, "utf8"), written.document.block);
+});
+
+test("claims.author is validated where a typo can still be fixed", async () => {
+  // The transport refused an empty, multi-line or over-long author with a
+  // `GhEnvError` — but only when it came to build the first commit, after the
+  // reads that precede it. The same rule runs at config load, so a policy typo
+  // is a config refusal before anything reaches the network.
+  const context = harness();
+  for (const [field, value, label] of [
+    ["name", "", "empty"],
+    ["name", "  ", "whitespace only"],
+    ["name", "Mento\nclaims", "a line break"],
+    ["email", "a".repeat(121), "over the length bound"],
+    ["email", " claims@example.com", "leading whitespace"],
+    ["email", "claims@example.com ", "trailing whitespace"],
+  ]) {
+    const configPath = writeJson(context.directory, `author-${label}.json`, {
+      ...packageDocument(),
+      claims: {
+        ...packageDocument().claims,
+        author: {
+          name: "Mento claims",
+          email: "claims@users.noreply.github.com",
+          [field]: value,
+        },
+      },
+    });
+    const refused = await invoke(
+      ["claims", "read", "--pr", String(PR), "--config", configPath],
+      context.options,
+    );
+    assert.equal(refused.exitCode, 3, `${field} ${label}`);
+    assert.equal(refused.document.status, "config");
+    assert.match(
+      refused.document.error.message,
+      new RegExp(
+        `claims\\.author\\.${field} must be a non-empty single-line`,
+        "u",
+      ),
+    );
+  }
+
+  // A valid author still loads.
+  const good = writeJson(context.directory, "author-good.json", {
+    ...packageDocument(),
+    claims: {
+      ...packageDocument().claims,
+      author: { name: "Mento claims", email: "claims@example.com" },
+    },
+  });
+  const accepted = await invoke(
+    ["claims", "read", "--pr", String(PR), "--config", good],
+    context.options,
+  );
+  assert.equal(accepted.exitCode, 0);
 });
 
 test("no takeover path exists: a paused guard keeps its slot and every other refuses", () => {

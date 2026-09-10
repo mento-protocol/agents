@@ -317,6 +317,12 @@ is refused with exit 3. `markers summary` reads the other policy field,
 bytes. Nothing else in `reporting` is read here; `prCommentMarker` and the rest
 belong to the consuming skill.
 
+`build`, `summary` and `vectors` also honour the global **`--dry-run`**: the
+bytes are built and reported exactly as they would be, `--out` is named in
+`out`, and the file is left alone. The document then says `dryRun: true` and
+`written: false`, which is how a planning run is told apart from a writing one.
+Without the flag, `written: true` records that the file was replaced.
+
 ## Exit codes
 
 | Exit | `status`                                                                              | Action                                                      |
@@ -410,6 +416,11 @@ That last rule is guard's: a claim becomes takeable `minRemainingMs + graceMs`
 after a positive verdict, and guard's renew tick has to fit inside that window.
 The same rules apply to the lease the gated flags produce.
 
+`author.name` and `author.email` are held to the rule the transport enforces on
+a commit: non-empty, single-line, no surrounding whitespace, at most 120
+characters. They are checked at load, so a policy typo is exit 3 before
+anything runs rather than a transport fault part-way through an acquire.
+
 `package.version` must be an exact `major.minor.patch`: there is no
 `minimumVersion`, no range and no integrity digest, because npm registry
 immutability plus an exact version is the pin. `package.name` must be the
@@ -490,6 +501,17 @@ rather than reporting a landed claim as superseded.
 
 Every document reprints `next` with the **current** token, so the newest
 document always supersedes an older one.
+
+**Every generated line runs as written.** A printed follow-up carries the
+globals that decide where it resolves — `--config`, `--state` when this run is
+not on the host's default state root, and any `--host`, `--runtime`, `--login`,
+`--agent` or `--timeout-seconds` the invocation supplied — and each value is
+POSIX single-quoted, so a path holding a space, a quote or a `$VARIABLE` reaches
+the CLI intact. Anything the config file itself carries is left to the config,
+since the follow-up loads that same file. This covers `next`, the `inspect`
+line, and the `adopt` command inside `error.recovery.operatorText`: a line
+printed without `--config` exited 2 for the operator who followed it, and one
+printed without `--state` would reserve its guard slot in a different store.
 
 ## Using this from a repository policy
 

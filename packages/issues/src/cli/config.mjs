@@ -24,6 +24,10 @@ import { CLAIM_PROFILES, claimProfile } from "../claims/profile.mjs";
 import { FENCE_PURPOSES, canonicalFencePurpose } from "../claims/verify.mjs";
 import { assertValidRefName } from "../shared/ref-name.mjs";
 import { isExactSemanticVersion } from "../shared/exact-version.mjs";
+import {
+  SINGLE_LINE_TEXT_MAX_LENGTH,
+  isSafeSingleLineText,
+} from "../shared/text.mjs";
 
 /** The document schemas this loader knows. */
 export const CONFIG_SCHEMAS = Object.freeze({
@@ -387,6 +391,21 @@ function normalizeClaimsBlock(rawClaims) {
       throw configError("claims.author must carry a name and an email", {
         details: { author: claims.author ?? null },
       });
+    }
+    // The rule `createCommit` already enforces, applied where it can still be
+    // acted on. The transport refused an empty, multi-line or over-long author
+    // with a `GhEnvError`, but only after the reads that precede the first
+    // commit — so a policy typo surfaced as a transport fault part-way through
+    // an acquire instead of a config refusal before anything ran.
+    for (const field of ["name", "email"]) {
+      if (
+        !isSafeSingleLineText(claims.author[field], SINGLE_LINE_TEXT_MAX_LENGTH)
+      ) {
+        throw configError(
+          `claims.author.${field} must be a non-empty single-line value of at most ${SINGLE_LINE_TEXT_MAX_LENGTH} characters, with no surrounding whitespace`,
+          { details: { field, author: claims.author } },
+        );
+      }
     }
   }
   if (claims.command !== null) {

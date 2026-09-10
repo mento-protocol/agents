@@ -99,7 +99,7 @@ export async function runRelease(runtime) {
           status: label.status,
         },
         next: buildNextCommands({
-          configPath: runtime.configPath,
+          globals: runtime.commandGlobals ?? "",
           number,
           numberFlag: ctx.profile.numberKey,
         }),
@@ -133,7 +133,7 @@ export async function runRelease(runtime) {
           : { oid: result.unlock.oid, parentLock: token },
       label: { name: label.name, changed: label.changed, status: label.status },
       next: buildNextCommands({
-        configPath: runtime.configPath,
+        globals: runtime.commandGlobals ?? "",
         number,
         numberFlag: ctx.profile.numberKey,
       }),

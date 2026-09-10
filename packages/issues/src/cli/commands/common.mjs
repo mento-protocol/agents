@@ -26,7 +26,7 @@ export function markFailureContext(runtime, number) {
   runtime.failureNumber = number;
   runtime.failureInspect = readCommand(runtime, number);
   runtime.failureNext = buildNextCommands({
-    configPath: runtime.configPath,
+    globals: runtime.commandGlobals ?? "",
     number,
     numberFlag: ctx.profile.numberKey,
   });
@@ -41,9 +41,10 @@ export function markFailureContext(runtime, number) {
  * @returns {string}
  */
 export function readCommand(runtime, number) {
-  const config =
-    runtime.configPath === null ? "" : ` --config ${runtime.configPath}`;
-  return `mento-issues claims read${config} --${runtime.ctx.profile.numberKey} ${number}`;
+  // The same globals every other printed line carries, quoted the same way. A
+  // second renderer interpolating the raw config path was one more line a
+  // shell could take apart, and one more that resolved to a different store.
+  return `mento-issues claims read${runtime.commandGlobals ?? ""} --${runtime.ctx.profile.numberKey} ${number}`;
 }
 
 /**
@@ -56,7 +57,7 @@ export function readCommand(runtime, number) {
  */
 export function nextForLease(runtime, number, lease) {
   return buildNextCommands({
-    configPath: runtime.configPath,
+    globals: runtime.commandGlobals ?? "",
     number,
     numberFlag: runtime.ctx.profile.numberKey,
     token: lease.token,

@@ -360,7 +360,11 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
   assert.equal(foreign.treeOid, null);
   assert.equal(foreign.targetType, "Tag");
 
-  // Prefix listing keeps every ref under the namespace, for `claims list`.
+  // Prefix listing keeps every ref under the namespace, for `claims list` —
+  // every ref, not every ref on the first page. Without `--paginate` a
+  // namespace past GitHub's page size lost the rest of itself silently, and
+  // `--paginate` without `--slurp` emits one JSON body per page, which the
+  // parse then refuses outright. Both flags go, and the pages are flattened.
   const listed = await listRefCommits(
     { repo: "owner/name" },
     "refs/mento-claims/v1/pr",
@@ -368,14 +372,19 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
       json: async (args) => {
         assert.deepEqual(args, [
           "api",
+          "--paginate",
+          "--slurp",
           "repos/owner/name/git/matching-refs/mento-claims/v1/pr",
         ]);
+        // Two pages, in the shape `--slurp` returns them.
         return [
-          {
-            ref: "refs/mento-claims/v1/pr/87",
-            object: { sha: PARENT_OID, type: "commit" },
-          },
-          { ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } },
+          [
+            {
+              ref: "refs/mento-claims/v1/pr/87",
+              object: { sha: PARENT_OID, type: "commit" },
+            },
+          ],
+          [{ ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } }],
         ];
       },
     },
@@ -384,11 +393,26 @@ test("dryRun with mutates skips the subprocess while dryRun alone still executes
     { ref: "refs/mento-claims/v1/pr/87", oid: PARENT_OID, type: "commit" },
     { ref: REF_NAME, oid: COMMIT_OID, type: "commit" },
   ]);
+  // One page, and a flat list from a caller that never paged, both still read.
+  assert.deepEqual(
+    await listRefCommits({ repo: "owner/name" }, "refs/mento-claims/v1/pr", {
+      json: async () => [
+        [{ ref: REF_NAME, object: { sha: COMMIT_OID, type: "commit" } }],
+      ],
+    }),
+    [{ ref: REF_NAME, oid: COMMIT_OID, type: "commit" }],
+  );
   assert.deepEqual(
     await listRefCommits({ repo: "owner/name" }, "refs/mento-claims/v1/pr", {
       json: async () => null,
     }),
     [],
+  );
+  await assert.rejects(
+    listRefCommits({ repo: "owner/name" }, "refs/mento-claims/v1/pr", {
+      json: async () => ({ message: "Not Found" }),
+    }),
+    /unexpected non-array matching-refs listing/u,
   );
 
   // The viewer login is read once per process.

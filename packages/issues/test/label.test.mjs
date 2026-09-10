@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  defaultLabelOperations,
   ensureClaimLabel,
   projectClaimLabel,
   projectClaimLabelAfter,
@@ -362,4 +363,53 @@ test("ensureClaimLabel reports an existing label and never edits its color or de
   const disabled = await ensureClaimLabel(unlabelled, {}, fresh.operations);
   assert.equal(disabled.status, "disabled");
   assert.equal(disabled.name, null);
+});
+
+test("the issue-label listing reads every page, not the first one", async () => {
+  // `--paginate` emits one JSON body per page, and the parse used to run once
+  // over the concatenation: a pull request with more labels than fit a page
+  // answered `GH_INVALID_JSON` rather than listing them, and before the flag
+  // existed the listing simply stopped at the page size. `--slurp` makes the
+  // pages one array; they are flattened after the parse.
+  //
+  // The real transport runs here — the context carries the runner, so the argv
+  // and the parse are the production ones, with only `gh` itself replaced.
+  const calls = [];
+  const pages = [
+    [{ name: LABEL }, { name: "needs-decision" }],
+    [{ name: "blocked" }, { id: 7 }],
+  ];
+  const ctx = {
+    options: {
+      repo: "mento-protocol/frontend-monorepo",
+      run: async (args) => {
+        calls.push(args);
+        // Exactly what `gh api --paginate --slurp` prints.
+        return `${JSON.stringify(pages)}\n`;
+      },
+    },
+  };
+
+  const listed = await defaultLabelOperations().listIssueLabels(ctx, PR);
+  assert.deepEqual(calls, [
+    [
+      "api",
+      "--paginate",
+      "--slurp",
+      "repos/mento-protocol/frontend-monorepo/issues/872/labels",
+    ],
+  ]);
+  assert.deepEqual(listed, [LABEL, "needs-decision", "blocked"]);
+
+  // A single page, and an empty body, both still read.
+  const one = await defaultLabelOperations().listIssueLabels(
+    { options: { ...ctx.options, run: async () => `[[{"name":"${LABEL}"}]]` } },
+    PR,
+  );
+  assert.deepEqual(one, [LABEL]);
+  const none = await defaultLabelOperations().listIssueLabels(
+    { options: { ...ctx.options, run: async () => "" } },
+    PR,
+  );
+  assert.deepEqual(none, []);
 });

@@ -51,7 +51,7 @@ export async function runRead(runtime) {
               mine: ours,
             },
       next: buildNextCommands({
-        configPath: runtime.configPath,
+        globals: runtime.commandGlobals ?? "",
         number,
         numberFlag: ctx.profile.numberKey,
         token: ours ? state.oid : null,

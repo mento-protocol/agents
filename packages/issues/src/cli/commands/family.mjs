@@ -198,7 +198,7 @@ export async function runFamilyRelease(runtime) {
       released: releasedNumbers,
       failures: failures.map((failure) => failure.number),
       next: buildNextCommands({
-        configPath: runtime.configPath,
+        globals: runtime.commandGlobals ?? "",
         number: numbers[0],
         numberFlag: ctx.profile.numberKey,
       }),

@@ -27,6 +27,11 @@ function quote(value) {
 function adoptCommand(lease, action, operationId) {
   const number = lease.scope[lease.profile.numberKey];
   const flag = lease.profile.numberKey === "pr" ? "--pr" : "--issue";
+  // Every `claims` command needs a `--config`, so a line printed without one
+  // exits 2 the moment an operator runs it — for a recovery whose whole point
+  // is to be run verbatim. The CLI hands the context the same globals it
+  // renders for every other printed line, quoted the same way.
+  const globals = lease.ctx?.options?.commandGlobals ?? "";
   const actionFlag = action ? ` --action ${action}` : "";
   // A release adoption also proves the candidate closes THIS run's LOCK:
   // `adoptRelease` compares the observed UNLOCK's `parentLock` to the parent
@@ -46,7 +51,7 @@ function adoptCommand(lease, action, operationId) {
   // `lock-<uuid>` matches no UNLOCK: the operator's command would skip the
   // `not-applied` branch and answer a classified error for a landed release.
   const id = operationId ?? lease.payload.operationId;
-  return `mento-issues claims adopt ${flag} ${number} --candidate <oid> --operation-id ${id}${runIdFlag}${parentLockFlag}${actionFlag}`;
+  return `mento-issues claims adopt${globals} ${flag} ${number} --candidate <oid> --operation-id ${id}${runIdFlag}${parentLockFlag}${actionFlag}`;
 }
 
 /**

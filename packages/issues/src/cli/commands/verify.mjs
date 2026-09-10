@@ -101,7 +101,7 @@ export async function runVerify(runtime) {
         : null,
       holder: report.holder,
       next: buildNextCommands({
-        configPath: runtime.configPath,
+        globals: runtime.commandGlobals ?? "",
         number,
         numberFlag: ctx.profile.numberKey,
         token: currentToken,

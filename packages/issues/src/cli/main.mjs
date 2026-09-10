@@ -42,6 +42,7 @@ import {
   buildFailure,
   buildNextCommands,
   buildResult,
+  renderCommandGlobals,
   writeDocument,
 } from "./output.mjs";
 import { createStateStore, stateRootFor } from "./state-file.mjs";
@@ -303,6 +304,18 @@ async function createRuntime(parsed, options) {
     clock: runtime.clock,
   });
   runtime.stateStore = stateStore;
+  // Every command line this run prints — the `next` block, the operator
+  // recovery text, the guard-slot clear command — carries these, so a printed
+  // follow-up resolves the way this run did.
+  runtime.commandGlobals = renderCommandGlobals({
+    configPath: runtime.configPath,
+    flags,
+    stateRoot: stateStore.root,
+    defaultStateRoot: stateRootFor({
+      env,
+      platform: options.platform ?? process.platform,
+    }),
+  });
 
   // The flag wins over the config, and the config over the transport default.
   const timeoutMs =
@@ -316,6 +329,10 @@ async function createRuntime(parsed, options) {
     options: {
       repo: config.repository,
       dryRun: flags["dry-run"] === true,
+      // Carried so the recovery text can print an `adopt` line that runs: the
+      // line is `claims adopt`, every `claims` command needs a `--config`, and
+      // one printed without it exits 2 for the operator following it.
+      commandGlobals: runtime.commandGlobals,
       // Every `gh` call this context makes runs under the environment the CLI
       // was given, not an ambient one. It is also what keeps the offline suite
       // offline: a test's environment carries no credentials.
@@ -416,7 +433,7 @@ function recordUnknownOutcome(runtime, error) {
   return {
     statePath: written.path,
     next: buildNextCommands({
-      configPath: runtime.configPath,
+      globals: runtime.commandGlobals ?? "",
       number,
       numberFlag: runtime.ctx?.profile?.numberKey ?? "pr",
       candidate: candidate.oid,
@@ -476,7 +493,12 @@ export async function runCli(argv, options = {}) {
       status,
       exitCode,
       body: result.body ?? {},
-      dryRun: runtime.ctx?.options?.dryRun === true,
+      // The flag as well as the claim context: `markers` and `config` build no
+      // context, so a `--dry-run` there reported `dryRun: false` while the
+      // command went on writing its `--out` file.
+      dryRun:
+        runtime.ctx?.options?.dryRun === true ||
+        runtime.flags?.["dry-run"] === true,
       repository: runtime.config?.repository ?? null,
       ref: result.ref ?? null,
       scope: result.scope ?? null,

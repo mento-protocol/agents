@@ -839,6 +839,16 @@ graphql repository(owner,name){ id defaultBranchRef { target { ... on Commit { o
 graphql mutation { updateRefs(input:{ repositoryId, refUpdates:[{ name, beforeOid, afterOid, force:false }] }) { clientMutationId } }
 ```
 
+Both listings — the namespace's `matching-refs` and a pull request's labels —
+are read with `--paginate --slurp`. Neither flag alone is enough: without
+`--paginate` a namespace past GitHub's page size lost the rest of itself in
+silence (monitoring already advertises 101 refs, so `claims list --stale`
+would have reported on a subset), and `--paginate` on its own emits one JSON
+body per page, which a single `JSON.parse` refuses outright. `--slurp` returns
+the pages as one array and the caller flattens them. It needs `gh` 2.42 or
+newer; an older one exits with an unknown-flag error, which is loud rather than
+a truncated answer.
+
 `Repository.ref(qualifiedName:)` returns `null` outside `refs/heads` and
 `refs/tags` — verified live — so the REST-then-object path is mandatory rather
 than a preference. `force` is a literal in the document and never a parameter;
@@ -1220,6 +1230,16 @@ publicationBlocked, recovery, advice }`; an unknown outcome fills
 `error.recovery { candidate, lastKnownOid, doNotRetry, operatorText, inspect }`
 and `next.adopt`. Every command reprints `next` with the **current** token, so
 the newest document always supersedes an older one.
+
+Every generated command line comes from one renderer and carries the globals
+that decide where it resolves: `--config`, `--state` when the run is not on the
+host's default state root, and any `--host`, `--runtime`, `--login`, `--agent`
+or `--timeout-seconds` the invocation supplied. Values are POSIX single-quoted,
+never `JSON.stringify`-quoted, because a double-quoted argument is still
+expanded by a shell. What the config file already carries stays there, since the
+follow-up loads that same file. The rule covers `next`, the `inspect` line and
+the `adopt` line inside `operatorText`: one printed without `--config` exits 2
+for the operator running it, and one without `--state` reads a different store.
 
 ## Consumption
 

@@ -120,13 +120,49 @@ export function callOptions(options, mutates, extra = {}) {
   if (options?.timeoutMs != null) derived.timeoutMs = options.timeoutMs;
   if (options?.signal != null) derived.signal = options.signal;
   if (options?.env != null) derived.env = options.env;
+  // A runner the context carries. `ghJson` has always taken one; forwarding it
+  // here is what lets the offline suite exercise a real argv — the label
+  // listing's pagination flags, say — instead of replacing the whole call.
+  if (options?.run != null) derived.run = options.run;
   return { ...derived, ...extra };
 }
 
 const MATCHING_REFS_PREFIX = "refs/".length;
 
 /**
- * Every ref under a prefix, as GitHub advertises it.
+ * The two flags that make a listing complete, and the shape they produce.
+ *
+ * Without `--paginate` a listing stops at GitHub's page size, so a namespace
+ * that grew past it silently lost every ref after the first page — and
+ * `claims list --stale` reported on a subset while saying nothing about it.
+ * `--paginate` alone is not enough either: it concatenates one JSON body per
+ * page, which `JSON.parse` refuses as soon as there are two. `--slurp` wraps
+ * the pages in a single array, and they are flattened here. It needs `gh`
+ * 2.42 or newer; an older one exits with an unknown-flag error, which is loud
+ * rather than a truncated answer.
+ */
+export const PAGINATED_JSON_FLAGS = Object.freeze(["--paginate", "--slurp"]);
+
+/**
+ * Flatten a `--slurp` result into one list.
+ *
+ * One page arrives as `[[…]]` and several as `[[…], […]]`. A flat array of
+ * entries is left as it is, because `flat` unwraps only the arrays it finds:
+ * that is what keeps every injected offline fake working unchanged.
+ *
+ * @param {unknown} value the parsed `gh` output.
+ * @returns {unknown[]|null} the flattened entries, or `null` when the value is
+ *   not a list at all.
+ */
+export function flattenPaginatedJson(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) return null;
+  return value.flat();
+}
+
+/**
+ * Every ref under a prefix, as GitHub advertises it. Paginated: a namespace
+ * larger than one page is read in full or not at all.
  *
  * @param {{ repo: string }} options
  * @param {string} refPrefix `refs/`-rooted prefix, e.g. `refs/mento-claims/v1/pr`.
@@ -140,15 +176,16 @@ export async function listRefCommits(
 ) {
   const { nameWithOwner } = assertRepository(options);
   assertTransportRefName(refPrefix, "ref prefix");
-  const matches = await json(
+  const pages = await json(
     [
       "api",
+      ...PAGINATED_JSON_FLAGS,
       `repos/${nameWithOwner}/git/matching-refs/${refPrefix.slice(MATCHING_REFS_PREFIX)}`,
     ],
     callOptions(options, false),
   );
-  if (matches == null) return [];
-  if (!Array.isArray(matches)) {
+  const matches = flattenPaginatedJson(pages);
+  if (matches === null) {
     throw new GhCommandError(
       `unexpected non-array matching-refs listing for ${nameWithOwner}`,
       { code: "GH_UNEXPECTED_RESPONSE" },

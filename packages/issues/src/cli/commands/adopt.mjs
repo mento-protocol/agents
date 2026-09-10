@@ -124,7 +124,7 @@ export async function runAdopt(runtime) {
         action,
         unlock: adopted.unlock ? { oid: adopted.unlock.oid } : null,
         next: buildNextCommands({
-          configPath: runtime.configPath,
+          globals: runtime.commandGlobals ?? "",
           number,
           numberFlag: ctx.profile.numberKey,
         }),
@@ -154,7 +154,7 @@ export async function runAdopt(runtime) {
       next: adopted.lease
         ? nextForLease(runtime, number, adopted.lease)
         : buildNextCommands({
-            configPath: runtime.configPath,
+            globals: runtime.commandGlobals ?? "",
             number,
             numberFlag: ctx.profile.numberKey,
           }),

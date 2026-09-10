@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { claimRefName } from "../src/claims/ref.mjs";
@@ -142,10 +143,53 @@ function firstChunk(stream) {
   });
 }
 
-/** Poll until a pid is gone, with a bounded wait. */
+/**
+ * Has this pid stopped running — reaped, or a zombie waiting to be?
+ *
+ * `processIsAlive` is the production probe and stays exactly what it is:
+ * `kill(pid, 0)` succeeds for a zombie, because the table entry is still
+ * there. That is the right answer for a guard slot's holder and the wrong
+ * question here. These tests kill a *grandchild* whose parent is already gone,
+ * so it is reparented to PID 1 — and in a container whose PID 1 does not reap
+ * adopted children it stays a zombie for good, which made both process-group
+ * tests fail after their full five-second wait. What is asserted is "it is no
+ * longer running", so the state is read: `Z` from `/proc/<pid>/stat` on Linux,
+ * `Z` from `ps -o stat=` on macOS.
+ *
+ * @param {number} pid the process id.
+ * @returns {boolean}
+ */
+function hasTerminated(pid) {
+  if (!processIsAlive(pid)) return true;
+  if (process.platform === "linux") {
+    let stat = null;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch {
+      return true; // Gone between the two reads.
+    }
+    // `comm` is parenthesised and may itself contain spaces and parentheses,
+    // so the state is the field after the LAST `)`.
+    const state = stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trim()
+      .split(/\s+/u)[0];
+    return state === "Z";
+  }
+  if (process.platform === "darwin") {
+    const listed = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf8",
+    });
+    if (listed.status !== 0) return true; // No longer in the table.
+    return listed.stdout.trim().startsWith("Z");
+  }
+  return false;
+}
+
+/** Poll until a pid has stopped running, with a bounded wait. */
 async function waitUntilDead(pid, deadlineMs = 5_000) {
   const until = Date.now() + deadlineMs;
-  while (processIsAlive(pid) && Date.now() < until) {
+  while (!hasTerminated(pid) && Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -786,8 +830,8 @@ test("guard leads the child's process group and kills the whole tree", async () 
   assert.equal(result.report.killedBy, "claim-lost");
   await waitUntilDead(grandchildPid);
   assert.equal(
-    processIsAlive(grandchildPid),
-    false,
+    hasTerminated(grandchildPid),
+    true,
     "the grandchild died with the group, not just the direct child",
   );
 });
@@ -904,8 +948,8 @@ test("guard escalates to SIGKILL after the grace even when the direct child exit
     assert.equal(result.report.killedBy, "claim-lost");
     await waitUntilDead(grandchildPid);
     assert.equal(
-      processIsAlive(grandchildPid),
-      false,
+      hasTerminated(grandchildPid),
+      true,
       "a SIGTERM-ignoring grandchild is SIGKILLed, not left publishing",
     );
   } finally {

@@ -35,6 +35,30 @@ function usage(message, details = {}) {
   return new ClaimUsageError(message, { details });
 }
 
+/**
+ * Write one `--out` file, unless this run is only planning.
+ *
+ * `--dry-run` is a global flag and these commands ignored it: `markers build
+ * --dry-run --out <path>` overwrote the file and then reported `dryRun: false`,
+ * which is the one thing a dry run must never do. The bytes are still built and
+ * still reported, so a planning run proves exactly what it would have written.
+ *
+ * @param {object} runtime the CLI runtime.
+ * @param {string|undefined} path the `--out` path, when one was given.
+ * @param {string} contents the bytes that would be written.
+ * @returns {boolean} whether the file was written.
+ */
+function writeOutUnlessDryRun(runtime, path, contents) {
+  if (path === undefined) return false;
+  if (runtime.flags["dry-run"] === true) return false;
+  try {
+    writeFileSync(path, contents);
+  } catch (error) {
+    throw usage(`Cannot write --out ${path}: ${error.message}`, { path });
+  }
+  return true;
+}
+
 /** The revision a marker schema name belongs to, or null. */
 function schemaRevision(markerSchema) {
   if (typeof markerSchema !== "string") return null;
@@ -200,15 +224,7 @@ function runBuild(runtime) {
   assertMarkerRevision(runtime, input.markerSchema);
   const marker = buildProceduralMarker(input);
   const comment = buildProceduralComment(input);
-  if (runtime.flags.out !== undefined) {
-    try {
-      writeFileSync(runtime.flags.out, comment);
-    } catch (error) {
-      throw usage(`Cannot write --out ${runtime.flags.out}: ${error.message}`, {
-        path: runtime.flags.out,
-      });
-    }
-  }
+  const written = writeOutUnlessDryRun(runtime, runtime.flags.out, comment);
   return {
     status: "ok",
     body: {
@@ -217,6 +233,7 @@ function runBuild(runtime) {
       comment,
       bytes: Buffer.byteLength(comment, "utf8"),
       out: runtime.flags.out ?? null,
+      written,
     },
   };
 }
@@ -278,15 +295,7 @@ function runSummary(runtime) {
     supersedes: job.supersedes ?? null,
   });
   const block = `${SUMMARY_V1_LINE}\n${v2Line}`;
-  if (runtime.flags.out !== undefined) {
-    try {
-      writeFileSync(runtime.flags.out, block);
-    } catch (error) {
-      throw usage(`Cannot write --out ${runtime.flags.out}: ${error.message}`, {
-        path: runtime.flags.out,
-      });
-    }
-  }
+  const written = writeOutUnlessDryRun(runtime, runtime.flags.out, block);
   return {
     status: "ok",
     body: {
@@ -295,6 +304,7 @@ function runSummary(runtime) {
       block,
       bytes: Buffer.byteLength(block, "utf8"),
       out: runtime.flags.out ?? null,
+      written,
     },
   };
 }
@@ -324,11 +334,7 @@ function runVectors(runtime) {
       },
     };
   }
-  try {
-    writeFileSync(path, serialized);
-  } catch (error) {
-    throw usage(`Cannot write --out ${path}: ${error.message}`, { path });
-  }
+  const written = writeOutUnlessDryRun(runtime, path, serialized);
   return {
     status: "ok",
     body: {
@@ -336,6 +342,7 @@ function runVectors(runtime) {
       checked: false,
       matches: true,
       bytes: Buffer.byteLength(serialized, "utf8"),
+      written,
     },
   };
 }

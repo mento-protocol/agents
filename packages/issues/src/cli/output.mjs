@@ -10,6 +10,7 @@
 
 import { RESULT_SCHEMA } from "../claims/verify.mjs";
 import { isRecoverableClaimRaceError } from "../claims/errors.mjs";
+import { quoteForCommand } from "../shared/text.mjs";
 import {
   COARSE_EXIT_RULE,
   EXIT_ADVICE,
@@ -163,18 +164,64 @@ export function claimBlock(lease) {
 }
 
 /**
+ * The global flags every generated command line has to carry.
+ *
+ * A printed line is meant to be run as written, and a follow-up that resolves
+ * differently from the run that printed it is worse than no line at all: a
+ * `guard` without `--state` reserves its slot in a different store, and a
+ * `renew` without the `--runtime` this run needed records a different owner.
+ * So an explicitly supplied identity override travels with the line, together
+ * with `--config`, a non-default state root, and a `--timeout-seconds` the
+ * caller chose. Anything the config file already carries is left to it: the
+ * follow-up loads the same file.
+ *
+ * Every value is shell-quoted, because these are pasted into shells.
+ *
+ * @param {object} input `{ configPath, flags, stateRoot, defaultStateRoot }`.
+ * @returns {string} a leading-space-prefixed flag string, or `""`.
+ */
+export function renderCommandGlobals(input = {}) {
+  const {
+    configPath = null,
+    flags = {},
+    stateRoot = null,
+    defaultStateRoot = null,
+  } = input;
+  const parts = [];
+  if (configPath !== null)
+    parts.push(`--config ${quoteForCommand(configPath)}`);
+  // `--state` when this run is not on the host's default root, however that
+  // root was chosen: the printed command has to reach the same store.
+  if (stateRoot !== null && stateRoot !== defaultStateRoot) {
+    parts.push(`--state ${quoteForCommand(stateRoot)}`);
+  }
+  for (const flag of ["host", "runtime", "login", "agent"]) {
+    if (flags[flag] !== undefined) {
+      parts.push(`--${flag} ${quoteForCommand(flags[flag])}`);
+    }
+  }
+  if (flags["timeout-seconds"] !== undefined) {
+    parts.push(`--timeout-seconds ${flags["timeout-seconds"]}`);
+  }
+  return parts.length === 0 ? "" : ` ${parts.join(" ")}`;
+}
+
+/**
  * The `next` block: every command reprinted with the current token.
  *
  * The newest output therefore always supersedes an older one, which is what
  * makes a token rotation by renew safe to act on.
  *
- * @param {object} input `{ configPath, number, token, runId, candidate,
+ * `globals` carries `--config` and every other flag a follow-up needs to
+ * resolve the way this run did; see `renderCommandGlobals`.
+ *
+ * @param {object} input `{ globals, number, token, runId, candidate,
  *   operationId, parentLock, supersedes, numberFlag }`.
  * @returns {object|null}
  */
 export function buildNextCommands(input) {
   const {
-    configPath = null,
+    globals = "",
     number,
     token = null,
     runId = null,
@@ -186,7 +233,7 @@ export function buildNextCommands(input) {
     numberFlag = "pr",
   } = input;
   if (number == null) return null;
-  const config = configPath === null ? "" : ` --config ${configPath}`;
+  const config = globals;
   const target = `--${numberFlag} ${number}`;
   const identity =
     token === null || runId === null
