@@ -312,6 +312,45 @@ export async function reconcileClaimLabel(
   reconcile.status = "drifted";
   if (!apply) return reconcile;
 
+  // A **removal** is decided from a read that is already in the past: the
+  // label listing between them costs a round trip, and a successor can acquire
+  // inside it. That successor finds the label already present and adds
+  // nothing, and this removal then strips the label off its LOCK — an item
+  // that looks unclaimed while it is held, which is the one shape the whole
+  // projection exists to prevent. So the reference is read once more
+  // immediately before the removal and the decision is remade on what it says
+  // now: an acquire that landed in the window leaves the label exactly where
+  // the successor needs it.
+  //
+  // This **narrows** the window; it cannot close it. GitHub offers no
+  // compare-and-mutate for labels, so nothing can bind the mutation to the
+  // head the decision was made from — the same documented residual as the
+  // state entry's read-then-unlink. What keeps it survivable is that the
+  // projection is self-healing: the next `label reconcile` corrects whatever
+  // this one gets wrong. An add needs none of this, because the reference it
+  // was decided from is a LOCK this run holds.
+  if (reconcile.desired === false && ctx.options?.dryRun !== true) {
+    let current;
+    try {
+      current = await readClaim(ctx, number, options.operations ?? {});
+    } catch (error) {
+      // The same rule as the first read: a read that failed is not a reading
+      // of the reference, so nothing is removed on the strength of it.
+      reconcile.status = "unknown";
+      reconcile.error = error;
+      reconcile.warnings.push(
+        warningOf(error, { number, stage: "recheck-ref" }),
+      );
+      return reconcile;
+    }
+    reconcile.refState = current?.state ?? "absent";
+    reconcile.desired = current?.state === "LOCK";
+    if (reconcile.desired === reconcile.actual) {
+      reconcile.status = "in-sync";
+      return reconcile;
+    }
+  }
+
   reconcile.applied = await projectClaimLabel(
     ctx,
     number,

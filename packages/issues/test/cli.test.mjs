@@ -6178,3 +6178,320 @@ test("a successor's LOCK between the release and its label keeps the label", asy
   assert.equal(plain.server.hasLabel(PR, LABEL), false);
   assert.equal(cleanly.document.label.changed, true);
 });
+
+test("a refused write stays a permission failure when the reconciling read cannot answer", async () => {
+  // The reconcile ran first, so a read that could not answer raised
+  // CLAIM_UNKNOWN_OUTCOME over the top of the 403: exit 12, "do not retry; run
+  // adopt", for a commit the server had definitively refused to make. The
+  // definitive failure is answered before the reconcile now, because the
+  // environment that cannot make the write may not be able to make the read
+  // either.
+  const context = harness();
+  const permission = Object.assign(
+    new Error("HTTP 403: Resource not accessible by integration"),
+    { code: "GH_PERMISSION", httpStatus: 403 },
+  );
+  const unreachable = Object.assign(new Error("gh timed out after 30000ms"), {
+    code: "GH_TIMEOUT",
+    outcomeUnknown: true,
+  });
+  let refused = false;
+  const readOnly = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      const afterOid = args[4];
+      if (context.server.commits.get(afterOid)?.payload?.state === "LOCK") {
+        refused = true;
+        throw permission;
+      }
+      return context.server.operations.compareAndSwapRef(...args);
+    },
+    async readClaimRef(...args) {
+      // Only the reconciling reads: the bootstrap and the classifying read
+      // before the write still answer.
+      if (refused) throw unreachable;
+      return context.server.operations.readClaimRef(...args);
+    },
+  };
+
+  const result = await context.run(["claims", "claim", "--pr", String(PR)], {
+    operations: { ...context.options.operations, claims: readOnly },
+  });
+
+  assert.equal(result.exitCode, 21, "the server's own answer about the write");
+  assert.equal(result.document.status, "permission");
+  assert.notEqual(result.document.error.claimCode, "CLAIM_UNKNOWN_OUTCOME");
+  assert.equal(
+    result.document.next?.adopt,
+    undefined,
+    "nothing landed, so nothing is offered to adopt",
+  );
+});
+
+test("a runtime that fails the shape check is described, not echoed", async () => {
+  // The vocabulary refusal beside it described its value; this one did not,
+  // and it is the branch that catches a multiline paste — on its way into
+  // `details`, which the failure document copies verbatim.
+  const SENTINEL = "claude-code\nleak-4f21c8";
+  const context = harness();
+
+  const refused = await context.run([
+    "claims",
+    "read",
+    "--pr",
+    String(PR),
+    "--runtime",
+    SENTINEL,
+  ]);
+
+  assert.equal(refused.exitCode, 3);
+  assert.equal(refused.document.status, "config");
+  assert.match(refused.document.error.message, /single-line characters/u);
+  assert.match(refused.document.error.message, /<string, \d+ characters>/u);
+  assert.equal(
+    JSON.stringify(refused.document).includes("leak-4f21c8"),
+    false,
+    "the rejected runtime reaches no message and no detail",
+  );
+});
+
+test("an unsafe integer is described like every other rejected value", async () => {
+  // Numerals only, so "nothing here can be a credential" — the same reasoning
+  // that once printed every short value verbatim.
+  const SENTINEL = "9007199254740993141592";
+  const context = harness();
+
+  const refused = await context.run(["claims", "read", "--pr", SENTINEL]);
+
+  assert.equal(refused.exitCode, 2);
+  assert.match(refused.document.error.message, /not a safe integer/u);
+  assert.equal(
+    JSON.stringify(refused.document).includes(SENTINEL),
+    false,
+    "the rejected value reaches no message and no detail",
+  );
+});
+
+test("a LOCK that lands between the reconcile's read and its removal keeps the label", async () => {
+  // `reconcileClaimLabel` read the reference, then spent a round trip listing
+  // the labels, and removed on the strength of the older read: a successor
+  // that acquired inside that window found the label present, added nothing,
+  // and had it taken off its own LOCK.
+  const LABEL = "dependabot-prep:claimed";
+  const context = harness();
+  const claimed = await claimOnce(context);
+  const released = await context.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    claimed.document.claim.token,
+    "--run-id",
+    claimed.document.claim.runId,
+  ]);
+  assert.equal(released.exitCode, 0);
+  assert.equal(context.server.hasLabel(PR, LABEL), false);
+  // The drift this reconcile is about: UNLOCK on the reference, label present.
+  context.server.addLabel(PR, LABEL);
+
+  const successor = harness({ options: context.options });
+  let raced = false;
+  const racingLabels = {
+    ...context.labels,
+    async listIssueLabels(...args) {
+      const listed = await context.labels.listIssueLabels(...args);
+      if (!raced) {
+        raced = true;
+        const acquired = await successor.run([
+          "claims",
+          "claim",
+          "--pr",
+          String(PR),
+        ]);
+        assert.equal(acquired.exitCode, 0, "the successor claimed it");
+      }
+      return listed;
+    },
+  };
+
+  const reconciled = await context.run(
+    ["claims", "label", "reconcile", "--pr", String(PR), "--apply"],
+    { operations: { ...context.options.operations, labels: racingLabels } },
+  );
+
+  assert.equal(reconciled.exitCode, 0);
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "LOCK",
+    "the successor holds the reference",
+  );
+  assert.equal(
+    context.server.hasLabel(PR, LABEL),
+    true,
+    "so the label stays, and the item does not look unclaimed",
+  );
+
+  // With no successor the drifted label is still removed.
+  const plain = harness();
+  const mine = await claimOnce(plain);
+  await plain.run([
+    "claims",
+    "release",
+    "--pr",
+    String(PR),
+    "--token",
+    mine.document.claim.token,
+    "--run-id",
+    mine.document.claim.runId,
+  ]);
+  plain.server.addLabel(PR, LABEL);
+  const swept = await plain.run([
+    "claims",
+    "label",
+    "reconcile",
+    "--pr",
+    String(PR),
+    "--apply",
+  ]);
+  assert.equal(swept.exitCode, 0);
+  assert.equal(plain.server.hasLabel(PR, LABEL), false);
+});
+
+test("a family member that fails for a reason nobody raced keeps its own verdict", async () => {
+  // Every acquire failure was wrapped as `family-aborted` at exit 10 — "skip
+  // this family this run" — so a credential that may not write and a transport
+  // that stopped answering both read as "somebody else has it", and the caller
+  // retried the whole family every cycle against contention that never
+  // happened. The wrapper is for a race; anything else keeps the
+  // classification a single claim would give it, once the rollback has left
+  // nothing behind.
+  const permission = Object.assign(
+    new Error("HTTP 403: Resource not accessible by integration"),
+    { code: "GH_PERMISSION", httpStatus: 403 },
+  );
+  const refusedWrite = harness();
+  const readOnly = {
+    ...refusedWrite.server.operations,
+    async compareAndSwapRef(...args) {
+      const afterOid = args[4];
+      const payload = refusedWrite.server.commits.get(afterOid)?.payload;
+      // Only the second member's LOCK: the first member must be claimed for
+      // there to be a rollback at all.
+      if (payload?.state === "LOCK" && args[2].endsWith("/880")) {
+        throw permission;
+      }
+      return refusedWrite.server.operations.compareAndSwapRef(...args);
+    },
+  };
+
+  const refused = await refusedWrite.run(
+    ["claims", "family", "claim", "--prs", "872,880"],
+    { operations: { ...refusedWrite.options.operations, claims: readOnly } },
+  );
+
+  assert.equal(refused.exitCode, 21, "stop and report to the operator");
+  assert.equal(refused.document.status, "permission");
+  assert.notEqual(refused.document.status, "family-aborted");
+  assert.equal(
+    refState(refusedWrite.server, "refs/mento-claims/v1/pr/872"),
+    "UNLOCK",
+    "the rollback left nothing behind, which is why the verdict may pass through",
+  );
+
+  // The same for a read that never answered: exit 20, retry with backoff.
+  const timedOut = harness();
+  const unreachable = Object.assign(new Error("gh timed out after 30000ms"), {
+    code: "GH_TIMEOUT",
+    outcomeUnknown: true,
+  });
+  const flaky = {
+    ...timedOut.server.operations,
+    async readClaimRef(ctx, refName, scope) {
+      if (refName.endsWith("/880")) throw unreachable;
+      return timedOut.server.operations.readClaimRef(ctx, refName, scope);
+    },
+  };
+
+  const retried = await timedOut.run(
+    ["claims", "family", "claim", "--prs", "872,880"],
+    { operations: { ...timedOut.options.operations, claims: flaky } },
+  );
+
+  assert.equal(retried.exitCode, 20, "retry with backoff");
+  assert.equal(retried.document.status, "transport");
+  assert.equal(
+    refState(timedOut.server, "refs/mento-claims/v1/pr/872"),
+    "UNLOCK",
+  );
+
+  // A member another run holds is still the family abort it always was.
+  const contended = harness();
+  const peer = harness({ options: contended.options });
+  assert.equal(
+    (await peer.run(["claims", "claim", "--pr", "880"])).exitCode,
+    0,
+  );
+  const aborted = await contended.run([
+    "claims",
+    "family",
+    "claim",
+    "--prs",
+    "872,880",
+  ]);
+  assert.equal(aborted.exitCode, 10, "skip this family this run");
+  assert.equal(aborted.document.status, "family-aborted");
+});
+
+test("a family member the rollback could not release still gets its label", async () => {
+  // The label loop runs only when every member was claimed, so an abort whose
+  // rollback failed left a LOCK on a pull request carrying no label at all:
+  // held on the reference and unclaimed to every reader of the board.
+  const LABEL = "dependabot-prep:claimed";
+  const context = harness();
+  const peer = harness({ options: context.options });
+  // 880 is held by another run, so the family aborts on its second member.
+  assert.equal(
+    (await peer.run(["claims", "claim", "--pr", "880"])).exitCode,
+    0,
+  );
+
+  const stuck = {
+    ...context.server.operations,
+    async compareAndSwapRef(...args) {
+      const afterOid = args[4];
+      const payload = context.server.commits.get(afterOid)?.payload;
+      // A release UNLOCK names the LOCK it closes; the bootstrap UNLOCK of an
+      // absent ref names none, and those must land.
+      if (payload?.state === "UNLOCK" && payload.parentLock != null) {
+        throw Object.assign(
+          new Error("HTTP 403: Resource not accessible by integration"),
+          { code: "GH_PERMISSION", httpStatus: 403 },
+        );
+      }
+      return context.server.operations.compareAndSwapRef(...args);
+    },
+  };
+
+  const family = await context.run(
+    ["claims", "family", "claim", "--prs", "872,880"],
+    { operations: { ...context.options.operations, claims: stuck } },
+  );
+
+  assert.notEqual(family.exitCode, 0, "the family did not claim its members");
+  assert.equal(
+    refState(context.server, "refs/mento-claims/v1/pr/872"),
+    "LOCK",
+    "the rollback could not release it",
+  );
+  assert.equal(
+    context.server.hasLabel(872, LABEL),
+    true,
+    "so the surviving LOCK is labelled, not left looking unclaimed",
+  );
+  assert.equal(
+    context.server.hasLabel(880, LABEL),
+    true,
+    "the peer's own LOCK keeps the label it projected",
+  );
+});

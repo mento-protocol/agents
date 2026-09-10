@@ -1286,3 +1286,29 @@ test("a non-JSON answer carries a redacted argv, never the credential it was giv
   );
   assert.equal(JSON.stringify(graphql.args).includes(secret), false);
 });
+
+test("a repository refusal describes the value it rejected", () => {
+  // The message named the whole string, and `--repo`, `GH_REPO` and the
+  // config's `repository` are all one paste away from a credential. A refusal
+  // is printed, logged and pasted onward like every other one in this package.
+  const SENTINEL = "leak-9c31ab";
+  for (const repo of [
+    SENTINEL,
+    `owner/name?token=${SENTINEL}`,
+    `owner/${SENTINEL} extra`,
+    `owner/name/${SENTINEL}`,
+  ]) {
+    assert.throws(
+      () => splitRepo(repo),
+      (error) => {
+        assert.equal(
+          error.message.includes(SENTINEL),
+          false,
+          `${repo} must not be echoed`,
+        );
+        assert.match(error.message, /<string, \d+ characters>/u);
+        return true;
+      },
+    );
+  }
+});

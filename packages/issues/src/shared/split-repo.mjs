@@ -19,7 +19,14 @@
  * match GitHub's own grammar for an account and a repository name — the same
  * pattern the CLI config enforces on `repository`, applied here, where every
  * caller passes through.
+ *
+ * A refusal describes the value rather than repeating it. `--repo`, `GH_REPO`
+ * and the config's `repository` are all one paste away from a credential, and
+ * this message is printed, logged and pasted onward like every other refusal
+ * in this package.
  */
+
+import { describeRedactedValue } from "../gh/redact.mjs";
 
 /**
  * One `owner` or `name` component: alphanumeric first, then `A-Za-z0-9._-`.
@@ -41,11 +48,13 @@ export function splitRepo(repo) {
   const parts = String(repo).split("/");
   const [owner, name] = parts;
   if (parts.length !== 2 || !owner || !name) {
-    throw new Error(`Repository must be owner/name, got: ${repo}`);
+    throw new Error(
+      `Repository must be owner/name, got: ${describeRedactedValue(repo)}`,
+    );
   }
   if (!COMPONENT_PATTERN.test(owner) || !COMPONENT_PATTERN.test(name)) {
     throw new Error(
-      `Repository owner and name must start alphanumeric and use only letters, digits, dot, underscore or hyphen, got: ${repo}`,
+      `Repository owner and name must start alphanumeric and use only letters, digits, dot, underscore or hyphen, got: ${describeRedactedValue(repo)}`,
     );
   }
   return { owner, name, nameWithOwner: `${owner}/${name}` };

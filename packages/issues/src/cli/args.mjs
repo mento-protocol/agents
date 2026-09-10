@@ -342,11 +342,15 @@ function parseIntegerValue(name, raw) {
   }
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) {
-    // Digits only by now, so there is nothing here a credential could hide in,
-    // and the number itself is the whole diagnostic.
-    throw usage(`--${name} is not a safe integer: ${raw}`, {
+    // Digits only by now, so nothing this branch rejects is a shape the
+    // patterns recognize — which is exactly why it is described rather than
+    // echoed, like every other branch here. "It cannot be a credential" is the
+    // same reasoning that once let short values through verbatim, and an
+    // oversized digit string is still an input this run did not choose.
+    const described = describeRejectedValue(raw);
+    throw usage(`--${name} is not a safe integer: ${described}`, {
       flag: name,
-      value: raw,
+      value: described,
     });
   }
   return value;

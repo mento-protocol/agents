@@ -87,6 +87,43 @@ function guardCommand(runtime, members) {
 }
 
 /**
+ * Label every member a failed family claim may have left at LOCK.
+ *
+ * Three kinds of member can survive an abort: one whose rollback release
+ * failed outright, one whose rollback release ended unknown, and the failed
+ * member itself when its own compare-and-swap ended unknown. Each is
+ * reconciled against its reference rather than labelled outright, because for
+ * two of the three nobody knows which state the reference is in — and the
+ * reference is the authority either way.
+ *
+ * @param {object} runtime the CLI runtime.
+ * @param {number[]} order the family's members, in claim order.
+ * @param {Error} error the family abort.
+ * @returns {Promise<object[]>} warnings from the label calls.
+ */
+async function labelSurvivingLocks(runtime, order, error) {
+  const details = error?.details ?? {};
+  const survivors = new Set();
+  for (const entry of details.releaseFailures ?? [])
+    survivors.add(entry.number);
+  for (const entry of details.unresolved ?? []) survivors.add(entry.number);
+  // `details.candidate` is present only when the failed member's own LOCK may
+  // have landed; a definitively refused acquire wrote nothing to label.
+  if (details.candidate != null && details.failedAt != null) {
+    survivors.add(details.failedAt);
+  }
+  const warnings = [];
+  for (const number of order) {
+    if (!survivors.has(number)) continue;
+    const label = await reconcileClaimLabel(runtime.ctx, number, {
+      apply: true,
+    });
+    warnings.push(...label.warnings);
+  }
+  return warnings;
+}
+
+/**
  * @param {object} runtime the CLI runtime.
  * @returns {Promise<object>} a command result.
  */
@@ -118,9 +155,24 @@ export async function runFamilyClaim(runtime) {
   // on the login it records.
   await runtime.ensureLogin();
 
-  const family = await claimFamily(ctx, order, metadata, {
-    overrides: { runIdPrefix: flags["run-id-prefix"] ?? null },
-  });
+  let family;
+  try {
+    family = await claimFamily(ctx, order, metadata, {
+      overrides: { runIdPrefix: flags["run-id-prefix"] ?? null },
+    });
+  } catch (error) {
+    // The label loop below is reached only when every member was claimed, so a
+    // family that aborted with a member the rollback could not release left
+    // that LOCK on an item carrying no label at all — unclaimed to every
+    // reader of the board, and held on the reference. The members the rollback
+    // did not prove released are reconciled against their own references
+    // before the failure is reported: a LOCK gets its label, an UNLOCK gets
+    // nothing, and a reference that cannot be read is a warning.
+    runtime.warnings.push(
+      ...(await labelSurvivingLocks(runtime, order, error)),
+    );
+    throw error;
+  }
 
   const warnings = [];
   const members = [];

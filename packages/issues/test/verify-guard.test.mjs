@@ -1624,3 +1624,160 @@ test("an aborted guard kills the child's whole group and says it was aborted", a
     "the grandchild died with the group, not just the direct child",
   );
 });
+
+test("an abort during a repair renew stops before the compare-and-swap", async () => {
+  // The abort was read once, before the repair, and each of the repair's steps
+  // is a remote call: an abort that arrived while the adopt was in flight was
+  // followed by the renew's compare-and-swap anyway, so the run the caller had
+  // withdrawn went on to extend the very claim it was told to stop wanting.
+  const { ctx, server, clock, lease } = await heldLease();
+  // Past `renewAfter`, so the verdict is `renew-required` and guard repairs it.
+  clock.advance(25 * MINUTE);
+  const controller = new AbortController();
+  const spawned = recordingSpawn();
+  const stderr = sink();
+  const casBefore = server.calls.cas.length;
+
+  let reads = 0;
+  let releaseRead = () => {};
+  const held = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  const slow = server.withOperations({
+    // The verdict's own read answers; the adopt that opens the repair is the
+    // one that never comes back until this test lets it.
+    async readClaimRef(...args) {
+      reads += 1;
+      if (reads === 2) await held;
+      return server.operations.readClaimRef(...args);
+    },
+  });
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: exitingArgv(0),
+    spawn: spawned.spawn,
+    signal: controller.signal,
+    scheduleRenews: () => () => {},
+    reportSink: stderr.write,
+    stdio: "ignore",
+    overrides: slow,
+  });
+
+  // Give the adopt read time to be in flight, then withdraw the operation. The
+  // read is let go a moment later whatever happens, so a guard that ignores
+  // the abort finishes its repair and fails these assertions rather than
+  // hanging the suite.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.abort();
+  setTimeout(releaseRead, 20).unref?.();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 3, "the abort is answered, not waited out");
+  assert.equal(result.report.status, "guard-aborted");
+  assert.equal(result.report.spawned, false);
+  assert.equal(spawned.calls.length, 0);
+  assert.equal(
+    server.calls.cas.length,
+    casBefore,
+    "no compare-and-swap is issued once the abort has arrived",
+  );
+});
+
+test("a permission failure during a renew tick is not a lost claim", async () => {
+  // `renewClaim` sent every non-claim error through `classifyAdvanceConflict`,
+  // and a refused write carries no observed head: `classifyObservedHead(null,
+  // …)` reads "the ref is absent" and answered `superseded`. Guard then killed
+  // the child and told the caller to treat its work as forfeit, for a claim
+  // this run still held and a write the server had simply refused.
+  const { ctx, server, clock, lease } = await heldLease();
+  const scheduler = manualScheduler();
+  const spawned = realSpawn();
+  const stderr = sink();
+  let refused = false;
+
+  const guarded = guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: [...LONG_LIVED_ARGV],
+    spawn: spawned.spawn,
+    scheduleRenews: (intervalMs, tick) => scheduler.schedule(intervalMs, tick),
+    reportSink: stderr.write,
+    stdio: [...LONG_LIVED_STDIO],
+    overrides: server.withOperations({
+      async compareAndSwapRef(...args) {
+        if (refused) {
+          throw Object.assign(
+            new Error("HTTP 403: Resource not accessible by integration"),
+            { code: "GH_PERMISSION", httpStatus: 403 },
+          );
+        }
+        return server.operations.compareAndSwapRef(...args);
+      },
+    }),
+  });
+
+  await scheduler.registered;
+  assert.equal(stderr.lines[0].claims[0].held, true, "the verdict was proven");
+  refused = true;
+  // Past `renewAfter`, so the tick really writes, and well before the deadline.
+  clock.advance(11 * MINUTE);
+  await scheduler.tick();
+  spawned.finish();
+
+  const result = await guarded;
+  assert.equal(result.exitCode, 0, "a refused renew is not a forfeited claim");
+  assert.equal(result.report.killedBy, null);
+  assert.notEqual(result.report.claims[0].reason, "token-superseded");
+  assert.equal(result.report.claims[0].reason, "unverified");
+  assert.match(result.report.warnings.at(-1).message, /403/u);
+});
+
+test("a signal delivered while the spawn is in flight still reaches the child", async () => {
+  // The forwarders were registered after the spawn returned. A signal in that
+  // window found Node's default disposition instead: guard died and the
+  // detached group it had just created kept publishing with nothing renewing
+  // its lease — the one outcome the forwarding exists to prevent.
+  const { ctx, lease } = await heldLease();
+  const spawned = recordingSpawn();
+  const stderr = sink();
+  const baseline = process.listenerCount("SIGINT");
+  let armed = false;
+
+  const result = await guardChild(ctx, [{ number: PR, token: lease.token }], {
+    runId: lease.owner.runId,
+    purpose: "push",
+    argv: exitingArgv(0),
+    spawn(command, args, options) {
+      // Delivered to guard's own handler rather than to this process, so the
+      // test runner is never signalled.
+      armed = process.listenerCount("SIGINT") > baseline;
+      if (armed) process.listeners("SIGINT").at(-1)();
+      return spawned.spawn(command, args, options);
+    },
+    scheduleRenews: () => () => {},
+    reportSink: stderr.write,
+    stdio: "ignore",
+    killGraceMs: 50,
+  });
+
+  assert.equal(
+    armed,
+    true,
+    "the forwarder is armed before the spawn, not after",
+  );
+  assert.equal(result.exitCode, 3, "a signalled guard is exit 3, never 13");
+  assert.equal(result.report.status, "guard-signalled");
+  assert.equal(result.report.killedBy, "guard-sigint");
+  assert.equal(
+    spawned.calls.length,
+    1,
+    "the child was started, and then stopped",
+  );
+  assert.equal(
+    process.listenerCount("SIGINT"),
+    baseline,
+    "the handler is removed when guard returns",
+  );
+});

@@ -131,7 +131,12 @@ export function generateRunId({
   if (!isSafeSingleLineText(lead, 64)) {
     throw new ClaimConfigError(
       "A run id needs a runtime or an explicit prefix to lead with",
-      { details: { prefix, runtime } },
+      {
+        details: {
+          prefix: describeRedactedValue(prefix),
+          runtime: describeRedactedValue(runtime),
+        },
+      },
     );
   }
   const stamp = new Date(clock.now())
@@ -175,9 +180,14 @@ export function resolveOwner(partial = {}, options = {}) {
   const host =
     partial.host ?? env.MENTO_CLAIM_HOST ?? shortHostLabel(hostname());
   if (!isSafeSingleLineText(host, SINGLE_LINE_TEXT_MAX_LENGTH)) {
+    // A **shape** refusal describes its value too. The vocabulary refusals
+    // below always did; these did not, and they are the ones that catch a
+    // multiline paste, an oversized one, or a value that is not a string at
+    // all — on its way into `details`, which the failure document copies
+    // verbatim. No refusal in this package echoes what it rejected.
     throw new ClaimConfigError(
-      `Claim host must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters`,
-      { details: { host } },
+      `Claim host must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters, got: ${describeRedactedValue(host)}`,
+      { details: { host: describeRedactedValue(host) } },
     );
   }
 
@@ -186,8 +196,8 @@ export function resolveOwner(partial = {}, options = {}) {
   if (runtime != null) {
     if (!isSafeSingleLineText(runtime, SINGLE_LINE_TEXT_MAX_LENGTH)) {
       throw new ClaimConfigError(
-        `Claim runtime must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters`,
-        { details: { runtime } },
+        `Claim runtime must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters, got: ${describeRedactedValue(runtime)}`,
+        { details: { runtime: describeRedactedValue(runtime) } },
       );
     }
     if (!allowUnknownRuntime && !KNOWN_RUNTIMES.includes(runtime)) {
@@ -227,8 +237,8 @@ export function resolveOwner(partial = {}, options = {}) {
     !isSafeSingleLineText(agent, SINGLE_LINE_TEXT_MAX_LENGTH)
   ) {
     throw new ClaimConfigError(
-      `Claim agent must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters`,
-      { details: { agent } },
+      `Claim agent must be 1-${SINGLE_LINE_TEXT_MAX_LENGTH} single-line characters, got: ${describeRedactedValue(agent)}`,
+      { details: { agent: describeRedactedValue(agent) } },
     );
   }
 

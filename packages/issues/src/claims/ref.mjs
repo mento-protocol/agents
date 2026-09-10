@@ -530,6 +530,13 @@ export async function initializeClaimRef(
       return expected;
     } catch (err) {
       lastError = err;
+      // The same rule the ordinary compare-and-swap follows: a write the
+      // server refused, or one `gh` never made, is definitive. Retrying a
+      // denied create three times and then reporting
+      // `CLAIM_CONFIG_REF_BOOTSTRAP` — "the ref read as absent after three
+      // attempts" — described the symptom and hid the cause, which is a
+      // credential without contents write, or no `gh` at all.
+      if (isDefinitiveWriteFailure(err)) throw err;
     }
     const reconciliation = await reconcileClaimRefRead(
       ctx,
@@ -725,6 +732,17 @@ export async function advanceRef(
       );
       return expected;
     } catch (lastError) {
+      // A definitive write failure is answered **before** the reconcile, not
+      // after it. `GH_PERMISSION` is the server's own answer about the request
+      // and `GH_ENV` means the call was never made, so nothing landed and no
+      // read is needed to know it — and the read is the one thing that cannot
+      // be trusted here: the environment that cannot run `gh` for the write
+      // cannot run it for the reconcile either, and `reconcileClaimRefRead`
+      // then raises its own unknown-outcome error, which buried the definitive
+      // one and reported exit 12 "do not retry; run adopt" for a command that
+      // never ran. Nothing landed, there is nothing to adopt, and retrying
+      // cannot help; the honest answers are exit 21 and exit 3.
+      if (isDefinitiveWriteFailure(lastError)) throw lastError;
       const { observed } = await reconcileClaimRefRead(
         ctx,
         scope,
@@ -745,13 +763,6 @@ export async function advanceRef(
           { cause: lastError },
         );
       }
-      // The reference is exactly where it was, and this failure is definitive:
-      // a credential that may read but not write, or an environment that
-      // cannot run `gh` at all. Nothing landed, so there is nothing to adopt —
-      // and retrying cannot help either. Reporting exit 12 "do not retry; run
-      // adopt" for a 403 sent an agent looking for a commit that was never
-      // made; the honest answers are exit 21 and exit 3.
-      if (isDefinitiveWriteFailure(lastError)) throw lastError;
       if (attempt >= CLAIM_RECONCILE_ATTEMPTS) {
         throw unknownRefAdvanceError(
           ctx,

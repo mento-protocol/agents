@@ -308,3 +308,46 @@ test("ref name is refs/mento-claims/v1/pr/872 and a matching-refs response conta
   assert.equal(head.oid, "c".repeat(40));
   assert.equal(head.payload.operationId, "lock-exact");
 });
+
+test("a create-from-absent the server refused keeps the refusal, not the bootstrap summary", async () => {
+  // The loop caught every failure alike, retried the denied create three
+  // times, and reported `CLAIM_CONFIG_REF_BOOTSTRAP` — "the ref read as absent
+  // after 3 attempts" — which describes the symptom and hides the cause: a
+  // credential without contents write, or no `gh` at all.
+  const { ctx, server } = createTestContext();
+  const scope = ctx.profile.canonicalScope(ctx.options, PR);
+  const refName = claimRefName(ctx, PR);
+  const permission = Object.assign(
+    new Error("HTTP 403: Resource not accessible by integration"),
+    { code: "GH_PERMISSION", httpStatus: 403 },
+  );
+  let casAttempts = 0;
+
+  const operations = server.withOperations({
+    async compareAndSwapRef() {
+      casAttempts += 1;
+      throw permission;
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      initializeClaimRef(
+        ctx,
+        scope,
+        refName,
+        operations,
+        "lock-6f0a9d3e",
+        "2026-09-09T09:58:12.004Z",
+      ),
+    (error) => {
+      assert.equal(error, permission, "the typed failure, unwrapped");
+      assert.equal(error.code, "GH_PERMISSION");
+      assert.notEqual(error.code, "CLAIM_CONFIG_REF_BOOTSTRAP");
+      assert.equal(statusForError(error), "permission");
+      assert.equal(exitCodeForCliError(error), 21);
+      return true;
+    },
+  );
+  assert.equal(casAttempts, 1, "a refusal is not retried");
+});

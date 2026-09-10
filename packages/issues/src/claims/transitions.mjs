@@ -1044,6 +1044,14 @@ export async function renewClaim(lease, options = {}) {
       );
     }
     if (err?.claimCode === "CLAIM_REF_INVALID") throw err;
+    // A transport failure is not a ref verdict, and `advanceRef` now hands
+    // `GH_PERMISSION` and `GH_ENV` straight through. Such an error carries no
+    // observed head, `classifyObservedHead(null, …)` reads "the ref is
+    // absent", and a renew whose write was refused was reported as
+    // `superseded` at exit 13 — "stop publishing this PR and treat work in
+    // flight as forfeit" — for a claim this run still holds. The same guard
+    // stands in `writeLockTransition` and in `releaseClaim`.
+    if (isTransportFailure(err)) throw err;
     throwClassified(
       classifyAdvanceConflict(err, {
         profile,

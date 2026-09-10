@@ -902,7 +902,7 @@ export async function guardChild(ctx, claims, options = {}) {
    * Await one pre-spawn read, giving up the moment the caller aborts.
    *
    * Only reads are raced. A repair renew **writes**, so it is never left in
-   * flight: the loop below refuses to start one once the abort has arrived.
+   * flight: the repair below refuses to start one once the abort has arrived.
    * A read abandoned this way changes nothing on the server and settles on its
    * own.
    *
@@ -921,6 +921,63 @@ export async function guardChild(ctx, claims, options = {}) {
   // long after another run started publishing. `guardRenewIntervalMs` derives
   // the tick from that window instead and uses `renewMs` only as a ceiling.
   const renewIntervalMs = options.renewIntervalMs ?? guardRenewIntervalMs(ctx);
+
+  /**
+   * Adopt and renew one member whose verdict is repairable.
+   *
+   * The abort is re-read between every step, because each of them is a remote
+   * call: an abort that arrived during the adopt must not be followed by the
+   * renew's compare-and-swap. The reads are raced against the gate; the renew
+   * is not, because an abandoned write still lands — it is simply not started.
+   *
+   * A failure that is not an abort stays what it always was: the lease is
+   * dropped, the verdict already on the entry stands, and the error travels on
+   * as a warning.
+   *
+   * @param {object} entry the guarded claim being repaired.
+   * @param {object} member its `{ number, token }` input.
+   * @returns {Promise<symbol|null>} {@link ABORTED} when the caller withdrew
+   *   the operation, `null` otherwise.
+   */
+  const repairEntry = async (entry, member) => {
+    try {
+      const hydrated = await untilAborted(
+        hydrateClaimLease(
+          ctx,
+          member.number,
+          { token: entry.token, runId, current: entry.report.current },
+          overrides,
+        ),
+      );
+      if (hydrated === ABORTED) return ABORTED;
+      entry.lease = hydrated;
+      if (abortedBeforeSpawn) return ABORTED;
+      const renewed = await renewClaim(entry.lease, { now: ctx.clock.now() });
+      entry.renewedAtVerdict = renewed.renewed === true;
+      entry.token = entry.lease.token;
+      renews.push({
+        number: member.number,
+        token: entry.token,
+        at: new Date(ctx.clock.now()).toISOString(),
+        phase: "verdict",
+      });
+      announceRenew(entry);
+      const refreshed = await untilAborted(
+        verifyClaim(
+          ctx,
+          member.number,
+          { token: entry.token, runId, minRemainingMs, purpose },
+          overrides,
+        ),
+      );
+      if (refreshed === ABORTED) return ABORTED;
+      entry.report = refreshed;
+    } catch (error) {
+      entry.lease = null;
+      warnings.push(warningOf(error, { number: member.number }));
+    }
+    return null;
+  };
 
   const entries = [];
   for (const member of members) {
@@ -962,33 +1019,14 @@ export async function guardChild(ctx, claims, options = {}) {
       !entry.report.held &&
       REPAIRABLE_REASONS.has(entry.report.reason)
     ) {
-      try {
-        entry.lease = await hydrateClaimLease(
-          ctx,
-          member.number,
-          { token: entry.token, runId, current: entry.report.current },
-          overrides,
-        );
-        const renewed = await renewClaim(entry.lease, { now: ctx.clock.now() });
-        entry.renewedAtVerdict = renewed.renewed === true;
-        entry.token = entry.lease.token;
-        renews.push({
-          number: member.number,
-          token: entry.token,
-          at: new Date(ctx.clock.now()).toISOString(),
-          phase: "verdict",
-        });
-        announceRenew(entry);
-        entry.report = await verifyClaim(
-          ctx,
-          member.number,
-          { token: entry.token, runId, minRemainingMs, purpose },
-          overrides,
-        );
-      } catch (error) {
-        entry.lease = null;
-        warnings.push(warningOf(error, { number: member.number }));
-      }
+      // The repair is two remote steps with a network round trip in front of
+      // each, and the abort has to be re-read between them. Checking it once,
+      // before the block, let an abort that arrived while the adopt was in
+      // flight still reach the compare-and-swap underneath `renewClaim`: the
+      // withdrawn run went on to extend the very claim the caller had stopped
+      // wanting. Each read is raced against the abort gate, and the renew —
+      // the only write here — is simply never started once the gate has won.
+      if ((await repairEntry(entry, member)) === ABORTED) break;
     }
     entry.deadlineMs = leaseDeadlineOf(entry.report);
     entry.verifiedAtMs = ctx.clock.now();
@@ -1087,6 +1125,43 @@ export async function guardChild(ctx, claims, options = {}) {
   );
 
   let child;
+
+  // `detached` takes the child out of the terminal's foreground group, so a
+  // Ctrl-C, an operator `kill`, or a harness timeout no longer reaches it on
+  // its own. Guard forwards those itself and then stops guarding: a run whose
+  // guard is being killed must not leave a publishing child renewing nothing.
+  //
+  // They are armed **before** the spawn. Registered after it, a signal
+  // delivered in that window found Node's default disposition instead — guard
+  // died and the detached group it had just created survived with nothing
+  // renewing its lease, which is the one outcome the forwarding exists to
+  // prevent. There is no child to signal while the spawn is still in flight,
+  // so a signal that arrives there is remembered and applied the instant the
+  // child exists.
+  let pendingSignalReason = null;
+  const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const signalForwarders = new Map();
+  const clearSignalForwarders = () => {
+    for (const [name, handler] of signalForwarders) {
+      process.off?.(name, handler);
+    }
+    signalForwarders.clear();
+  };
+  if (detached) {
+    for (const name of forwardedSignals) {
+      const handler = () => {
+        const reason = `guard-${name.toLowerCase()}`;
+        if (!childStarted) {
+          pendingSignalReason ??= reason;
+          return;
+        }
+        killChild(reason);
+      };
+      signalForwarders.set(name, handler);
+      process.on?.(name, handler);
+    }
+  }
+
   try {
     child = spawn(argv[0], argv.slice(1), {
       shell: false,
@@ -1103,6 +1178,7 @@ export async function guardChild(ctx, claims, options = {}) {
       detached,
     });
   } catch (error) {
+    clearSignalForwarders();
     clearAbortListener();
     const report = draft({
       phase: "final",
@@ -1182,29 +1258,11 @@ export async function guardChild(ctx, claims, options = {}) {
     }
   };
 
-  // `detached` takes the child out of the terminal's foreground group, so a
-  // Ctrl-C, an operator `kill`, or a harness timeout no longer reaches it on
-  // its own. Guard forwards those itself and then stops guarding: a run whose
-  // guard is being killed must not leave a publishing child renewing nothing.
-  const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
-  const signalForwarders = new Map();
-  const clearSignalForwarders = () => {
-    for (const [name, handler] of signalForwarders) {
-      process.off?.(name, handler);
-    }
-    signalForwarders.clear();
-  };
-  if (detached) {
-    for (const name of forwardedSignals) {
-      const handler = () => {
-        killChild(`guard-${name.toLowerCase()}`);
-      };
-      signalForwarders.set(name, handler);
-      process.on?.(name, handler);
-    }
-  }
-
   childStarted = true;
+  // A signal that arrived while the spawn was in flight: the child exists now,
+  // so it is stopped exactly as a signal delivered a moment later would stop
+  // it, rather than being lost with the guard that received it.
+  if (pendingSignalReason != null) killChild(pendingSignalReason);
   // An abort that arrived while the claims were being verified: the child is
   // running now, so it is stopped the way every other loss stops it.
   if (signal?.aborted === true) killChild("guard-aborted");

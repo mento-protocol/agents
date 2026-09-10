@@ -140,7 +140,11 @@ and every one of those restrictions applies. It changes nothing when the
 **reference** cannot be read: a timeout, a permission refusal or an unreadable
 payload answers `status: "unknown"` with a non-zero exit — 20 for a transport,
 16 for a reference this package proved unreadable — because a read that failed
-is not evidence that a claim is gone.
+is not evidence that a claim is gone. A **removal** re-reads the reference
+immediately before it mutates, so a claim acquired while the command was
+comparing keeps its label; that narrows the window rather than closing it,
+since GitHub has no compare-and-mutate for labels, and the next reconcile
+corrects whatever this one gets wrong.
 
 **A dry run refuses what the write would refuse.** `--dry-run` runs the
 transition's own input checks before it plans, so an unusable `--set` value or
@@ -235,10 +239,14 @@ the whole process group, not the direct child alone, so a detached grandchild
 cannot outlive it. An abort that arrives **before** the child starts stops
 there instead of waiting: the pre-spawn verification can sit in a `gh` call for
 as long as the transport timeout allows, and an abort during it now ends the
-run with `spawned: false` rather than spawning the command afterwards.
-`detached` takes the child out of the terminal's foreground
-group, so without that forwarding a Ctrl-C would kill guard and leave the child
-publishing under a lease nothing renews. The same `detached` gives the child no
+run with `spawned: false` rather than spawning the command afterwards. That
+covers the pre-spawn repair as well: guard never starts a renew for a run whose
+caller has already withdrawn it. `detached` takes the child out of the
+terminal's foreground group, so without that forwarding a Ctrl-C would kill
+guard and leave the child publishing under a lease nothing renews. The
+forwarders are armed **before** the child is spawned, and a signal that arrives
+while the spawn is in flight is applied the instant the child exists. The same
+`detached` gives the child no
 controlling terminal, so a guarded command must be non-interactive: a
 credential prompt fails rather than hanging, which is the right failure for an
 unattended run but is worth knowing before guarding something by hand.
@@ -424,7 +432,11 @@ leaving it open, so the compare-and-swap loop stops on them and reports them as
 themselves. It used to spend its attempts, find the reference unmoved each
 time, and report exit 12 `unknown-outcome` — sending the operator to `adopt` to
 look for a commit that was never written. A credential that may read the
-reference but not write it is exit 21 for that reason.
+reference but not write it is exit 21 for that reason, whether the refused
+write was an acquire, a renew, a release or the first create of a reference,
+and whether or not the reconciling read that follows can answer at all. A
+refused **renew** matters most: read as `superseded`, it told a guard its claim
+was gone, so the guard killed the child and called the work in flight forfeit.
 
 A family aborts with `family-aborted` at exit 10 — skip the family this run —
 except when the rollback left a LOCK behind: that is `stale` at exit 16, the
@@ -439,9 +451,18 @@ keeps the status and exit code the same failure would have on a single
 `release`, so a member this run does not hold is `not-held` at exit 14 either
 way. Members that did release are still listed in `released`.
 
+A `family claim` follows the same rule now. `family-aborted` is a verdict about
+a race, so a member that failed for a reason nobody raced — a credential that
+may not write, a transport that stopped answering — keeps the classification a
+single `claim` would give it (exit 21, exit 20), provided the rollback released
+every other member cleanly. And a member the rollback could **not** release
+keeps its LOCK, so its label is projected before the failure is reported rather
+than left off an item that is held.
+
 Exit 3 also covers two faults that are neither the command's nor the mutex's:
 `gh` missing from `PATH`, and a claim reference that reads as absent after three
-create-from-absent compare-and-swap attempts — a repository or permission fault.
+create-from-absent compare-and-swap attempts — a repository fault. A create the
+server **refused** is not that case: it reports the refusal itself, exit 21.
 Both stop the run and reach the operator rather than inviting a retry. A guard
 that was itself signalled exits 3 for the same reason.
 

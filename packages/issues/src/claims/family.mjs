@@ -20,7 +20,7 @@
  * is `guard` with repeated `--pr`/`--token` pairs.
  */
 
-import { ClaimFamilyAbortedError } from "./errors.mjs";
+import { ClaimFamilyAbortedError, isTransportFailure } from "./errors.mjs";
 import { acquireClaim, releaseClaim } from "./transitions.mjs";
 import { ClaimUsageError } from "./verify.mjs";
 
@@ -180,6 +180,20 @@ export async function claimFamily(ctx, numbers, metadata = {}, options = {}) {
       // still there, while a candidate that may have landed is exit 12 and an
       // `adopt`. A proven failure alongside it is still in `releaseFailures`.
       const ambiguous = unresolved || unresolvedRollbacks.length > 0;
+      // `family-aborted` is exit 10 — "skip this family this run" — and that
+      // is the verdict for a **race**: a member another run holds. A failure
+      // that is not a claim verdict at all is a different fact, and wrapping
+      // it hid the only two that matter: a credential that may not write is
+      // exit 21 "stop and report to the operator", and a transport that timed
+      // out is exit 20 "retry with backoff". Both were read as "somebody else
+      // has it", so a run with the wrong token retried the whole family every
+      // cycle and reported contention that never happened. The classification
+      // is preserved only when the rollback left nothing behind — every member
+      // released, none of them ambiguous — which is the same rule
+      // `family release` follows for its own members.
+      if (!ambiguous && !rollbackFailed && isTransportFailure(acquireError)) {
+        throw acquireError;
+      }
       const summary = `Family claim aborted at ${ctx.profile.subject(ctx.profile.canonicalScope(ctx.options, number))}: ${String(acquireError?.message ?? acquireError).split("\n")[0]}`;
       const aborted = new ClaimFamilyAbortedError(
         // The failed member's own recovery text is kept whole when its LOCK

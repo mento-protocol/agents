@@ -473,14 +473,28 @@ carry no meaning in production.
 
 Two failures are exempt, because they are not ambiguous at all. A permission
 refusal (`GH_PERMISSION`) is the server's own answer about the request, and a
-missing `gh` (`GH_ENV`) means the call was never made; when the reconcile then
-finds the reference exactly where it was, nothing landed and nothing ever will.
-Those pass through as themselves — exit 21 and exit 3 — instead of exhausting
-the attempts and reporting exit 12 "do not retry; run adopt", which sent an
-agent looking for a commit that was never made. A transport failure carrying no
-observed head is never classified as a ref verdict either:
-`classifyObservedHead(null, …)` reads "the ref is absent" and would answer
-`superseded` (exit 13) for a 403 that proved nothing about the reference.
+missing `gh` (`GH_ENV`) means the call was never made; nothing landed and
+nothing ever will. Those pass through as themselves — exit 21 and exit 3 —
+instead of exhausting the attempts and reporting exit 12 "do not retry; run
+adopt", which sent an agent looking for a commit that was never made.
+
+They pass through **before** the reconcile, not after it. The reconcile is a
+read, and the environment that could not make the write may not be able to make
+the read either: with no `gh` on the path every reconciling read fails too, and
+`reconcileClaimRefRead` raised its own unknown-outcome error over the top of the
+definitive one. The create-from-absent loop follows the same rule — a denied
+create was retried three times and then reported as
+`CLAIM_CONFIG_REF_BOOTSTRAP`, "the ref read as absent after 3 attempts", which
+describes the symptom and hides the cause.
+
+A transport failure carrying no observed head is never classified as a ref
+verdict either: `classifyObservedHead(null, …)` reads "the ref is absent" and
+would answer `superseded` (exit 13) for a 403 that proved nothing about the
+reference. `writeLockTransition`, `renewClaim` and `releaseClaim` all check for
+one before they classify. Renew is the one that mattered most: a refused renew
+read as `superseded` told a guard its claim was gone, so it killed the child
+and told the caller to treat the work in flight as forfeit — over a write the
+server had simply refused.
 
 | Action          | Observed head                                                         | Verdict                                              |
 | --------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
@@ -668,6 +682,20 @@ its statement.
    during: an already-aborted signal verifies nothing, spawns nothing and
    writes nothing, returning that same report with `spawned: false`, and one
    that arrives while the claims are being verified stops in the same place.
+   The pre-spawn **repair** re-reads it between every step rather than once at
+   the top, because each step is a remote call: an abort that arrived during
+   the adopt was followed by the renew's compare-and-swap anyway, so a
+   withdrawn run went on to extend the claim its caller had stopped wanting.
+   The reads there race the abort; the renew is never raced, because an
+   abandoned write still lands — it is simply not started.
+
+   The forwarders are armed **before** the spawn. Registered after it, a signal
+   delivered in that window found Node's default disposition: guard died and
+   the detached group it had just created survived, publishing with nothing
+   renewing its lease — the one outcome the forwarding exists to prevent. There
+   is no child to signal while the spawn is in flight, so a signal that arrives
+   there is remembered and applied the instant the child exists.
+
 9. Otherwise forward the child's exit code, unchanged — unless `--advisory` is
    set, which forces exit 0 and is refused outright on a mandatory gate. That
    override covers the **child's** outcome and a verdict this gate does not
@@ -738,6 +766,17 @@ release failed an operator matter (exit 16). The status moves with the code:
 `statusForError` answers `family-aborted` for the first and `stale` for the
 second, because `family-aborted` is the exit-10 row of the table below, and a
 document printing it beside exit 16 contradicted the table it is read from.
+
+`family-aborted` is a verdict about a **race**, so it wraps only a race. A
+member that failed for a reason nobody raced — a credential that may not write,
+a transport that stopped answering — keeps the classification a single `claim`
+would have given it, exactly as `family release` keeps each member's own
+verdict. Wrapping those read as "somebody else has it" at exit 10, "skip this
+family this run", so a run with the wrong token retried the whole family every
+cycle against contention that never happened; the honest answers are exit 21
+and exit 20. The classification is preserved only when the rollback left
+nothing behind — every member released, none of them ambiguous — because a
+family with a LOCK still on a reference is not a member's failure any more.
 
 A member is recorded only after its `acquireClaim` returns, so an unknown
 outcome from a lock compare-and-swap can leave a LOCK the rollback never sees.
@@ -813,6 +852,27 @@ looked unclaimed — the one shape the whole projection exists to prevent.
 `reconcileClaimLabel` reads the head first and applies what the head says:
 remove for an UNLOCK or an absent ref, leave alone for a LOCK. `family release`
 does the same for each member it released.
+
+The reconcile itself has the same window inside it, one round trip narrower.
+Between its authoritative read and the mutation sits the label listing it
+compares against, and a successor that acquires there finds the label present,
+adds nothing, and has it removed by a decision made before it existed. So a
+**removal** re-reads the reference immediately before it mutates and remakes
+the decision on what it says now; an add needs none of that, because the LOCK
+it was decided from is this run's own. That narrows the window and cannot close
+it: GitHub offers no compare-and-mutate for labels, so nothing binds the
+mutation to the head the decision came from. It is the documented residual the
+state entry's read-then-unlink also carries, and it is survivable for the same
+reason — the projection is self-healing, and the next `label reconcile`
+corrects whatever this one got wrong.
+
+A **family claim** that aborted projects labels too, which it used not to: the
+per-member label loop runs only when every member was claimed, so a member the
+rollback could not release kept its LOCK on an item carrying no label at all.
+Every member the rollback did not prove released — one whose release failed,
+one whose release ended unknown, and the failed member itself when its own LOCK
+may have landed — is reconciled against its own reference before the failure is
+reported.
 
 A label failure is a `warnings[]` entry, never a non-zero exit: one attempt plus
 one retry, remove tolerates 404, and a takeover reports `alreadyPresent` rather
@@ -959,7 +1019,19 @@ straight through them. `assertObjectId`, `parseIntegerValue`,
 `parseNumberValue`, `parseKeyValue`, `assertOutcome`, the `--now` instant and
 the unexpected-argument branch all report through it, in `details` as well as
 in the message, because the details are copied into the failure document
-verbatim.
+verbatim. That includes the branches where the value looks harmless by
+construction: `parseIntegerValue`'s unsafe-integer refusal has already matched
+`^[0-9]+$`, and "it cannot be a credential" is the same reasoning that once
+printed every short value in full.
+
+The same rule reaches past the argument parser, to every refusal that names a
+value a caller supplied. `splitRepo` printed the whole `owner/name` string it
+rejected, and `--repo`, `GH_REPO` and the config's `repository` are each one
+paste away from a credential. `resolveOwner`'s **shape** checks — the host, the
+runtime and the agent must be 1–120 single-line characters — printed theirs
+too, and they are precisely the checks that catch a multiline paste, an
+oversized one, or a value that is not a string at all. The vocabulary refusal
+next to them always described its value; these now do as well.
 
 Every one of those tables is read with `Object.hasOwn`, never with a bare index
 or `in`. A flag named after an `Object.prototype` member — `--constructor`,
