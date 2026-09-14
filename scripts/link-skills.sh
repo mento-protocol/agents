@@ -25,12 +25,19 @@ export GIT_HTTP_LOW_SPEED_TIME=$FETCH_TIMEOUT_SECONDS
 
 QUIET=0
 SOURCES_OPT=""
+SOURCES_SET=0
 ASSEMBLY_OPT=""
+ASSEMBLY_SET=0
 SOURCES_FILE=""
 ASSEMBLY_DIR=""
+STAMP_DIR=""
 MANIFEST=""
 SCRIPT_PATH=""
 FETCH_INTERVAL_HOURS=6
+
+# -1 until the probe below has run: 1 on a filesystem that treats 'Foo' and
+# 'foo' as one name, 0 otherwise.
+CASE_INSENSITIVE=-1
 
 ERRORS=0
 LINKED=0
@@ -103,7 +110,8 @@ usage() {
 		'                  directory and refresh the runtime symlinks. Default.' \
 		'  check           Report source and assembly state. Creates and removes' \
 		'                  no links. Fetches every git source, throttled, and' \
-		'                  writes a .skill-links.fetch-* stamp in the assembly.' \
+		'                  writes a fetch-* stamp in the .skill-links.d' \
+		'                  directory inside the assembly.' \
 		'  hook            SessionStart hook mode. Silent when current, never fails.' \
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
@@ -123,7 +131,8 @@ usage() {
 		'Exit codes:' \
 		'  0  nothing to report' \
 		'  1  at least one problem was reported' \
-		'  2  wrong usage, or no sources file to work from' \
+		'  2  wrong usage, or no source to work from: no sources file, or a' \
+		'     sources file that lists none' \
 		'' \
 		'Sources file format, one entry per line. Each path names the directory' \
 		'whose immediate children are skill directories holding a SKILL.md:' \
@@ -268,6 +277,70 @@ expand_home() {
 	printf '%s\n' "$p"
 }
 
+# ------------------------------------------------------- names and casing ----
+
+# A manifest name must be one plain basename. Anything else could name a path
+# outside the assembly directory, so it never licenses a removal.
+name_is_safe() {
+	case "$1" in
+	"" | "." | "..") return 1 ;;
+	*/*) return 1 ;;
+	*$'\t'* | *$'\n'*) return 1 ;;
+	esac
+	return 0
+}
+
+# A manifest field is one tab-separated line, so neither a tab nor a newline can
+# round-trip through it.
+field_is_safe() {
+	case "$1" in
+	*$'\t'* | *$'\n'*) return 1 ;;
+	esac
+	return 0
+}
+
+to_lower() {
+	printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Probe the assembly directory once per run. macOS formats APFS and HFS+
+# case-insensitive by default, so 'Foo' and 'foo' are one entry there and the
+# name comparisons below must agree with the filesystem.
+detect_case_insensitive() {
+	local probe base up
+	if [ "$CASE_INSENSITIVE" -ge 0 ]; then
+		return 0
+	fi
+	CASE_INSENSITIVE=0
+	if [ ! -d "$ASSEMBLY_DIR" ]; then
+		return 0
+	fi
+	if ! probe=$(mktemp "$ASSEMBLY_DIR/.skill-links.case.XXXXXX" 2>/dev/null); then
+		return 0
+	fi
+	base=$(basename "$probe")
+	up=$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')
+	if [ "$up" != "$base" ] && [ -e "$ASSEMBLY_DIR/$up" ]; then
+		CASE_INSENSITIVE=1
+	fi
+	rm -f "$probe"
+	return 0
+}
+
+# Two entry names that the filesystem in use cannot tell apart.
+names_equal() {
+	if [ "$1" = "$2" ]; then
+		return 0
+	fi
+	if [ "$CASE_INSENSITIVE" != "1" ]; then
+		return 1
+	fi
+	if [ "$(to_lower "$1")" = "$(to_lower "$2")" ]; then
+		return 0
+	fi
+	return 1
+}
+
 # --------------------------------------------------------------- sources ----
 
 trim() {
@@ -311,10 +384,16 @@ load_sources() {
 		esac
 		# Two lines that name the same directory are one source. Without this
 		# every skill would look like a duplicate of itself and none would link.
+		# Spellings that differ in case, in a symlink, or in a trailing slash
+		# still name one directory, so the comparison is by identity.
 		dupidx=-1
 		j=0
 		while [ "$j" -lt "$SRC_COUNT" ]; do
 			if [ "${SRC_PATH[$j]}" = "$path" ]; then
+				dupidx=$j
+				break
+			fi
+			if [ -d "$path" ] && [ -d "${SRC_PATH[$j]}" ] && [ "${SRC_PATH[$j]}" -ef "$path" ]; then
 				dupidx=$j
 				break
 			fi
@@ -386,7 +465,7 @@ collect_candidates() {
 		n=0
 		j=0
 		while [ "$j" -lt "$RAW_COUNT" ]; do
-			if [ "${RAW_NAME[$j]}" = "$name" ]; then
+			if names_equal "${RAW_NAME[$j]}" "$name"; then
 				n=$((n + 1))
 			fi
 			j=$((j + 1))
@@ -395,7 +474,7 @@ collect_candidates() {
 			first=1
 			j=0
 			while [ "$j" -lt "$i" ]; do
-				if [ "${RAW_NAME[$j]}" = "$name" ]; then
+				if names_equal "${RAW_NAME[$j]}" "$name"; then
 					first=0
 				fi
 				j=$((j + 1))
@@ -404,7 +483,7 @@ collect_candidates() {
 				paths=""
 				j=0
 				while [ "$j" -lt "$RAW_COUNT" ]; do
-					if [ "${RAW_NAME[$j]}" = "$name" ]; then
+					if names_equal "${RAW_NAME[$j]}" "$name"; then
 						paths="$paths ${RAW_TARGET[$j]}"
 					fi
 					j=$((j + 1))
@@ -428,7 +507,7 @@ dup_has() {
 	local i
 	i=0
 	while [ "$i" -lt "$DUP_COUNT" ]; do
-		if [ "${DUP_NAME[$i]}" = "$1" ]; then
+		if names_equal "${DUP_NAME[$i]}" "$1"; then
 			return 0
 		fi
 		i=$((i + 1))
@@ -437,15 +516,16 @@ dup_has() {
 }
 
 # True when the recorded target belongs to a source that could not be read this
-# run: a missing directory, or one that produced no skill at all. Such a source
-# is a transient problem, so its links must survive.
+# run: a missing or unreadable directory. That is a transient problem, so its
+# links must survive. A source that is readable is authoritative even when it
+# holds no skill at all, so its recorded links are pruned normally.
 target_source_unavailable() {
 	local d i
 	d=$(dirname "$1")
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		if [ "${SRC_PATH[$i]}" = "$d" ] || same_path "${SRC_PATH[$i]}" "$d"; then
-			if [ "${SRC_OK[$i]:-0}" != "1" ] || [ "${SRC_FOUND[$i]:-0}" -eq 0 ]; then
+			if [ "${SRC_OK[$i]:-0}" != "1" ]; then
 				return 0
 			fi
 			return 1
@@ -460,7 +540,7 @@ report_empty_sources() {
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		if [ "${SRC_OK[$i]:-0}" = "1" ] && [ "${SRC_FOUND[$i]:-0}" -eq 0 ]; then
-			warn "source ${SRC_PATH[$i]} holds no skill; a source is the directory whose children are <name>/SKILL.md. Its recorded links are kept."
+			warn "source ${SRC_PATH[$i]} holds no skill; a source is the directory whose children are <name>/SKILL.md."
 		fi
 		i=$((i + 1))
 	done
@@ -504,7 +584,7 @@ cand_index_of() {
 	local i
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do
-		if [ "${CAND_NAME[$i]}" = "$1" ]; then
+		if names_equal "${CAND_NAME[$i]}" "$1"; then
 			printf '%s\n' "$i"
 			return 0
 		fi
@@ -532,6 +612,12 @@ load_manifest() {
 		if [ -z "$t" ]; then
 			continue
 		fi
+		# A name that is not one plain basename could reach outside the assembly
+		# directory. Such a line is ignored, never acted on.
+		if ! name_is_safe "$n"; then
+			warn "ignored a manifest line in $MANIFEST whose name is not a plain entry name: $n"
+			continue
+		fi
 		MAN_NAME[MAN_COUNT]="$n"
 		MAN_TARGET[MAN_COUNT]="$t"
 		MAN_COUNT=$((MAN_COUNT + 1))
@@ -544,7 +630,7 @@ manifest_target_of() {
 	local i
 	i=0
 	while [ "$i" -lt "$MAN_COUNT" ]; do
-		if [ "${MAN_NAME[$i]}" = "$1" ]; then
+		if names_equal "${MAN_NAME[$i]}" "$1"; then
 			printf '%s\n' "${MAN_TARGET[$i]}"
 			return 0
 		fi
@@ -572,10 +658,11 @@ entry_is_recorded_link() {
 	same_path "$cur" "$rec"
 }
 
+# The temporary file is allocated by mktemp, never at a name another process
+# could have created first, and only that file is removed on failure.
 write_manifest() {
 	local tmp i
-	tmp="$ASSEMBLY_DIR/.skill-links.tmp.$$"
-	if ! : >"$tmp"; then
+	if ! tmp=$(mktemp "$ASSEMBLY_DIR/.skill-links.tmp.XXXXXX" 2>/dev/null); then
 		err "could not write the manifest $MANIFEST"
 		return 1
 	fi
@@ -602,7 +689,7 @@ output_has() {
 	local i
 	i=0
 	while [ "$i" -lt "$OUT_COUNT" ]; do
-		if [ "${OUT_NAME[$i]}" = "$1" ]; then
+		if names_equal "${OUT_NAME[$i]}" "$1"; then
 			return 0
 		fi
 		i=$((i + 1))
@@ -619,15 +706,28 @@ link_candidates() {
 		name=${CAND_NAME[$i]}
 		target=${CAND_TARGET[$i]}
 		i=$((i + 1))
+		# A name or a target that cannot round-trip through the tab-separated
+		# manifest would be recorded wrong, so it is never linked.
+		if ! name_is_safe "$name"; then
+			err "skill name '$name' cannot be recorded in the manifest; skipped $target"
+			continue
+		fi
+		if ! field_is_safe "$target"; then
+			err "skill path $target holds a tab or a newline and cannot be recorded in the manifest; skipped it"
+			continue
+		fi
 		entry="$ASSEMBLY_DIR/$name"
 		if [ -L "$entry" ]; then
 			cur=$(link_target_abs "$entry")
-			if same_path "$cur" "$target"; then
-				UNCHANGED=$((UNCHANGED + 1))
-				record_output "$name" "$target"
-				continue
-			fi
+			# Only an entry the manifest recorded is this script's to change. A
+			# link someone else made stays theirs even when it happens to point
+			# at the same target.
 			if entry_is_recorded_link "$name" "$entry"; then
+				if same_path "$cur" "$target"; then
+					UNCHANGED=$((UNCHANGED + 1))
+					record_output "$name" "$target"
+					continue
+				fi
 				rm -f "$entry"
 				if ! ln -s "$target" "$entry"; then
 					err "could not link $entry -> $target; $name is now unlinked"
@@ -636,6 +736,10 @@ link_candidates() {
 				info "$PROG: relinked $name -> $target"
 				LINKED=$((LINKED + 1))
 				record_output "$name" "$target"
+				continue
+			fi
+			if same_path "$cur" "$target"; then
+				info "$PROG: $name: foreign link matches; left alone"
 				continue
 			fi
 			err "collision: $entry is a symlink to $cur that this script did not create; skipped $target"
@@ -683,13 +787,20 @@ prune_manifest() {
 			kept=$((kept + 1))
 			continue
 		fi
+		cur=$(link_target_abs "$entry")
+		# A dangling link is only this script's to remove when it still points
+		# where the manifest recorded. Someone else's dangling link keeps a
+		# different target and stays.
 		if [ ! -e "$entry" ]; then
-			rm -f "$entry"
-			info "$PROG: pruned dangling $name"
-			PRUNED=$((PRUNED + 1))
+			if [ "$cur" = "$target" ]; then
+				rm -f "$entry"
+				info "$PROG: pruned dangling $name"
+				PRUNED=$((PRUNED + 1))
+			else
+				info "$PROG: $name is a foreign dangling link to $cur; left alone"
+			fi
 			continue
 		fi
-		cur=$(link_target_abs "$entry")
 		if same_path "$cur" "$target"; then
 			rm -f "$entry"
 			info "$PROG: pruned $name"
@@ -704,7 +815,10 @@ prune_manifest() {
 runtime_link() {
 	local home_dir link cur
 	home_dir=$1
+	# The runtime directory is the runtime's to create. Say what was skipped
+	# instead of passing over it in silence.
 	if [ ! -d "$home_dir" ]; then
+		info "$PROG: skipped $home_dir/skills: $home_dir does not exist"
 		return 0
 	fi
 	link="$home_dir/skills"
@@ -777,16 +891,23 @@ ensure_sources_file() {
 
 run_link() {
 	ensure_sources_file
-	load_manifest
-	load_sources
-	report_missing_sources
-	collect_candidates
-	report_empty_sources
-	report_sources_used
 	if ! mkdir -p "$ASSEMBLY_DIR"; then
 		err "could not create the assembly directory $ASSEMBLY_DIR"
 		return 1
 	fi
+	detect_case_insensitive
+	load_manifest
+	load_sources
+	# A sources file that names no source says nothing about what belongs in the
+	# assembly. Removing every link because a file was truncated would be the
+	# worst reading of it.
+	if [ "$SRC_COUNT" -eq 0 ]; then
+		die "no source is listed in $SOURCES_FILE; add one skills directory per line. Nothing was changed"
+	fi
+	report_missing_sources
+	collect_candidates
+	report_empty_sources
+	report_sources_used
 	OUT_COUNT=0
 	link_candidates
 	prune_manifest
@@ -866,10 +987,42 @@ git_behind_count() {
 	git -C "$root" rev-list --count "HEAD..$up" 2>/dev/null || printf 'unknown\n'
 }
 
+# Fetch stamps live in one directory of their own, so that removing them never
+# needs a wildcard in the assembly root next to the user's own files.
+ensure_stamp_dir() {
+	if [ -L "$STAMP_DIR" ]; then
+		warn "$STAMP_DIR is a symlink; fetch stamps are not written"
+		return 1
+	fi
+	if [ -e "$STAMP_DIR" ] && [ ! -d "$STAMP_DIR" ]; then
+		warn "$STAMP_DIR exists and is not a directory; fetch stamps are not written"
+		return 1
+	fi
+	if [ ! -d "$STAMP_DIR" ]; then
+		if ! mkdir "$STAMP_DIR" 2>/dev/null; then
+			warn "could not create $STAMP_DIR; fetch stamps are not written"
+			return 1
+		fi
+	fi
+	return 0
+}
+
 stamp_file() {
 	local h
 	h=$(printf '%s' "$1" | cksum | awk '{print $1}')
-	printf '%s/.skill-links.fetch-%s\n' "$ASSEMBLY_DIR" "$h"
+	printf '%s/fetch-%s\n' "$STAMP_DIR" "$h"
+}
+
+write_stamp() {
+	if ! ensure_stamp_dir; then
+		return 0
+	fi
+	if [ -L "$1" ]; then
+		warn "the fetch stamp $1 is a symlink; it was not written"
+		return 0
+	fi
+	: >"$1" 2>/dev/null || true
+	return 0
 }
 
 fetch_due() {
@@ -888,11 +1041,38 @@ fetch_due() {
 	return 1
 }
 
+# A fetch must never stop at a prompt. GIT_TERMINAL_PROMPT=0 covers HTTP; ssh
+# needs its own batch mode. An operator setting already in the environment
+# wins, so a custom ssh command keeps working.
+set_fetch_env() {
+	if [ -z "${GIT_SSH_COMMAND-}" ]; then
+		GIT_SSH_COMMAND="ssh -oBatchMode=yes"
+		export GIT_SSH_COMMAND
+	fi
+	export GIT_TERMINAL_PROMPT=0
+}
+
+# Signal the fetch on expiry. git starts its own ssh or curl child, so the
+# process group is the target when the fetch runs in one of its own; the pid
+# is the fallback when it does not.
+kill_fetch() {
+	local sig pid
+	sig=$1
+	pid=$2
+	if kill -"$sig" -- "-$pid" 2>/dev/null; then
+		return 0
+	fi
+	kill -"$sig" "$pid" 2>/dev/null || true
+	return 0
+}
+
 # git fetch with a bash-native timeout. macOS has no timeout(1).
 #
 # git runs as the background job itself, with no wrapper subshell, so that the
 # signal on expiry reaches git and its ssh child instead of a shell that would
-# leave them running and holding the .git locks.
+# leave them running and holding the .git locks. bash 3.2 starts no process
+# group for a background job without job control, so setsid provides one when
+# the host has it; without setsid the pid is signalled on its own.
 run_git_fetch() {
 	local root tmo pid waited limit rc
 	root=$1
@@ -900,15 +1080,20 @@ run_git_fetch() {
 	if [ "$tmo" -lt 1 ]; then
 		tmo=1
 	fi
-	git -C "$root" fetch --quiet >/dev/null 2>&1 &
+	set_fetch_env
+	if command -v setsid >/dev/null 2>&1; then
+		setsid git -C "$root" fetch --quiet >/dev/null 2>&1 &
+	else
+		git -C "$root" fetch --quiet >/dev/null 2>&1 &
+	fi
 	pid=$!
 	waited=0
 	limit=$((tmo * 5))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$waited" -ge "$limit" ]; then
-			kill -TERM "$pid" 2>/dev/null || true
+			kill_fetch TERM "$pid"
 			sleep 1
-			kill -KILL "$pid" 2>/dev/null || true
+			kill_fetch KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			return 1
 		fi
@@ -932,11 +1117,11 @@ maybe_fetch() {
 	fi
 	mkdir -p "$ASSEMBLY_DIR" 2>/dev/null || true
 	if run_git_fetch "$root" "$tmo"; then
-		: >"$stamp"
+		write_stamp "$stamp"
 		printf 'ok\n'
 		return 0
 	fi
-	: >"$stamp"
+	write_stamp "$stamp"
 	printf 'failed\n'
 	return 0
 }
@@ -947,6 +1132,7 @@ check_runtime_link() {
 	local home_dir link cur
 	home_dir=$1
 	if [ ! -d "$home_dir" ]; then
+		info "  skipped $home_dir/skills: $home_dir does not exist"
 		return 0
 	fi
 	link="$home_dir/skills"
@@ -973,8 +1159,12 @@ cmd_check() {
 		err "no sources file at $SOURCES_FILE; run '$PROG link' inside a clone to create one"
 		return 1
 	fi
+	detect_case_insensitive
 	load_manifest
 	load_sources
+	if [ "$SRC_COUNT" -eq 0 ]; then
+		die "no source is listed in $SOURCES_FILE; add one skills directory per line"
+	fi
 	collect_candidates
 	report_empty_sources
 
@@ -1067,15 +1257,19 @@ cmd_check() {
 # ------------------------------------------------------------------ hook ----
 
 cmd_hook() {
-	local i src flag root branch behind def note_fetch changed missing name entry rem
+	local i src flag root branch behind def note_fetch changed missing name entry rem up
 
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
 	QUIET=1
 	SECONDS=0
+	detect_case_insensitive
 	load_manifest
 	load_sources
+	if [ "$SRC_COUNT" -eq 0 ]; then
+		return 0
+	fi
 	collect_candidates
 	changed=0
 
@@ -1107,8 +1301,14 @@ cmd_hook() {
 		fi
 		branch=$(git_branch "$root")
 		def=$(git_default_branch "$root")
+		# Never "git pull" here: pull fetches again, so a session start would
+		# reach the network a second time outside the throttle and outside the
+		# timeout above. The merge below is local only; the refs it merges come
+		# from the throttled fetch.
 		if [ "$flag" = "auto-update" ] && [ "$branch" = "$def" ] && [ "$note_fetch" != "failed" ] && ! git_is_dirty "$root"; then
-			if git -C "$root" pull --ff-only --quiet >/dev/null 2>&1; then
+			up=""
+			up=$(git_upstream "$root") || up=""
+			if [ -n "$up" ] && git -C "$root" merge --ff-only --quiet "$up" >/dev/null 2>&1; then
 				hook_say "updated $root ($behind commit(s) fast-forwarded on $branch)"
 				changed=1
 				continue
@@ -1179,14 +1379,19 @@ print_hook_snippet() {
 		'  }'
 }
 
-# Passed to python3 with -c, so that no here document and no temporary file is
-# needed. The program must not contain a single quote.
+# Passed to python3 with -c, so that no here document is needed. The program
+# must not contain a single quote. It writes the merged JSON to a temporary
+# file of its own next to the settings file and prints that path, so the name
+# is never predictable and never collides with a second run.
 PY_MERGE_HOOK='
 import json
+import os
+import stat
 import sys
+import tempfile
 
-path, out = sys.argv[1], sys.argv[2]
-command, marker, timeout = sys.argv[3], sys.argv[4], int(sys.argv[5])
+path = sys.argv[1]
+command, marker, timeout = sys.argv[2], sys.argv[3], int(sys.argv[4])
 
 with open(path) as fh:
     text = fh.read().strip()
@@ -1208,12 +1413,24 @@ if groups is None:
 if not isinstance(groups, list):
     sys.exit("link-skills: %s has a SessionStart key that is not a list" % path)
 
+
+def installed(value):
+    text = str(value)
+    if text.strip() == command.strip():
+        return True
+    parts = text.split()
+    if len(parts) >= 2 and parts[-1] == "hook":
+        if parts[-2].strip(chr(34) + chr(39)).endswith(marker):
+            return True
+    return False
+
+
 found = False
 for group in groups:
     if not isinstance(group, dict):
         continue
     for entry in group.get("hooks") or []:
-        if isinstance(entry, dict) and marker in str(entry.get("command", "")):
+        if isinstance(entry, dict) and installed(entry.get("command", "")):
             found = True
 
 if not found:
@@ -1229,21 +1446,54 @@ if not found:
         }
     )
 
-with open(out, "w") as fh:
-    fh.write(json.dumps(data, indent=2) + "\n")
+mode = stat.S_IMODE(os.stat(path).st_mode)
+fd, out = tempfile.mkstemp(
+    prefix=".link-skills-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(path))
+)
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(data, indent=2) + "\n")
+    os.chmod(out, mode)
+except Exception:
+    os.unlink(out)
+    raise
+sys.stdout.write(out + "\n")
 '
 
-# The marker is the resolved script path, so a second run through a symlink or
-# a renamed copy recognises the group it already wrote.
+# The command string is compared exactly, and the last two tokens of any other
+# command are compared with the script name, so a group written by an older
+# version, by another clone, or with a quoted path is recognised instead of
+# duplicated. Prints the path of the merged temporary file.
 merge_hook_json() {
-	python3 -c "$PY_MERGE_HOOK" "$1" "$2" \
-		"$(hook_command_string)" "$SCRIPT_PATH" "$HOOK_TIMEOUT_SECONDS"
+	python3 -c "$PY_MERGE_HOOK" "$1" \
+		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS"
+}
+
+# Never overwrite a backup. Two installs inside the same second share a
+# timestamp, so the second one takes the first free numbered suffix.
+backup_path() {
+	local base n
+	base=$1
+	if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+		printf '%s\n' "$base"
+		return 0
+	fi
+	n=1
+	while [ "$n" -le 100 ]; do
+		if [ ! -e "$base.$n" ] && [ ! -L "$base.$n" ]; then
+			printf '%s\n' "$base.$n"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+	return 1
 }
 
 install_hook_file() {
-	local parent file tmp stamp real
+	local parent file tmp stamp real created bak
 	parent=$1
 	file=$2
+	created=0
 	if [ ! -d "$parent" ]; then
 		info "$PROG: $parent does not exist; skipped its SessionStart hook"
 		return 0
@@ -1266,10 +1516,14 @@ install_hook_file() {
 		file=$real
 	fi
 	if [ ! -e "$file" ]; then
+		# A settings file this run scaffolds holds only what this script put
+		# there, so it needs no backup, and it starts private.
 		if ! printf '{\n  "hooks": {}\n}\n' >"$file"; then
 			err "could not create $file"
 			return 1
 		fi
+		chmod 600 "$file" 2>/dev/null || true
+		created=1
 		info "$PROG: created $file"
 	fi
 	if [ ! -f "$file" ]; then
@@ -1277,9 +1531,12 @@ install_hook_file() {
 		print_hook_snippet >&2
 		return 1
 	fi
-	tmp="$file.tmp.$$"
-	if ! merge_hook_json "$file" "$tmp"; then
-		rm -f "$tmp"
+	tmp=""
+	tmp=$(merge_hook_json "$file") || tmp=""
+	if [ -z "$tmp" ] || [ ! -f "$tmp" ]; then
+		if [ -n "$tmp" ]; then
+			rm -f "$tmp"
+		fi
 		err "could not merge the SessionStart hook into $file"
 		return 1
 	fi
@@ -1288,13 +1545,17 @@ install_hook_file() {
 		info "$PROG: $file already runs the hook"
 		return 0
 	fi
-	stamp=$(date -u +%Y%m%dT%H%M%SZ)
-	if ! cp "$file" "$file.bak-$stamp"; then
-		rm -f "$tmp"
-		err "could not back up $file; left it unchanged"
-		return 1
+	if [ "$created" -eq 0 ]; then
+		stamp=$(date -u +%Y%m%dT%H%M%SZ)
+		bak=""
+		bak=$(backup_path "$file.bak-$stamp") || bak=""
+		if [ -z "$bak" ] || ! cp -p "$file" "$bak"; then
+			rm -f "$tmp"
+			err "could not back up $file; left it unchanged"
+			return 1
+		fi
+		info "$PROG: backed up $file to $bak"
 	fi
-	info "$PROG: backed up $file to $file.bak-$stamp"
 	if [ "$QUIET" -eq 0 ]; then
 		diff -u "$file" "$tmp" || true
 	fi
@@ -1322,7 +1583,8 @@ cmd_install_hooks() {
 # ---------------------------------------------------------------- unlink ----
 
 cmd_unlink() {
-	local i name target entry cur
+	local i name target entry cur stamp
+	detect_case_insensitive
 	load_manifest
 	i=0
 	while [ "$i" -lt "$MAN_COUNT" ]; do
@@ -1333,19 +1595,34 @@ cmd_unlink() {
 		if [ ! -L "$entry" ]; then
 			continue
 		fi
+		cur=$(link_target_abs "$entry")
+		# A dangling link that no longer points where the manifest recorded
+		# belongs to whoever made it.
 		if [ ! -e "$entry" ]; then
-			rm -f "$entry"
-			info "$PROG: removed dangling $name"
+			if [ "$cur" = "$target" ]; then
+				rm -f "$entry"
+				info "$PROG: removed dangling $name"
+			else
+				info "$PROG: $name is a foreign dangling link to $cur; left alone"
+			fi
 			continue
 		fi
-		cur=$(link_target_abs "$entry")
 		if same_path "$cur" "$target"; then
 			rm -f "$entry"
 			info "$PROG: removed $name"
 		fi
 	done
 	rm -f "$MANIFEST"
-	rm -f "$ASSEMBLY_DIR"/.skill-links.fetch-*
+	# Only regular files inside the stamp directory, then the directory itself.
+	# No wildcard ever runs in the assembly root, where the user's own files are.
+	if [ -d "$STAMP_DIR" ] && [ ! -L "$STAMP_DIR" ]; then
+		for stamp in "$STAMP_DIR"/*; do
+			if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then
+				rm -f "$stamp"
+			fi
+		done
+		rmdir "$STAMP_DIR" 2>/dev/null || true
+	fi
 	info "$PROG: removed the manifest $MANIFEST"
 	return 0
 }
@@ -1364,16 +1641,24 @@ main() {
 				die "--sources needs a file path"
 			fi
 			SOURCES_OPT=$1
+			SOURCES_SET=1
 			;;
-		--sources=*) SOURCES_OPT=${arg#--sources=} ;;
+		--sources=*)
+			SOURCES_OPT=${arg#--sources=}
+			SOURCES_SET=1
+			;;
 		--assembly)
 			shift
 			if [ $# -eq 0 ]; then
 				die "--assembly needs a directory path"
 			fi
 			ASSEMBLY_OPT=$1
+			ASSEMBLY_SET=1
 			;;
-		--assembly=*) ASSEMBLY_OPT=${arg#--assembly=} ;;
+		--assembly=*)
+			ASSEMBLY_OPT=${arg#--assembly=}
+			ASSEMBLY_SET=1
+			;;
 		--quiet | -q) QUIET=1 ;;
 		-h | --help) cmd="help" ;;
 		--) ;;
@@ -1393,12 +1678,37 @@ main() {
 		cmd="link"
 	fi
 
+	# The help text needs no paths, so it prints before anything is derived from
+	# HOME and works in an environment that has none.
+	if [ "$cmd" = "help" ]; then
+		usage
+		return 0
+	fi
+
 	# Through a symlink on PATH, $0 is the link. The clone the script really
 	# lives in decides the sources-file bootstrap and the hook marker, so the
 	# chain is followed to the real file.
 	SCRIPT_PATH=$(resolve_symlink_path "$0")
 
-	if [ -n "$SOURCES_OPT" ]; then
+	# Every default below is derived from HOME, and so are the runtime links, so
+	# an unset or relative HOME must stop the run before anything is written.
+	# The hook runs on every session start and must never fail a session.
+	case "${HOME-}" in
+	/*) ;;
+	*)
+		if [ "$cmd" = "hook" ]; then
+			hook_say "HOME is not set"
+			return 0
+		fi
+		die "HOME is not set to an absolute path; set HOME before running $PROG"
+		;;
+	esac
+
+	if [ "$SOURCES_SET" -eq 1 ]; then
+		case "$SOURCES_OPT" in
+		"") die "--sources needs a file path" ;;
+		"/") die "--sources must name a file, not /" ;;
+		esac
 		SOURCES_FILE=$SOURCES_OPT
 	elif [ -n "${SKILL_SOURCES_FILE-}" ]; then
 		SOURCES_FILE=${SKILL_SOURCES_FILE}
@@ -1406,8 +1716,15 @@ main() {
 		SOURCES_FILE="$HOME/.agents/skill-sources"
 	fi
 	SOURCES_FILE=$(abs_path "$(expand_home "$SOURCES_FILE")")
+	case "$SOURCES_FILE" in
+	"" | "/") die "the sources file must not be / or empty" ;;
+	esac
 
-	if [ -n "$ASSEMBLY_OPT" ]; then
+	if [ "$ASSEMBLY_SET" -eq 1 ]; then
+		case "$ASSEMBLY_OPT" in
+		"") die "--assembly needs a directory path" ;;
+		"/") die "--assembly must name a directory below /, not / itself" ;;
+		esac
 		ASSEMBLY_DIR=$ASSEMBLY_OPT
 	elif [ -n "${SKILLS_ASSEMBLY_DIR-}" ]; then
 		ASSEMBLY_DIR=${SKILLS_ASSEMBLY_DIR}
@@ -1415,8 +1732,12 @@ main() {
 		ASSEMBLY_DIR="$HOME/.agents/skills"
 	fi
 	ASSEMBLY_DIR=$(abs_path "$(expand_home "$ASSEMBLY_DIR")")
+	case "$ASSEMBLY_DIR" in
+	"" | "/") die "the assembly directory must not be / or empty" ;;
+	esac
 	ASSEMBLY_DIR=${ASSEMBLY_DIR%/}
 	MANIFEST="$ASSEMBLY_DIR/.skill-links"
+	STAMP_DIR="$ASSEMBLY_DIR/.skill-links.d"
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
 	case "$FETCH_INTERVAL_HOURS" in
@@ -1440,10 +1761,6 @@ main() {
 		;;
 	unlink)
 		if ! cmd_unlink; then rc=1; fi
-		;;
-	help)
-		usage
-		rc=0
 		;;
 	*)
 		printf '%s: unknown command %s\n' "$PROG" "$cmd" >&2

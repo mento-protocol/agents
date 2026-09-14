@@ -15,11 +15,11 @@ This repository is a pnpm workspace with two kinds of content:
 Each skill lives at `skills/<name>/SKILL.md`, where `<name>` equals the
 directory name. A skill directory may also contain:
 
-- `agents/openai.yaml` — an adapter for a runtime that needs skill metadata
+- `agents/openai.yaml`: an adapter for a runtime that needs skill metadata
   in a different format.
-- `scripts/` — helper scripts the skill runs.
-- `references/` — supporting documents the skill reads on demand.
-- `assets/` — files the skill's output is built from or copies.
+- `scripts/`: helper scripts the skill runs.
+- `references/`: supporting documents the skill reads on demand.
+- `assets/`: files the skill's output is built from or copies.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
 and layout. CI runs it on every pull request.

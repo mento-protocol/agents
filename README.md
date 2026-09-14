@@ -45,6 +45,13 @@ Either way it then links every skill from every source the file lists into
 Every run names the sources it used (`link-skills: sources: ...`) and warns
 when this clone's own `skills` directory is not one of them.
 
+The script points `~/.claude/skills` and `~/.codex/skills` at the assembly
+only when `~/.claude` or `~/.codex` already exists; it creates neither home
+directory and names the runtime it skipped. An existing real `~/.claude/skills`
+that is empty is replaced by the symlink (a directory holding only Finder
+metadata such as `.DS_Store` counts as empty), and one that holds anything else
+is refused with a message telling you to move it aside.
+
 ### Update
 
 ```bash
@@ -63,13 +70,14 @@ scripts/link-skills.sh check
 
 Reports drift in the assembly directory (missing, collided, or foreign
 links) and, for each git source, how many commits it is behind its
-`origin`. It creates and removes no links.
+`origin`. It creates and removes no links. Entries the script did not create
+are not reported by `check`; they are left alone.
 
 `check` does reach the network: it runs `git fetch` for every git source,
 throttled to once every 6 hours per source, and records each fetch in a
-`~/.agents/skills/.skill-links.fetch-*` stamp file. A failed fetch is a note,
-not an error. `check` exits 1 when it reports a problem, 0 when it does not,
-and 2 when there is no sources file to work from.
+`~/.agents/skills/.skill-links.d/fetch-*` stamp file. A failed fetch is a
+note, not an error. `check` exits 1 when it reports a problem, 0 when it does
+not, and 2 when there is no sources file to work from.
 
 ### Session notice
 
@@ -89,18 +97,22 @@ fetching once it has spent 20 seconds, so a notice can lag a teammate's push
 by that interval. Run `scripts/link-skills.sh check` to force a fresh look.
 
 `install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
-creating either file when it is missing, and copies the previous content to
-`<file>.bak-<UTC timestamp>` before it changes anything. A runtime whose home
-directory does not exist yet is skipped and named in the output. The JSON
-merge needs `python3`; without it the command prints the group to add by hand
-and exits 1.
+creating either file when it is missing, and copies the previous content of an
+existing file to `<file>.bak-<UTC timestamp>` before it changes anything. It
+reports each runtime as installed once the hook is added and as already
+installed once the hook is already there, and exits 0 once every reachable
+runtime is in one of those states. A file it creates itself gets mode `0600`
+and no backup. A backup name already in use gets a `.1`, `.2` suffix, so no
+earlier backup is overwritten. A runtime whose home directory does not exist
+yet is skipped and named in the output. The JSON merge needs `python3`;
+without it the command prints the group to add by hand and exits 1.
 
 ### Composing with a personal skills directory
 
 `~/.agents/skill-sources` holds one source directory per line, so a
 personal skills library can compose with this repository. Each line names
 the directory whose immediate children are skill directories holding a
-`SKILL.md` — not the repository root above it. Add a second line pointing at
+`SKILL.md`, not the repository root above it. Add a second line pointing at
 your own:
 
 ```text
@@ -113,7 +125,10 @@ listed source holds no skill.
 
 Skill names must be unique across every source. `link-skills.sh` refuses
 to link a name that collides between sources, keeps whichever link already
-worked, and it never touches an assembly entry it did not create itself.
+worked, and it never touches an assembly entry it did not create itself. A
+skill directory placed directly in `~/.agents/skills` is one such foreign
+entry: the script leaves it alone instead of adopting it. The supported way to
+add such a skill is to list its parent directory as a source.
 
 ### Remove
 

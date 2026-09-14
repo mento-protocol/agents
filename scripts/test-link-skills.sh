@@ -34,7 +34,9 @@ cleanup() {
 		rm -rf "$ROOT"
 	fi
 }
-trap cleanup EXIT INT TERM
+# The trap is registered in main(), only once ROOT is verified to be a fresh
+# directory this run created: a failed mktemp must not arm a cleanup that
+# could rm -rf an empty ROOT variable's worth of nothing, or worse.
 
 # ------------------------------------------------------------- assertions ---
 
@@ -240,6 +242,88 @@ run_case() {
 
 have_python3() {
 	command -v python3 >/dev/null 2>&1
+}
+
+# Permission bits of a file as an octal string, on macOS and on Linux.
+file_mode() {
+	local m
+	m=$(stat -f '%Lp' "$1" 2>/dev/null) || m=""
+	if [ -z "$m" ]; then
+		m=$(stat -c '%a' "$1" 2>/dev/null) || m=""
+	fi
+	printf '%s\n' "$m"
+}
+
+# The shims below sit in one directory that is prepended to PATH for the run
+# under test only. The single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+make_no_pull_git() {
+	local dir real
+	dir=$1
+	real=$(command -v git)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'for a in "$@"; do' \
+		'	if [ "$a" = "pull" ]; then' \
+		'		echo "test shim: git pull is not allowed here" >&2' \
+		'		exit 97' \
+		'	fi' \
+		'done' \
+		"exec \"$real\" \"\$@\"" >"$dir/git"
+	chmod +x "$dir/git"
+}
+
+# A date shim with one fixed timestamp, so that two installs collide on the
+# backup name whatever the clock does.
+# shellcheck disable=SC2016
+make_fixed_date() {
+	local dir real
+	dir=$1
+	real=$(command -v date)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'case "$*" in' \
+		'*%Y%m%dT%H%M%SZ*)' \
+		'	echo 19700101T000000Z' \
+		'	exit 0' \
+		'	;;' \
+		'esac' \
+		"exec \"$real\" \"\$@\"" >"$dir/date"
+	chmod +x "$dir/date"
+}
+
+SAVED_PATH=""
+
+use_shims() {
+	SAVED_PATH=$PATH
+	PATH="$1:$PATH"
+	export PATH
+}
+
+drop_shims() {
+	if [ -n "$SAVED_PATH" ]; then
+		PATH=$SAVED_PATH
+		export PATH
+		SAVED_PATH=""
+	fi
+}
+
+# macOS formats APFS and HFS+ case-insensitive by default; Linux ext4 does not.
+# The cases that depend on it print a skip note and still pass elsewhere.
+fs_case_insensitive() {
+	local probe rc
+	probe="$CASE_DIR/.case-probe"
+	rm -rf "$probe"
+	mkdir -p "$probe"
+	: >"$probe/probe"
+	rc=1
+	if [ -e "$probe/PROBE" ]; then
+		rc=0
+	fi
+	rm -rf "$probe"
+	return "$rc"
 }
 
 # ------------------------------------------------------------------ cases ---
@@ -449,8 +533,13 @@ hook_auto_update_when_clean() {
 	assert_rc 0 "link"
 	before=$(head_of "$COMPANY")
 	push_beta
+	# The shim fails the run if the hook reaches for "git pull": the
+	# fast-forward must be a local merge of the ref the throttled fetch got.
+	make_no_pull_git "$CASE_DIR/bin"
+	use_shims "$CASE_DIR/bin"
 	ls_run hook
 	assert_rc 0 "hook"
+	assert_out_lacks "git pull is not allowed" "the hook never runs git pull"
 	assert_out_has "[link-skills]" "hook prefix"
 	assert_out_has "updated $COMPANY" "update message"
 	after=$(head_of "$COMPANY")
@@ -461,6 +550,7 @@ hook_auto_update_when_clean() {
 	ls_run hook
 	assert_rc 0 "second hook"
 	assert_out_empty "second hook is silent"
+	drop_shims
 }
 
 hook_refused_when_dirty() {
@@ -519,9 +609,10 @@ install_hooks_missing_file() {
 	assert_file_has "$HOME/.codex/hooks.json" "link-skills.sh hook" "codex hooks"
 	assert_file_has "$HOME/.claude/settings.json" "SessionStart" "claude SessionStart"
 	assert_out_has "+++" "unified diff"
+	# The run created the file itself, so there is no previous content to keep.
 	backups=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
-	if [ "$backups" != "1" ]; then
-		fail "expected one backup of settings.json, found $backups"
+	if [ "$backups" != "0" ]; then
+		fail "a created settings.json needs no backup, found $backups"
 	fi
 }
 
@@ -588,8 +679,8 @@ install_hooks_idempotent() {
 		fail "codex hooks should hold one hook command, found $n"
 	fi
 	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
-	if [ "$n" != "1" ]; then
-		fail "the second run must not write another backup, found $n"
+	if [ "$n" != "0" ]; then
+		fail "neither run backs up a file the first run created, found $n"
 	fi
 }
 
@@ -698,8 +789,9 @@ missing_source_keeps_links() {
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
-# A source that is momentarily empty must not empty the assembly.
-emptied_source_keeps_links() {
+# A source directory that is readable is authoritative even when it holds no
+# skill: its recorded links are stale and go, and the warning still prints.
+emptied_source_prunes_links() {
 	mkskill "$CASE_DIR/one" alpha
 	mkskill "$CASE_DIR/one" beta
 	write_sources
@@ -710,16 +802,337 @@ emptied_source_keeps_links() {
 	ls_run link
 	assert_rc 0 "second link"
 	assert_out_has "holds no skill" "empty source warning"
-	assert_out_has "kept 2 link(s)" "kept message"
+	assert_out_has "pruned 2" "both links pruned"
+	assert_out_lacks "kept 2 link(s)" "nothing is kept for a readable source"
+	assert_absent "$HOME/.agents/skills/alpha" "alpha pruned"
+	assert_absent "$HOME/.agents/skills/beta" "beta pruned"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "alpha" "manifest dropped alpha"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "beta" "manifest dropped beta"
+}
+
+# A matching symlink this script never recorded stays the other party's: it is
+# not adopted into the manifest, so unlink leaves it alone.
+foreign_matching_link_not_adopted() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	ln -s "$CASE_DIR/one/alpha" "$HOME/.agents/skills/alpha"
+	ls_run link
+	assert_rc 0 "link"
+	assert_out_has "foreign link matches; left alone" "left alone message"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "alpha" "manifest does not adopt it"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "foreign link kept"
+	ls_run unlink
+	assert_rc 0 "unlink"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "foreign link survives unlink"
+}
+
+# A dangling link whose target is not the recorded one belongs to whoever made
+# it, so prune must leave it.
+foreign_dangling_not_pruned() {
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	rm -f "$HOME/.agents/skills/beta"
+	ln -s "$CASE_DIR/wip/beta-under-construction" "$HOME/.agents/skills/beta"
+	rm -rf "$CASE_DIR/one/beta"
+	ls_run link
+	assert_rc 0 "second link"
+	assert_out_has "foreign dangling link" "foreign message"
+	assert_out_lacks "pruned dangling beta" "not pruned"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/wip/beta-under-construction" "foreign dangling link kept"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+}
+
+foreign_dangling_not_unlinked() {
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	rm -f "$HOME/.agents/skills/beta"
+	ln -s "$CASE_DIR/wip/beta-under-construction" "$HOME/.agents/skills/beta"
+	ls_run unlink
+	assert_rc 0 "unlink"
+	assert_out_has "foreign dangling link" "foreign message"
+	assert_absent "$HOME/.agents/skills/alpha" "recorded link removed"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/wip/beta-under-construction" "foreign dangling link kept"
+}
+
+# A manifest name is one plain entry name. A line naming a path must never be
+# followed out of the assembly directory.
+manifest_traversal_line_ignored() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	ls_run link
+	assert_rc 0 "link"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "runtime link"
+
+	printf '../../.claude/skills\t%s\n' "$HOME/.agents/skills" >>"$HOME/.agents/skills/.skill-links"
+	ls_run link
+	assert_rc 0 "link with the traversal line"
+	assert_out_has "is not a plain entry name" "warning"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "runtime link kept by link"
+
+	printf '../../.claude/skills\t%s\n' "$HOME/.agents/skills" >>"$HOME/.agents/skills/.skill-links"
+	ls_run unlink
+	assert_rc 0 "unlink with the traversal line"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "runtime link kept by unlink"
+}
+
+# The manifest temp file is allocated by mktemp, so an entry sitting at a
+# guessable name is never written through and never removed.
+#
+# The old name was "$ASSEMBLY_DIR/.skill-links.tmp.$$". The decoys below cover
+# the pid the script under test is about to get: the anchor is the pid of a
+# freshly forked child, and every decoy is written with shell builtins only, so
+# the system pid counter barely moves between the anchor and the run.
+manifest_temp_name_not_guessable() {
+	local i anchor pid left
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	# shellcheck disable=SC2016
+	anchor=$("$BASH_BIN" -c 'printf "%s" "$$"')
+	i=0
+	while [ "$i" -lt 40 ]; do
+		pid=$((anchor + i))
+		printf 'sentinel\n' >"$HOME/.agents/skills/.skill-links.tmp.$pid"
+		i=$((i + 1))
+	done
+	ls_run link
+	assert_rc 0 "link"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "the manifest was still written"
+	left=0
+	i=0
+	while [ "$i" -lt 40 ]; do
+		pid=$((anchor + i))
+		if [ -f "$HOME/.agents/skills/.skill-links.tmp.$pid" ] &&
+			grep -q -F -- 'sentinel' "$HOME/.agents/skills/.skill-links.tmp.$pid" 2>/dev/null; then
+			left=$((left + 1))
+		fi
+		i=$((i + 1))
+	done
+	if [ "$left" != "40" ]; then
+		fail "a predictably named file in the assembly was written through or removed ($left of 40 intact)"
+	fi
+}
+
+# A fetch stamp that is a symlink is refused, never written through.
+fetch_stamp_symlink_refused() {
+	local stamp
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	ls_run check
+	assert_rc 0 "check"
+	assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
+	stamp=$(find "$HOME/.agents/skills/.skill-links.d" -type f -name 'fetch-*' 2>/dev/null | head -n 1)
+	if [ -z "$stamp" ]; then
+		fail "check wrote no fetch stamp"
+		return
+	fi
+	printf 'sentinel\n' >"$CASE_DIR/stamp-sentinel"
+	rm -f "$stamp"
+	ln -s "$CASE_DIR/stamp-sentinel" "$stamp"
+	ls_run check
+	assert_rc 0 "second check"
+	assert_out_has "is a symlink; it was not written" "refusal message"
+	assert_file_has "$CASE_DIR/stamp-sentinel" "sentinel" "sentinel content unchanged"
+
+	# The stamp directory itself is refused when it is not a real directory.
+	rm -rf "$HOME/.agents/skills/.skill-links.d"
+	mkdir -p "$CASE_DIR/elsewhere"
+	ln -s "$CASE_DIR/elsewhere" "$HOME/.agents/skills/.skill-links.d"
+	ls_run check
+	assert_rc 0 "third check"
+	assert_out_has "is a symlink; fetch stamps are not written" "directory refusal message"
+	if [ -n "$(find "$CASE_DIR/elsewhere" -mindepth 1 2>/dev/null)" ]; then
+		fail "a stamp was written through the symlinked stamp directory"
+	fi
+}
+
+# unlink removes the stamp directory it owns, and nothing else in the assembly
+# root that merely looks like a stamp.
+unlink_leaves_foreign_fetch_file() {
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	ls_run check
+	assert_rc 0 "check"
+	assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
+	printf 'not mine\n' >"$HOME/.agents/skills/.skill-links.fetch-foreign"
+	ls_run unlink
+	assert_rc 0 "unlink"
+	assert_file_has "$HOME/.agents/skills/.skill-links.fetch-foreign" "not mine" "unrelated file left alone"
+	assert_absent "$HOME/.agents/skills/.skill-links.d" "stamp directory removed"
+}
+
+# Two spellings of one directory are one source, however they are written.
+source_listed_twice_by_symlink_alias() {
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	ln -s "$CASE_DIR/one" "$CASE_DIR/alias"
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/alias"
+	ls_run link
+	assert_rc 0 "link"
+	assert_out_lacks "duplicate skill name" "one directory is one source"
+	assert_out_has "linked 2, unchanged 0, pruned 0, errors 0" "summary"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link"
+
+	if ! fs_case_insensitive; then
+		printf '    (case-variant spelling skipped: case-sensitive filesystem)\n'
+		return
+	fi
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/ONE"
+	ls_run link
+	assert_rc 0 "case-variant link"
+	assert_out_lacks "duplicate skill name" "a case variant is the same source"
+	assert_out_has "linked 0, unchanged 2, pruned 0, errors 0" "case-variant summary"
+}
+
+# A case-only rename of a skill directory must relink in one run, not report a
+# collision and drop the skill.
+case_only_rename_relinks() {
+	if ! fs_case_insensitive; then
+		printf '    (skipped: case-sensitive filesystem)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" foo
+	mkskill "$CASE_DIR/one" keep
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	mv "$CASE_DIR/one/foo" "$CASE_DIR/one/tmpname"
+	mv "$CASE_DIR/one/tmpname" "$CASE_DIR/one/Foo"
+	ls_run link
+	assert_rc 0 "second link"
+	assert_out_lacks "collision" "no false collision"
+	assert_out_has "relinked Foo" "relink message"
 	assert_out_has "pruned 0" "nothing pruned"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "manifest keeps alpha"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "beta" "manifest keeps beta"
-	if [ ! -L "$HOME/.agents/skills/alpha" ]; then
-		fail "alpha link was removed"
+	assert_exists "$HOME/.agents/skills/Foo/SKILL.md" "the skill is reachable after one run"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "Foo" "manifest holds the new spelling"
+}
+
+# Two names the filesystem cannot tell apart are a duplicate, reported as one.
+case_variant_names_are_duplicates() {
+	if ! fs_case_insensitive; then
+		printf '    (skipped: case-sensitive filesystem)\n'
+		return
 	fi
-	if [ ! -L "$HOME/.agents/skills/beta" ]; then
-		fail "beta link was removed"
-	fi
+	mkskill "$CASE_DIR/one" Bar
+	mkskill "$CASE_DIR/one" keep
+	mkskill "$CASE_DIR/two" bar
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 1 "link"
+	assert_out_has "duplicate skill name 'Bar'" "duplicate message"
+	assert_out_has "$CASE_DIR/two/bar" "both paths named"
+	assert_absent "$HOME/.agents/skills/Bar" "neither copy linked"
+	assert_link "$HOME/.agents/skills/keep" "$CASE_DIR/one/keep" "the other skill still links"
+}
+
+# A sources file that names no source is not permission to empty the assembly.
+empty_sources_file_does_not_prune() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	write_sources
+	ls_run link
+	assert_rc 2 "empty sources file"
+	assert_out_has "no source is listed" "error message"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "link kept"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "manifest kept"
+	printf '# %s\n' "$CASE_DIR/one" >"$HOME/.agents/skill-sources"
+	ls_run link
+	assert_rc 2 "comments-only sources file"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "link kept after the comments-only run"
+}
+
+# Every default path is derived from HOME, so a HOME that is not absolute stops
+# the run before anything is written.
+empty_home_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	LS_OUT=$(HOME="" "$BASH_BIN" "$LS" link 2>&1)
+	LS_RC=$?
+	assert_rc 2 "link with an empty HOME"
+	assert_out_has "HOME is not set to an absolute path" "error message"
+	LS_OUT=$(HOME="relative/home" "$BASH_BIN" "$LS" link 2>&1)
+	LS_RC=$?
+	assert_rc 2 "link with a relative HOME"
+	assert_out_has "HOME is not set to an absolute path" "error message"
+}
+
+# The hook runs on every session start and must never fail one.
+unset_home_hook_exits_zero() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" hook 2>&1)
+	LS_RC=$?
+	assert_rc 0 "hook without HOME"
+	assert_out_has "[link-skills] HOME is not set" "hook notice"
+	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" link 2>&1)
+	LS_RC=$?
+	assert_rc 2 "link without HOME"
+}
+
+root_assembly_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run --assembly / link
+	assert_rc 2 "--assembly /"
+	assert_out_has "must name a directory below /" "refusal message"
+	ls_run --assembly "" link
+	assert_rc 2 "--assembly with an empty value"
+	ls_run --sources / link
+	assert_rc 2 "--sources /"
+	ls_run --sources "" link
+	assert_rc 2 "--sources with an empty value"
+	ls_run --assembly=/ link
+	assert_rc 2 "--assembly=/"
+}
+
+# A runtime whose home directory does not exist is named, not passed over in
+# silence, and the directory is not created.
+missing_runtime_home_reported() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	ls_run link
+	assert_rc 0 "link"
+	assert_out_has "skipped $HOME/.codex/skills: $HOME/.codex does not exist" "link names the skipped runtime"
+	assert_absent "$HOME/.codex" "the runtime directory is not created"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "claude runtime link"
+	ls_run check
+	assert_rc 0 "check"
+	assert_out_has "skipped $HOME/.codex/skills" "check names the skipped runtime"
 }
 
 # A manifest line without a recorded target says nothing about what this script
@@ -907,6 +1320,115 @@ install_hooks_dangling_symlink_refused() {
 	fi
 }
 
+# A clone path holding an apostrophe is quoted in the command string, so a
+# plain substring match on the path never finds the group it wrote.
+install_hooks_apostrophe_path_idempotent() {
+	local clone n cmd
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	clone="$CASE_DIR/it's tools/agents"
+	mkdir -p "$clone/scripts"
+	cp "$SOURCE_SCRIPT" "$clone/scripts/link-skills.sh"
+	mkskill "$clone/skills" alpha
+	write_sources
+	add_source "$clone/skills"
+	mkdir -p "$HOME/.claude"
+	LS="$clone/scripts/link-skills.sh"
+	ls_run install-hooks
+	assert_rc 0 "first install-hooks"
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	ls_run install-hooks
+	assert_rc 0 "third install-hooks"
+	assert_out_has "already runs the hook" "the third run finds the group"
+	n=$(python3 -c 'import json,sys;g=json.load(open(sys.argv[1]))["hooks"]["SessionStart"];print(sum(len(x.get("hooks") or []) for x in g))' "$HOME/.claude/settings.json")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command after three runs, found $n"
+	fi
+	cmd=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"])' "$HOME/.claude/settings.json")
+	if ! sh -c "$cmd" >/dev/null 2>&1; then
+		fail "the installed hook command does not run: $cmd"
+	fi
+}
+
+# The settings file keeps the mode it had, in both directions, a file this run
+# creates is private, and no predictable temporary name is used next to it.
+settings_mode_preserved() {
+	local mode n old_umask
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude" "$HOME/.codex"
+	old_umask=$(umask)
+	umask 022
+	printf '%s\n' '{"hooks": {}}' >"$HOME/.claude/settings.json"
+	chmod 600 "$HOME/.claude/settings.json"
+	printf '%s\n' '{"hooks": {}}' >"$HOME/.codex/hooks.json"
+	chmod 644 "$HOME/.codex/hooks.json"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	mode=$(file_mode "$HOME/.claude/settings.json")
+	if [ "$mode" != "600" ]; then
+		fail "settings.json should keep mode 600, found $mode"
+	fi
+	mode=$(file_mode "$HOME/.codex/hooks.json")
+	if [ "$mode" != "644" ]; then
+		fail "hooks.json should keep mode 644, found $mode"
+	fi
+	n=$(find "$HOME/.claude" "$HOME/.codex" -name '*.tmp.*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "a predictable temporary name was left behind, found $n"
+	fi
+	# A settings file the run scaffolds itself starts private, whatever the
+	# umask of the session that ran it.
+	rm -f "$HOME/.claude/settings.json"
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	umask "$old_umask"
+	mode=$(file_mode "$HOME/.claude/settings.json")
+	if [ "$mode" != "600" ]; then
+		fail "a created settings.json should have mode 600, found $mode"
+	fi
+}
+
+# Two installs in the same second share a timestamp; the second backup takes
+# the next free suffix instead of overwriting the first.
+install_hooks_backups_never_overwritten() {
+	local n base
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	make_fixed_date "$CASE_DIR/bin"
+	base="$HOME/.claude/settings.json.bak-19700101T000000Z"
+	printf '%s\n' '{"model": "first", "hooks": {}}' >"$HOME/.claude/settings.json"
+	use_shims "$CASE_DIR/bin"
+	ls_run install-hooks
+	assert_rc 0 "first install-hooks"
+	printf '%s\n' '{"model": "second", "hooks": {}}' >"$HOME/.claude/settings.json"
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	drop_shims
+	assert_exists "$base" "first backup"
+	assert_exists "$base.1" "second backup"
+	assert_file_has "$base" "first" "the first backup keeps its content"
+	assert_file_has "$base.1" "second" "the second backup holds the second content"
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "2" ]; then
+		fail "expected two backups, found $n"
+	fi
+}
+
 # ------------------------------------------------- validate-skills.mjs cases -
 
 VALIDATOR="$HERE/validate-skills.mjs"
@@ -978,6 +1500,51 @@ validator_accepts_crlf_frontmatter() {
 	fi
 }
 
+# This harness must refuse to run when mktemp -d cannot create the temporary
+# root, and it must register no cleanup trap before that check. The failing
+# run starts from a throwaway working directory that holds a sentinel file and
+# a nested file: a cleanup trap armed against an unverified ROOT would put
+# those at risk, so their survival is the assertion.
+mktemp_failure_arms_no_cleanup() {
+	local work out rc
+	work="$CASE_DIR/work"
+	mkdir -p "$work/subdir"
+	printf 'sentinel-contents\n' >"$work/sentinel.txt"
+	printf 'nested\n' >"$work/subdir/nested.txt"
+	out=$(cd "$work" && TMPDIR="$CASE_DIR/no-such-tmpdir" "$BASH_BIN" "$HERE/test-link-skills.sh" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 1 ]; then
+		fail "harness exit code $rc, expected 1"
+		printf '      output: %s\n' "$out"
+	fi
+	case "$out" in
+	*"mktemp -d failed to create a directory"*) ;;
+	*)
+		fail "the harness does not report the mktemp failure"
+		printf '      output: %s\n' "$out"
+		;;
+	esac
+	case "$out" in
+	*"interpreter:"*)
+		fail "the harness kept running after the mktemp failure"
+		printf '      output: %s\n' "$out"
+		;;
+	*) ;;
+	esac
+	if [ ! -d "$work" ]; then
+		fail "the working directory was removed"
+		return
+	fi
+	if [ ! -f "$work/sentinel.txt" ]; then
+		fail "the sentinel file was removed"
+	elif [ "$(cat "$work/sentinel.txt")" != "sentinel-contents" ]; then
+		fail "the sentinel file content changed"
+	fi
+	if [ ! -f "$work/subdir/nested.txt" ]; then
+		fail "the nested file was removed"
+	fi
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -992,8 +1559,20 @@ main() {
 		exit 2
 	fi
 
-	ROOT=$(mktemp -d "${TMPDIR:-/tmp}/link-skills-tests.XXXXXX")
-	ROOT=$(cd "$ROOT" && pwd -P)
+	ROOT=$(mktemp -d "${TMPDIR:-/tmp}/link-skills-tests.XXXXXX") || ROOT=""
+	if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+		printf 'test-link-skills: mktemp -d failed to create a directory\n' >&2
+		exit 1
+	fi
+	ROOT=$(cd "$ROOT" && pwd -P) || ROOT=""
+	if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+		printf 'test-link-skills: could not canonicalize the temporary root\n' >&2
+		exit 1
+	fi
+	# Only now is ROOT known to be a fresh directory this run created: arm the
+	# cleanup trap so a failed mktemp above never runs cleanup against an empty
+	# or unverified ROOT.
+	trap cleanup EXIT INT TERM
 
 	# BASH_VERSION must be read by the interpreter under test, not by this one.
 	# shellcheck disable=SC2016
@@ -1024,7 +1603,22 @@ main() {
 	run_case source_listed_twice
 	run_case duplicate_keeps_existing_link
 	run_case missing_source_keeps_links
-	run_case emptied_source_keeps_links
+	run_case emptied_source_prunes_links
+	run_case foreign_matching_link_not_adopted
+	run_case foreign_dangling_not_pruned
+	run_case foreign_dangling_not_unlinked
+	run_case manifest_traversal_line_ignored
+	run_case manifest_temp_name_not_guessable
+	run_case fetch_stamp_symlink_refused
+	run_case unlink_leaves_foreign_fetch_file
+	run_case source_listed_twice_by_symlink_alias
+	run_case case_only_rename_relinks
+	run_case case_variant_names_are_duplicates
+	run_case empty_sources_file_does_not_prune
+	run_case empty_home_refused
+	run_case unset_home_hook_exits_zero
+	run_case root_assembly_refused
+	run_case missing_runtime_home_reported
 	run_case nameonly_manifest_line_ignored
 	run_case recorded_target_mismatch_not_replaced
 	run_case link_names_its_sources
@@ -1034,8 +1628,12 @@ main() {
 	run_case install_hooks_path_with_space
 	run_case install_hooks_symlinked_settings
 	run_case install_hooks_dangling_symlink_refused
+	run_case install_hooks_apostrophe_path_idempotent
+	run_case settings_mode_preserved
+	run_case install_hooks_backups_never_overwritten
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
+	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
 	if [ "$FAIL" -gt 0 ]; then
