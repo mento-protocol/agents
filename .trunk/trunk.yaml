@@ -27,6 +27,9 @@ lint:
         - "**/node_modules/**" # Skip all dependency directories
         - "**/dist/**" # Skip build/distribution directories
         - "**/build/**" # Skip build directories
+    - linters: [markdownlint]
+      paths:
+        - CLAUDE.md # Intentionally just "@AGENTS.md", not a heading
 
   # All enabled linters - organized by category for clarity
   enabled:

@@ -11,14 +11,135 @@ npm as `@mento-protocol/<name>`.
   bounded `gh` runner, and procedural-marker byte contracts. Ships the
   `mento-issues` CLI.
 
+## Skills
+
+`skills/*` holds agent skills shared across the team: reusable instructions
+an AI coding agent loads for a specific kind of task. Each skill lives at
+`skills/<name>/SKILL.md`.
+
+Claude Code, Codex, and OpenClaw each read skills from the flat assembly
+directory `~/.agents/skills`. `scripts/link-skills.sh` builds that directory
+out of one or more source repositories by symlinking each skill into it.
+Claude Code and Codex reach the assembly through the `~/.claude/skills` and
+`~/.codex/skills` symlinks the script also creates; OpenClaw reads
+`~/.agents/skills` directly.
+
+### Install
+
+Clone this repository anywhere, then run the link script:
+
+```bash
+git clone git@github.com:mento-protocol/agents.git
+cd agents
+scripts/link-skills.sh
+```
+
+If `~/.agents/skill-sources` does not exist yet, the script creates it with
+one line pointing at this clone's `skills` directory. If the file already
+exists, the script leaves it alone: add this clone's `skills` directory as a
+line yourself, as shown under
+[Composing with a personal skills directory](#composing-with-a-personal-skills-directory).
+Either way it then links every skill from every source the file lists into
+`~/.agents/skills`.
+
+Every run names the sources it used (`link-skills: sources: ...`) and warns
+when this clone's own `skills` directory is not one of them.
+
+### Update
+
+```bash
+git pull
+scripts/link-skills.sh
+```
+
+`git pull` brings in new or changed skills; `link-skills.sh` (its default
+subcommand is `link`) re-links the assembly directory to match.
+
+### Status
+
+```bash
+scripts/link-skills.sh check
+```
+
+Reports drift in the assembly directory (missing, collided, or foreign
+links) and, for each git source, how many commits it is behind its
+`origin`. It creates and removes no links.
+
+`check` does reach the network: it runs `git fetch` for every git source,
+throttled to once every 6 hours per source, and records each fetch in a
+`~/.agents/skills/.skill-links.fetch-*` stamp file. A failed fetch is a note,
+not an error. `check` exits 1 when it reports a problem, 0 when it does not,
+and 2 when there is no sources file to work from.
+
+### Session notice
+
+```bash
+scripts/link-skills.sh install-hooks
+```
+
+Adds a Claude Code and Codex `SessionStart` hook that runs
+`link-skills.sh hook` and prints a one-line notice when a source clone is
+behind. To let the hook fast-forward a clean clone on its default branch
+automatically instead of only notifying, add `auto-update` after that
+source's path in `~/.agents/skill-sources`.
+
+The hook fetches each source at most every 6 hours (override with
+`SKILL_SOURCES_FETCH_INTERVAL_HOURS`, `0` to fetch every time) and stops
+fetching once it has spent 20 seconds, so a notice can lag a teammate's push
+by that interval. Run `scripts/link-skills.sh check` to force a fresh look.
+
+`install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
+creating either file when it is missing, and copies the previous content to
+`<file>.bak-<UTC timestamp>` before it changes anything. A runtime whose home
+directory does not exist yet is skipped and named in the output. The JSON
+merge needs `python3`; without it the command prints the group to add by hand
+and exits 1.
+
+### Composing with a personal skills directory
+
+`~/.agents/skill-sources` holds one source directory per line, so a
+personal skills library can compose with this repository. Each line names
+the directory whose immediate children are skill directories holding a
+`SKILL.md` — not the repository root above it. Add a second line pointing at
+your own:
+
+```text
+~/code/agents/skills
+~/code/my-skills/skills
+```
+
+A line that points one level too high links nothing; the script warns when a
+listed source holds no skill.
+
+Skill names must be unique across every source. `link-skills.sh` refuses
+to link a name that collides between sources, keeps whichever link already
+worked, and it never touches an assembly entry it did not create itself.
+
+### Remove
+
+```bash
+scripts/link-skills.sh unlink
+```
+
+Removes the skill links this script recorded, and the manifest. Everything
+else in `~/.agents/skills` stays untouched, including the `~/.claude/skills`
+and `~/.codex/skills` symlinks: remove those by hand if you are uninstalling
+completely, before you delete `~/.agents/skills`.
+
 ## Development
 
 ```bash
 pnpm install
-pnpm test          # pnpm -r test — runs every package's test suite
-trunk check --all  # lint (or: pnpm lint)
-trunk fmt          # format (or: pnpm format)
+pnpm test                        # pnpm -r test — every package's test suite
+pnpm validate:skills             # node scripts/validate-skills.mjs
+bash scripts/test-link-skills.sh # the link-skills.sh harness
+trunk check --all                # lint (or: pnpm lint)
+trunk fmt                        # format (or: pnpm format)
 ```
+
+CI runs the last two skill checks on Ubuntu and macOS. On macOS also run
+`BASH_BIN=/bin/bash bash scripts/test-link-skills.sh`, which exercises the
+bash 3.2 that `link-skills.sh` must keep working with.
 
 Each package's own README documents its usage; run its suite directly with
 `pnpm --filter <package-name> test` during development.

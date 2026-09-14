@@ -5,7 +5,8 @@
   "scripts": {
     "format": "trunk fmt",
     "lint": "trunk check --all",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "validate:skills": "node scripts/validate-skills.mjs"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",
