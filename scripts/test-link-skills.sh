@@ -3422,6 +3422,242 @@ unreadable_skill_directory_keeps_link() {
 	assert_file_lacks "$HOME/.agents/skills/.skill-links" "beta" "the manifest dropped beta"
 }
 
+# A plain scalar does not end at a blank line when an indented line still
+# follows: YAML folds the blank line to one newline and keeps reading. Ending
+# the value at the blank line hides everything after it, so a description far
+# past the limit measures as a few characters.
+validator_folds_plain_scalar_across_blank_line() {
+	local out rc long
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	long=$(printf '%1100s' '' | tr ' ' 'A')
+	mkdir -p "$CASE_DIR/plain-blank/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: short\n'
+		printf '\n'
+		printf '  %s\n' "$long"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/plain-blank/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/plain-blank" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a plain scalar continued after a blank line must be measured whole: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	# The blank line folds to one newline, and the "name:" line at column zero
+	# ends the value instead of joining it, so the name is still read.
+	mkdir -p "$CASE_DIR/plain-blank-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'description: short\n'
+		printf '\n'
+		printf '  tail\n'
+		printf 'name: noted\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/plain-blank-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/plain-blank-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a short description continued after a blank line must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# A folded block joins its lines with single spaces, but a blank line between
+# them is a paragraph break worth exactly one newline. Folding it to two
+# spaces, or dropping it, measures a value the runtime never sees. 1022 "a", a
+# blank line and "b" decode to exactly 1024 characters; one more "a" is over
+# the limit.
+validator_folded_block_paragraph_break() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	fits=$(printf '%1022s' '' | tr ' ' 'a')
+	over=$(printf '%1023s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/folded-break/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$fits"
+		printf '\n'
+		printf '  b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-break/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-break" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024-character folded description must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/folded-break-long/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$over"
+		printf '\n'
+		printf '  b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-break-long/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-break-long" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025-character folded description must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
+# A mkdir shim that loses one race for the lock path: the first time the script
+# under test tries to make the lock directory, the shim removes the lock that
+# is already there and reports failure, so the run finds an empty lock path
+# right after its own mkdir failed. Every later call is the real mkdir. The
+# single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+make_vanishing_lock_mkdir() {
+	local dir real
+	dir=$1
+	real=$(command -v mkdir)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'case "$*" in' \
+		'*.skill-links.lock)' \
+		'	if [ -n "${LS_TEST_LOCK_MARKER:-}" ] && [ ! -f "$LS_TEST_LOCK_MARKER" ]; then' \
+		'		: >"$LS_TEST_LOCK_MARKER"' \
+		'		rm -f "$LS_TEST_LOCK_DIR/pid" 2>/dev/null' \
+		'		rmdir "$LS_TEST_LOCK_DIR" 2>/dev/null' \
+		'		exit 1' \
+		'	fi' \
+		'	;;' \
+		'esac' \
+		"exec \"$real\" \"\$@\"" >"$dir/mkdir"
+	chmod +x "$dir/mkdir"
+}
+
+# A lock the run that held it gives back while another run is waiting must be
+# taken by that waiting run, not read as permission to work with no lock at
+# all. The shim above makes the moment that matters happen every time: the
+# waiting run's mkdir fails and the lock path is empty immediately after.
+lock_vanish_is_retried() {
+	local lock shims held pid out got
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	mkdir "$lock"
+	sleep 60 &
+	held=$!
+	printf '%s\n' "$held" >"$lock/pid"
+
+	shims="$CASE_DIR/shims"
+	make_vanishing_lock_mkdir "$shims"
+	LS_TEST_LOCK_MARKER="$CASE_DIR/lock-race-lost"
+	LS_TEST_LOCK_DIR="$lock"
+	export LS_TEST_LOCK_MARKER LS_TEST_LOCK_DIR
+	# The run under test holds its lock for two seconds before it does any
+	# work, so the pid file can be read while that run is still going.
+	LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS=2
+	export LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS
+
+	out="$CASE_DIR/link.out"
+	use_shims "$shims"
+	"$BASH_BIN" "$LS" link >"$out" 2>&1 &
+	pid=$!
+	sleep 1
+	got=""
+	if [ -f "$lock/pid" ]; then
+		got=$(cat "$lock/pid")
+	fi
+	if [ -z "$got" ]; then
+		fail "the waiting run went on with no lock of its own"
+	elif [ "$got" != "$pid" ]; then
+		fail "the lock records pid $got, expected the running link $pid"
+	fi
+	wait "$pid"
+	LS_RC=$?
+	LS_OUT=$(cat "$out")
+	drop_shims
+	unset LS_TEST_LOCK_MARKER LS_TEST_LOCK_DIR LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS
+	kill "$held" 2>/dev/null
+	wait "$held" 2>/dev/null
+
+	assert_exists "$CASE_DIR/lock-race-lost" "the shim took the first race for the lock"
+	assert_rc 0 "link once the lock was given back"
+	assert_out_has "linked 1" "the run did its work"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the lock is released on exit"
+}
+
+# A name whose recorded copy cannot be read this run, and which another source
+# also provides, is a duplicate this run cannot resolve. The link and the
+# manifest entry keep the copy they have: a permission problem must never
+# repoint a name at a different skill.
+unreadable_name_not_repointed() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha linked from the first source"
+
+	mkskill "$CASE_DIR/two" alpha
+	add_source "$CASE_DIR/two"
+	chmod 000 "$CASE_DIR/one/alpha"
+	ls_run link
+	assert_rc 1 "link while the recorded copy cannot be read"
+	assert_out_has "duplicate: alpha is unreadable in $CASE_DIR/one and also provided by $CASE_DIR/two" "both sources named"
+	assert_out_has "kept the existing link" "the message says the link is kept"
+	assert_out_has "pruned 0" "nothing pruned"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha still points at the first source"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest keeps the recorded target"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "$CASE_DIR/two/alpha" "the other copy is not recorded"
+
+	# Readable again, both copies are a plain duplicate: still no repoint.
+	chmod 755 "$CASE_DIR/one/alpha"
+	ls_run link
+	assert_rc 1 "link with two readable copies"
+	assert_out_has "duplicate skill name 'alpha'" "the plain duplicate message"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha is left where it was"
+
+	# One copy again, and the run is clean.
+	rm -rf "$CASE_DIR/two/alpha"
+	ls_run link
+	assert_rc 0 "link with one copy again"
+	assert_out_has "errors 0" "a clean run"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha still points at the first source"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest still records it"
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -3518,6 +3754,8 @@ main() {
 	run_case nested_missing_assembly_is_created
 	run_case relink_failure_keeps_old_link_and_entry
 	run_case unreadable_skill_directory_keeps_link
+	run_case lock_vanish_is_retried
+	run_case unreadable_name_not_repointed
 	run_case stale_lock_is_removed
 	run_case aged_lock_with_live_owner_is_kept
 	run_case symlinked_lock_refused
@@ -3554,6 +3792,8 @@ main() {
 	run_case validator_rejects_typed_scalars
 	run_case validator_rejects_tagged_and_more_numeric_scalars
 	run_case validator_counts_code_points
+	run_case validator_folds_plain_scalar_across_blank_line
+	run_case validator_folded_block_paragraph_break
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces

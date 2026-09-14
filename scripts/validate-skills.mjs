@@ -10,8 +10,11 @@
 //     The value is decoded before it is measured: a block scalar keeps the
 //     whitespace inside its lines, a quoted scalar keeps every character
 //     between its quotes with the escapes resolved, and a plain scalar folds
-//     its indented continuation lines in with single spaces. An unquoted
-//     value loses its inline comment, so "description: # TODO" reads as empty
+//     its indented continuation lines in with single spaces. A blank line
+//     inside a plain scalar or a folded (">") block is a paragraph break that
+//     folds to one newline, and the chomping indicator of a block scalar
+//     decides how many trailing newlines its value keeps. An unquoted value
+//     loses its inline comment, so "description: # TODO" reads as empty
 //   - description is a plain string. Any unquoted value that YAML reads as
 //     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
 //     anchor or alias, an explicit tag such as "!!int 123" or "!custom y", the
@@ -257,20 +260,69 @@ function readQuotedScalar(text) {
 }
 
 /**
+ * The chomping indicator of a block scalar header: "-" strips every trailing
+ * newline, "+" keeps all of them, and a header with neither clips the value to
+ * one final newline.
+ */
+function chompingOf(header) {
+  if (header.includes("-")) return "strip";
+  if (header.includes("+")) return "keep";
+  return "clip";
+}
+
+/**
+ * Fold the content lines of a ">" block into one value.
+ *
+ * Two ordinary lines join with a single space. One blank line between them is
+ * a paragraph break that yields one newline, and n blank lines yield n
+ * newlines. A line indented past the block's own indentation is not folded: it
+ * keeps the newline before it and the newline after it, the way YAML preserves
+ * a list or a code sample written inside a folded block.
+ */
+function foldBlockLines(content) {
+  let value = "";
+  let started = false;
+  let blanks = 0;
+  let previousMoreIndented = false;
+  for (const line of content) {
+    if (line.trim() === "") {
+      blanks += 1;
+      continue;
+    }
+    const moreIndented = /^[ \t]/.test(line);
+    if (!started) {
+      value = line;
+      started = true;
+    } else if (blanks > 0) {
+      value += "\n".repeat(blanks) + line;
+    } else if (moreIndented || previousMoreIndented) {
+      value += "\n" + line;
+    } else {
+      value += " " + line;
+    }
+    previousMoreIndented = moreIndented;
+    blanks = 0;
+  }
+  return value;
+}
+
+/**
  * Read a block scalar that starts at the header line `start`. The body is
  * every following line that is indented, plus the blank lines between them; a
  * line at column zero ends it.
  *
  * A literal block ("|") keeps each line verbatim after the common indentation
- * is removed and joins them with newlines. A folded block (">") joins the same
- * lines with single spaces. Neither collapses the whitespace inside a line, so
- * the measured length is the length of the real value.
+ * is removed and joins them with newlines. A folded block (">") folds them by
+ * the rules in foldBlockLines. Neither collapses the whitespace inside a line,
+ * so the measured length is the length of the real value. The chomping
+ * indicator then decides how many trailing newlines the value keeps.
  *
  * Returns { value, end }, where `end` is the index of the last line consumed.
  */
 function readBlockScalar(header, lines, start) {
   const literal = header.startsWith("|");
   const indicator = BLOCK_INDENT_RE.exec(header);
+  const chomping = chompingOf(header);
   const bodyLines = [];
   let end = start;
   for (let i = start + 1; i < lines.length; i += 1) {
@@ -292,29 +344,62 @@ function readBlockScalar(header, lines, start) {
   const parts = bodyLines.map((line) =>
     line.slice(Math.min(indent, indentWidth(line))),
   );
-  const value = literal ? parts.join("\n") : parts.join(" ");
+
+  // A trailing blank line is not part of the text. The chomping indicator says
+  // how many of the newlines those lines stand for the value keeps.
+  let last = parts.length;
+  while (last > 0 && parts[last - 1].trim() === "") last -= 1;
+  const content = parts.slice(0, last);
+  const trailingBlanks = parts.length - last;
+
+  let value = literal ? content.join("\n") : foldBlockLines(content);
+  if (content.length > 0) {
+    if (chomping === "clip") value += "\n";
+    if (chomping === "keep") value += "\n".repeat(trailingBlanks + 1);
+  } else if (chomping === "keep") {
+    value = "\n".repeat(trailingBlanks);
+  }
   return { value, end };
 }
 
 /**
  * Read a plain (unquoted, unfolded) scalar that starts on the header line and
  * continues on every following indented line. YAML folds those continuation
- * lines into the value with single spaces, so they are measured with it. A
- * line at column zero, such as the next "key:" line, ends the value.
+ * lines into the value with single spaces, so they are measured with it.
+ *
+ * A blank line does not end the value when an indented line still follows: it
+ * folds to one newline, and n blank lines fold to n newlines. Only a non-blank
+ * line at column zero, such as the next "key:" line, or the end of the
+ * frontmatter ends the value.
  *
  * Returns { value, end }, where `end` is the index of the last line consumed.
+ * Trailing blank lines are never consumed, so a blank line before a
+ * column-zero key leaves that key for the caller to read.
  */
 function readPlainScalar(first, lines, start) {
-  const parts = [stripInlineComment(first)];
+  let value = stripInlineComment(first);
   let end = start;
+  let blanks = 0;
   for (let i = start + 1; i < lines.length; i += 1) {
     const next = lines[i].replace(/\r$/, "");
-    if (next.trim() === "") break;
+    if (next.trim() === "") {
+      blanks += 1;
+      continue;
+    }
     if (indentWidth(next) === 0) break;
-    parts.push(stripInlineComment(next.trim()));
+    const part = stripInlineComment(next.trim());
+    if (part !== "") {
+      if (value === "") {
+        value = part;
+      } else {
+        value += blanks === 0 ? " " : "\n".repeat(blanks);
+        value += part;
+      }
+      blanks = 0;
+    }
     end = i;
   }
-  return { value: parts.filter((part) => part !== "").join(" "), end };
+  return { value, end };
 }
 
 /**

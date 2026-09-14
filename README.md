@@ -68,13 +68,15 @@ already in progress, and then exit 1 having changed nothing; the session hook
 skips its own update silently instead of waiting. The lock lives inside the
 assembly directory, so every command that writes the assembly creates that
 directory first: the very first run on a machine is locked like every other
-one. Each run gives its lock back when it ends, the session hook included. A
-lock left behind by a run that was killed is removed once its process is
-gone. A lock whose owner is still running is kept however old it is, and a
-lock that records no owner at all is removed after two minutes. A symlink or
-a file at the lock path is not a
-lock this script made: `link` and `unlink` report it and exit 1 without reading
-or removing anything below it, and the hook steps aside in silence.
+one. A run holds the lock only when it created that directory itself: a lock
+another run gives back while this one is waiting is taken, not read as
+permission to go on without it. Each run gives its lock back when it ends, the
+session hook included. A lock left behind by a run that was killed is removed
+once its process is gone. A lock whose owner is still running is kept however
+old it is, and a lock that records no owner at all is removed after two
+minutes. A symlink or a file at the lock path is not a lock this script made:
+`link` and `unlink` report it and exit 1 without reading or removing anything
+below it, and the hook steps aside in silence.
 
 The manifest `~/.agents/skills/.skill-links` is the only record of what the
 script may remove later, so every command that reads it refuses a manifest path
@@ -181,9 +183,13 @@ listed source holds no skill.
 A source directory the script cannot read says nothing about what belongs in
 the assembly, and neither does a skill directory inside a readable source that
 the script cannot read. Both keep their recorded links and their manifest
-entries, both are reported by path, and `link` and `check` exit 1. A skill
-directory that reads fine and no longer holds a `SKILL.md` is a skill that was
-removed, so its link is pruned.
+entries, both are reported by path, and `link` and `check` exit 1. When a name
+whose skill directory could not be read is also provided by another source, the
+two copies are a duplicate this run cannot resolve: the recorded link and its
+manifest entry stay as they are, the name is not repointed at the readable
+copy, and `link` reports both sources and exits 1. A skill directory that reads
+fine and no longer holds a `SKILL.md` is a skill that was removed, so its link
+is pruned.
 
 Skill names must be unique across every source. `link-skills.sh` refuses
 to link a name that collides between sources, keeps whichever link already

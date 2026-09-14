@@ -81,6 +81,7 @@ SRC_OK=()
 SRC_FOUND=()
 DUP_NAME=()
 UNREAD_NAME=()
+UNREAD_SRC=()
 RAW_NAME=()
 RAW_TARGET=()
 CAND_NAME=()
@@ -639,6 +640,21 @@ unreadable_has() {
 	return 1
 }
 
+# The source directory that holds the unreadable copy of a name, for the
+# message that names both sides of an unresolved duplicate.
+unread_source_of() {
+	local i
+	i=0
+	while [ "$i" -lt "$UNREAD_COUNT" ]; do
+		if names_equal "${UNREAD_NAME[$i]}" "$1"; then
+			printf '%s\n' "${UNREAD_SRC[$i]}"
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 1
+}
+
 # Fill CAND_NAME/CAND_TARGET with every immediate child directory of every
 # source that holds a SKILL.md. A name claimed by two sources is an error and
 # neither copy is linked.
@@ -683,6 +699,7 @@ collect_candidates() {
 			if [ ! -f "$entry/SKILL.md" ] && skill_dir_unsearchable "$entry"; then
 				err "skill directory cannot be read: $entry; its recorded link is kept"
 				UNREAD_NAME[UNREAD_COUNT]="$name"
+				UNREAD_SRC[UNREAD_COUNT]="$src"
 				UNREAD_COUNT=$((UNREAD_COUNT + 1))
 				# It counts as something found, so the source is not
 				# also reported as one that holds no skill: what it
@@ -736,6 +753,17 @@ collect_candidates() {
 				DUP_NAME[DUP_COUNT]="$name"
 				DUP_COUNT=$((DUP_COUNT + 1))
 			fi
+		elif unreadable_has "$name"; then
+			# One source provides this name and another holds a copy of it
+			# that could not be read this run. The unreadable directory may
+			# well hold that skill too, so which copy the name means is not
+			# settled: it is a duplicate this run cannot resolve, not a single
+			# candidate. Linking the readable copy would repoint a recorded
+			# link at a different skill on nothing but a permission problem,
+			# so the name keeps the link and the manifest entry it has.
+			err "duplicate: $name is unreadable in $(unread_source_of "$name") and also provided by $(dirname "${RAW_TARGET[$i]}"); kept the existing link"
+			DUP_NAME[DUP_COUNT]="$name"
+			DUP_COUNT=$((DUP_COUNT + 1))
 		else
 			CAND_NAME[CAND_COUNT]="$name"
 			CAND_TARGET[CAND_COUNT]="${RAW_TARGET[$i]}"
@@ -1154,14 +1182,17 @@ clear_stale_lock() {
 }
 
 # Take the lock. 'wait' retries for LOCK_WAIT_SECONDS and then fails; 'try'
-# fails at once. A mkdir that fails while the lock path holds nothing is not
-# contention but an assembly this run cannot write, which the work itself
-# reports in its own words, so the run goes on unlocked.
+# fails at once. The lock counts as held only when this run made the directory
+# itself: a lock that is gone by the time the failed mkdir is examined is
+# another run releasing it, and mkdir is tried again for it. A mkdir that keeps
+# failing while the lock path holds nothing is not contention but an assembly
+# this run cannot write, which the work itself reports in its own words, so the
+# run goes on unlocked.
 #
-# Status: 0 the lock is held, 1 another run holds it, 2 the lock path is not
-# usable and LOCK_PROBLEM says why.
+# Status: 0 the lock is held, or the assembly cannot be written at all; 1
+# another run holds it; 2 the lock path is not usable and LOCK_PROBLEM says why.
 take_lock() {
-	local mode waited limit
+	local mode waited limit vanished
 	mode=$1
 	if [ "$LOCK_HELD" -eq 1 ]; then
 		return 0
@@ -1170,6 +1201,7 @@ take_lock() {
 		return 0
 	fi
 	waited=0
+	vanished=0
 	limit=$((LOCK_WAIT_SECONDS * 5))
 	while [ "$waited" -le "$limit" ]; do
 		waited=$((waited + 1))
@@ -1179,6 +1211,12 @@ take_lock() {
 		if mkdir "$LOCK_DIR" 2>/dev/null; then
 			LOCK_HELD=1
 			printf '%s\n' "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
+			# Test hook, never set outside the harness: hold the lock this
+			# long before the work starts, so that a test can read the pid
+			# file while the run that took it is still running.
+			if [ -n "${LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS-}" ]; then
+				sleep "$LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS" 2>/dev/null || true
+			fi
 			return 0
 		fi
 		# mkdir lost to something. A symlink or a file that appeared between
@@ -1187,7 +1225,16 @@ take_lock() {
 			return 2
 		fi
 		if [ ! -d "$LOCK_DIR" ]; then
-			return 0
+			# Nothing is at the lock path, so nothing refused the mkdir: the
+			# run that held the lock gave it back between the two. The lock is
+			# there to be taken, so mkdir is tried again rather than the run
+			# going on with no lock at all. A mkdir that keeps failing over an
+			# empty lock path is an assembly this run cannot write.
+			vanished=$((vanished + 1))
+			if [ "$vanished" -gt 5 ]; then
+				return 0
+			fi
+			continue
 		fi
 		clear_stale_lock
 		if [ ! -d "$LOCK_DIR" ]; then
