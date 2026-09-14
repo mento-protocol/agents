@@ -71,8 +71,9 @@ function stripInlineComment(value) {
  * two "---" delimiters. Values may be single- or double-quoted; quotes are
  * stripped. An unquoted value loses its inline comment, so
  * `description: # TODO` reads as empty. A block scalar (`description: >-`
- * followed by indented lines) is folded into one line, so its length is
- * measured, not the two marker characters. Returns a Map of key -> value.
+ * followed by indented lines, with or without a trailing comment on the
+ * header) is folded into one line, so its length is measured, not the two
+ * marker characters. Returns a Map of key -> value.
  */
 function parseFrontmatter(lines) {
   const fields = new Map();
@@ -82,7 +83,13 @@ function parseFrontmatter(lines) {
     if (!match) continue;
     const key = match[1];
     let value = match[2].trim();
-    if (BLOCK_SCALAR_RE.test(value)) {
+    // A block scalar header may carry a trailing comment, as in
+    // `description: >- # note`. The comment is removed before the header is
+    // recognised, so such a line folds its indented body like any other block
+    // scalar instead of reading as a plain two-character value.
+    const header = value.replace(/\s+#.*$/, "").trim();
+    if (BLOCK_SCALAR_RE.test(header)) {
+      value = header;
       const parts = [];
       let j = i + 1;
       for (; j < lines.length; j += 1) {

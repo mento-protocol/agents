@@ -130,6 +130,12 @@ assert_file_lacks() {
 	fi
 }
 
+assert_same_bytes() {
+	if ! cmp -s "$1" "$2"; then
+		fail "$3: $1 is not byte for byte what $2 holds"
+	fi
+}
+
 count_in_file() {
 	local n
 	n=$(grep -c -F -- "$2" "$1" 2>/dev/null || true)
@@ -292,6 +298,32 @@ make_fixed_date() {
 		'esac' \
 		"exec \"$real\" \"\$@\"" >"$dir/date"
 	chmod +x "$dir/date"
+}
+
+# A mktemp shim that hands back a real temporary file and then takes every
+# permission off it, so the write that follows fails while the file exists.
+# Only the manifest temporary file is touched, and only while the marker
+# variable is set. The single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+make_breaking_mktemp() {
+	local dir real
+	dir=$1
+	real=$(command -v mktemp)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'case "${1:-}" in' \
+		"-d) exec \"$real\" \"\$@\" ;;" \
+		'esac' \
+		"f=\$(\"$real\" \"\$@\") || exit \$?" \
+		'printf "%s\n" "$f"' \
+		'if [ -n "${LS_TEST_UNWRITABLE_TMP:-}" ]; then' \
+		'	case "$f" in' \
+		'	*.skill-links.tmp.*) chmod 000 "$f" ;;' \
+		'	esac' \
+		'fi' \
+		'exit 0' >"$dir/mktemp"
+	chmod +x "$dir/mktemp"
 }
 
 SAVED_PATH=""
@@ -2030,6 +2062,194 @@ mktemp_failure_arms_no_cleanup() {
 	fi
 }
 
+# A '..' segment must be normalized by text, before the filesystem is asked
+# anything. Without that, '--assembly DIR/new/..' passes the root check, has
+# 'new' created under it by mkdir -p, and puts every link in DIR itself, and a
+# spelling such as '/tmp/new/../..' reaches the filesystem root.
+absent_parent_root_alias_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+
+	ls_run --assembly "$CASE_DIR/asm/new/.." link
+	assert_rc 0 "--assembly through a parent that does not exist"
+	assert_absent "$CASE_DIR/asm/new" "the popped directory is never created"
+	assert_link "$CASE_DIR/asm/alpha" "$CASE_DIR/one/alpha" "the link lands in the normalized assembly"
+	assert_exists "$CASE_DIR/asm/.skill-links" "the manifest lands in the normalized assembly"
+	assert_absent "$CASE_DIR/alpha" "nothing is linked beside the assembly"
+	assert_absent "$CASE_DIR/.skill-links" "no manifest beside the assembly"
+
+	ls_run --assembly "/tmp/new/../.." link
+	assert_rc 2 "--assembly /tmp/new/../.."
+	assert_out_has "must not be / or empty" "assembly refusal message"
+
+	ls_run --assembly "$CASE_DIR/a/b/../../../../../../../../../../../../../.." link
+	assert_rc 2 "--assembly that climbs past the root"
+	assert_out_has "must not be / or empty" "assembly refusal message"
+	assert_absent "$CASE_DIR/a" "nothing was created for the refused path"
+
+	ls_run --sources "/tmp/a/../.." link
+	assert_rc 2 "--sources /tmp/a/../.."
+	assert_out_has "must not be / or empty" "sources refusal message"
+
+	assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
+	assert_absent "/.skill-links" "no manifest at the filesystem root"
+	assert_absent "/alpha" "no link at the filesystem root"
+}
+
+# A recorded link whose target directory is still there but no longer holds a
+# SKILL.md is drift: the assembly offers a skill the sources do not produce.
+# check must exit 1 for it, and say that the next link run prunes it.
+check_reports_orphan_link_as_error() {
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	# The directory survives, so the link is neither dangling nor stale.
+	rm -f "$CASE_DIR/one/beta/SKILL.md"
+	ls_run check
+	assert_rc 1 "check with an orphan link"
+	assert_out_has "link orphan: beta" "the orphan is named"
+	assert_out_has "will prune it" "the prune note is kept"
+	assert_exists "$HOME/.agents/skills/beta" "check removes nothing"
+	ls_run link
+	assert_rc 0 "link"
+	assert_absent "$HOME/.agents/skills/beta" "link prunes the orphan"
+}
+
+# A block scalar header may carry a trailing comment. The comment must not stop
+# the header from being recognised, or the two marker characters read as the
+# whole description and an empty body passes.
+validator_block_header_with_comment() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/empty/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >- # note\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/empty/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/empty" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a commented block header with no body must fail: $out"
+	fi
+	case "$out" in
+	*description*) ;;
+	*) fail "the failure must name the description: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/filled/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >- # note\n'
+		printf '  a real folded description that spans\n'
+		printf '  two lines of the block scalar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/filled/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/filled" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a commented block header with a real body must validate: $out"
+	fi
+}
+
+# The manifest is the only record of what this script may remove later, so a
+# temporary file that cannot be written must never be renamed over it.
+manifest_write_failure_keeps_old_manifest() {
+	local shims before
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "manifest holds alpha"
+	before="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$before"
+
+	mkskill "$CASE_DIR/one" beta
+	shims="$CASE_DIR/shims"
+	make_breaking_mktemp "$shims"
+	use_shims "$shims"
+	LS_TEST_UNWRITABLE_TMP=1
+	export LS_TEST_UNWRITABLE_TMP
+	ls_run link
+	unset LS_TEST_UNWRITABLE_TMP
+	drop_shims
+	assert_rc 1 "link with an unwritable temporary file"
+	assert_out_has "could not write the manifest" "the failure is reported"
+	assert_out_lacks "errors 0" "the summary counts the failure"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
+}
+
+# unlink removes only the fetch-<digits> stamps it writes. Any other name in
+# the stamp directory belongs to someone else, and keeps the directory too.
+unlink_leaves_foreign_file_in_stamp_dir() {
+	local left
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	ls_run check
+	assert_rc 0 "check"
+	assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
+	printf 'notes\n' >"$HOME/.agents/skills/.skill-links.d/notes.txt"
+	printf 'not a stamp\n' >"$HOME/.agents/skills/.skill-links.d/fetch-abc"
+	ls_run unlink
+	assert_rc 0 "unlink"
+	assert_out_has "kept $HOME/.agents/skills/.skill-links.d" "the directory is kept"
+	assert_is_dir_not_link "$HOME/.agents/skills/.skill-links.d" "the stamp directory survives"
+	assert_file_has "$HOME/.agents/skills/.skill-links.d/notes.txt" "notes" "the foreign file survives"
+	assert_file_has "$HOME/.agents/skills/.skill-links.d/fetch-abc" "not a stamp" "a non-numeric fetch name survives"
+	left=$(find "$HOME/.agents/skills/.skill-links.d" -maxdepth 1 -type f -name 'fetch-*' 2>/dev/null | wc -l | tr -d ' ')
+	if [ "$left" != "1" ]; then
+		fail "expected only fetch-abc to remain, found $left fetch entries"
+	fi
+}
+
+# A prune that the filesystem refuses must keep the link's manifest entry, so
+# that a later run can still remove it, and must count as an error.
+prune_failure_keeps_manifest_entry() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/two/beta" "beta link"
+	# Only the first source is listed now, so beta is due to be pruned.
+	write_sources
+	add_source "$CASE_DIR/one"
+	chmod 500 "$HOME/.agents/skills"
+	ls_run link
+	chmod 700 "$HOME/.agents/skills"
+	assert_rc 1 "link with a removal the filesystem refuses"
+	assert_out_has "kept its manifest entry" "the failure is reported"
+	assert_out_lacks "pruned beta" "nothing claims the link was pruned"
+	assert_out_lacks "errors 0" "the summary counts the failure"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/two/beta" "beta is still linked"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "beta" "the manifest still records beta"
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -2108,6 +2328,11 @@ main() {
 	run_case unset_home_hook_exits_zero
 	run_case root_assembly_refused
 	run_case root_alias_assembly_refused
+	run_case absent_parent_root_alias_refused
+	run_case check_reports_orphan_link_as_error
+	run_case manifest_write_failure_keeps_old_manifest
+	run_case unlink_leaves_foreign_file_in_stamp_dir
+	run_case prune_failure_keeps_manifest_entry
 	run_case directory_at_manifest_path_refused
 	run_case link_refuses_while_locked
 	run_case stale_lock_is_removed
@@ -2133,6 +2358,7 @@ main() {
 	run_case validator_ignores_finder_metadata
 	run_case validator_block_indicator_either_order
 	run_case validator_strips_inline_comment
+	run_case validator_block_header_with_comment
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"

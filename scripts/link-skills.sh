@@ -220,35 +220,72 @@ phys_dir() {
 	(cd "$1" && pwd -P)
 }
 
-# The physical path a name really points at, without requiring it to exist. A
-# directory is canonicalized directly; any other name has its parent
-# canonicalized and its last component appended. Symlinks, '..' segments and
-# repeated slashes are all resolved, so an alias for the filesystem root such as
-# /tmp/.. , /. or a symlink to / comes back as /.
+# Normalize an absolute path by text alone: drop empty and '.' segments, and
+# pop the previous segment for every '..'. A '..' at the top stays at the root,
+# so no spelling can climb above /. Nothing here touches the filesystem, so a
+# path whose middle directories do not exist is normalized just as well as one
+# that does.
+normalize_lexical() {
+	local p seg out had_noglob oldifs
+	p=$1
+	out=""
+	had_noglob=0
+	case "$-" in
+	*f*) had_noglob=1 ;;
+	esac
+	# A segment may hold a glob character, so globbing is off while the path is
+	# split on '/'. The split itself is the point, so word splitting is wanted.
+	set -f
+	oldifs=$IFS
+	IFS='/'
+	# shellcheck disable=SC2086
+	set -- $p
+	IFS=$oldifs
+	if [ "$had_noglob" -eq 0 ]; then
+		set +f
+	fi
+	for seg in "$@"; do
+		case "$seg" in
+		"" | ".") continue ;;
+		"..") out=${out%/*} ;;
+		*) out="$out/$seg" ;;
+		esac
+	done
+	printf '%s\n' "${out:-/}"
+}
+
+# The physical path a name really points at, without requiring it to exist.
+# The path is normalized lexically first, so a '..' segment is removed even
+# when the directory before it does not exist: without that, '--assembly
+# $HOME/new/..' would pass the root check and then have 'new' created under it
+# while the links landed in $HOME. The longest prefix that does exist is then
+# canonicalized with cd and pwd -P, and the segments that do not exist yet are
+# appended to it. Symlinks, '..' segments and repeated slashes are all
+# resolved, so an alias for the filesystem root such as /tmp/.. , /. , a
+# symlink to / or /tmp/new/../.. comes back as /.
 canonical_path() {
-	local p dir base phys
+	local p prefix rest phys
 	p=$1
 	if [ -z "$p" ]; then
 		printf '\n'
 		return 0
 	fi
-	if [ -d "$p" ]; then
-		if phys=$(cd "$p" 2>/dev/null && pwd -P); then
-			printf '%s\n' "$phys"
-			return 0
-		fi
-		printf '%s\n' "$p"
-		return 0
+	case "$p" in
+	/*) ;;
+	*) p="$PWD/$p" ;;
+	esac
+	prefix=$(normalize_lexical "$p")
+	rest=""
+	while [ "$prefix" != "/" ] && [ ! -d "$prefix" ]; do
+		rest="/$(basename "$prefix")$rest"
+		prefix=$(dirname "$prefix")
+	done
+	if phys=$(cd "$prefix" 2>/dev/null && pwd -P); then
+		prefix=$phys
 	fi
-	dir=$(dirname "$p")
-	base=$(basename "$p")
-	if ! phys=$(cd "$dir" 2>/dev/null && pwd -P); then
-		printf '%s\n' "$p"
-		return 0
-	fi
-	case "$phys" in
-	/) printf '/%s\n' "$base" ;;
-	*) printf '%s/%s\n' "$phys" "$base" ;;
+	case "$prefix" in
+	/) printf '/%s\n' "${rest#/}" ;;
+	*) printf '%s%s\n' "$prefix" "$rest" ;;
 	esac
 	return 0
 }
@@ -732,8 +769,13 @@ manifest_path_usable() {
 
 # The temporary file is allocated by mktemp, never at a name another process
 # could have created first, and only that file is removed on failure.
+#
+# Every line is built first and written by one printf, whose status is checked.
+# A write that fails halfway must never be renamed over the manifest: the old
+# manifest is the only record of what this script may remove later, so a
+# truncated one would strand links it could no longer prune.
 write_manifest() {
-	local tmp i
+	local tmp i body
 	if ! manifest_path_usable; then
 		return 1
 	fi
@@ -741,11 +783,17 @@ write_manifest() {
 		err "could not write the manifest $MANIFEST"
 		return 1
 	fi
+	body=""
 	i=0
 	while [ "$i" -lt "$OUT_COUNT" ]; do
-		printf '%s\t%s\n' "${OUT_NAME[$i]}" "${OUT_TARGET[$i]}" >>"$tmp"
+		body="${body}${OUT_NAME[$i]}"$'\t'"${OUT_TARGET[$i]}"$'\n'
 		i=$((i + 1))
 	done
+	if ! printf '%s' "$body" >"$tmp" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null || true
+		err "could not write the manifest $MANIFEST; kept the one that was there"
+		return 1
+	fi
 	if ! mv -f "$tmp" "$MANIFEST"; then
 		rm -f "$tmp"
 		err "could not replace the manifest $MANIFEST"
@@ -950,18 +998,28 @@ prune_manifest() {
 		# different target and stays.
 		if [ ! -e "$entry" ]; then
 			if [ "$cur" = "$target" ]; then
-				rm -f "$entry"
-				info "$PROG: pruned dangling $name"
-				PRUNED=$((PRUNED + 1))
+				# A link this run could not remove is still this script's to
+				# remove later, so its manifest entry stays and the run fails.
+				if remove_link "$entry"; then
+					info "$PROG: pruned dangling $name"
+					PRUNED=$((PRUNED + 1))
+				else
+					err "could not remove the dangling link $entry; kept its manifest entry"
+					record_output "$name" "$target"
+				fi
 			else
 				info "$PROG: $name is a foreign dangling link to $cur; left alone"
 			fi
 			continue
 		fi
 		if same_path "$cur" "$target"; then
-			rm -f "$entry"
-			info "$PROG: pruned $name"
-			PRUNED=$((PRUNED + 1))
+			if remove_link "$entry"; then
+				info "$PROG: pruned $name"
+				PRUNED=$((PRUNED + 1))
+			else
+				err "could not remove $entry; kept its manifest entry"
+				record_output "$name" "$target"
+			fi
 		fi
 	done
 	if [ "$kept" -gt 0 ]; then
@@ -1428,8 +1486,11 @@ cmd_check() {
 		fi
 		if [ -L "$entry" ]; then
 			cur=$(link_target_abs "$entry")
+			# The source still holds the target directory, but it no longer
+			# holds a SKILL.md, so the assembly offers a skill the sources do
+			# not produce. That is drift like a stale link, not a note.
 			if same_path "$cur" "$target"; then
-				info "  link orphan: $name; '$PROG link' will prune it"
+				err "link orphan: $name; '$PROG link' will prune it"
 			fi
 		fi
 	done
@@ -1894,14 +1955,25 @@ remove_link() {
 	return 0
 }
 
-# Only regular files inside the stamp directory, then the directory itself. No
-# wildcard ever runs in the assembly root, where the user's own files are.
+# Only the fetch stamps this script writes, then the directory itself. A stamp
+# is named 'fetch-<digits>' by stamp_file, so any other name in the directory
+# belongs to someone else and is left alone, and the directory stays whenever
+# anything is left in it. No wildcard ever runs in the assembly root, where the
+# user's own files are.
 remove_stamp_dir() {
-	local stamp
+	local stamp base
 	if [ ! -d "$STAMP_DIR" ] || [ -L "$STAMP_DIR" ]; then
 		return 0
 	fi
 	for stamp in "$STAMP_DIR"/*; do
+		base=$(basename "$stamp")
+		case "$base" in
+		fetch-*) ;;
+		*) continue ;;
+		esac
+		case "${base#fetch-}" in
+		"" | *[!0-9]*) continue ;;
+		esac
 		if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then
 			if ! rm -f "$stamp" 2>/dev/null || [ -e "$stamp" ]; then
 				err "could not remove the fetch stamp $stamp"

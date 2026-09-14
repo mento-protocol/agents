@@ -80,7 +80,9 @@ links) and, for each git source, how many commits it is behind its
 `origin`. It creates and removes no links. Entries the script did not create
 are not reported by `check`; they are left alone. A link that points at a
 skill directory other than the one the sources now produce is stale drift, and
-counts as a problem: run `link` to repoint it.
+counts as a problem: run `link` to repoint it. A recorded link whose target
+directory still exists but no longer holds a `SKILL.md` is an orphan, and
+counts as a problem too: the next `link` run prunes it.
 
 `check` does reach the network: it runs `git fetch` for every git source every
 time you run it, and records each fetch in a
@@ -119,8 +121,8 @@ that no longer exists is dead, so it is repointed at this script instead of
 being kept, and the run reports that it replaced a stale hook. A file it
 creates itself gets mode `0600` and no backup. A backup name already in use
 gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
-home directory does not exist
-yet is skipped and named in the output. The JSON merge needs `python3`;
+home directory does not exist yet is skipped and named in the output. The JSON
+merge needs `python3`;
 without it the command prints the group to add by hand and exits 1.
 
 ### Composing with a personal skills directory
