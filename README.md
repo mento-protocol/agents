@@ -69,6 +69,12 @@ skips its own update silently instead of waiting. A lock left behind by a run
 that was killed is removed once its process is gone, and in any case after two
 minutes.
 
+The manifest `~/.agents/skills/.skill-links` is the only record of what the
+script may remove later, so every command that reads it refuses a manifest path
+that is a symlink or is not a regular file, and changes nothing. A run is one
+transaction: if the manifest cannot be written, the links that run created are
+removed again, links it found already recorded stay, and the run exits 1.
+
 ### Status
 
 ```bash
@@ -122,8 +128,8 @@ being kept, and the run reports that it replaced a stale hook. A file it
 creates itself gets mode `0600` and no backup. A backup name already in use
 gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
 home directory does not exist yet is skipped and named in the output. The JSON
-merge needs `python3`;
-without it the command prints the group to add by hand and exits 1.
+merge needs `python3`; without it the command prints the group to add by hand
+and exits 1.
 
 ### Composing with a personal skills directory
 

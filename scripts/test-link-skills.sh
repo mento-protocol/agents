@@ -2193,6 +2193,126 @@ manifest_write_failure_keeps_old_manifest() {
 	assert_out_has "could not write the manifest" "the failure is reported"
 	assert_out_lacks "errors 0" "the summary counts the failure"
 	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
+	# The run is one transaction: a link no manifest records is a link no later
+	# run could prune, so beta goes away again while alpha stays.
+	assert_out_has "link(s) this run created were removed" "the rollback is reported"
+	assert_absent "$HOME/.agents/skills/beta" "the link this run created is rolled back"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link recorded before this run survives"
+}
+
+# A manifest that is a symlink is someone else's list of links. Following it
+# would let a foreign file name the entries unlink removes, so every command
+# that reads the manifest refuses the path instead.
+unlink_refuses_symlinked_manifest() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	ln -s "$CASE_DIR/one/alpha" "$HOME/.agents/skills/foreign"
+	printf 'foreign\t%s\n' "$CASE_DIR/one/alpha" >"$CASE_DIR/planted"
+	ln -s "$CASE_DIR/planted" "$HOME/.agents/skills/.skill-links"
+
+	ls_run unlink
+	assert_rc 1 "unlink with a symlinked manifest"
+	assert_out_has "is a symlink, not a regular file" "refusal message"
+	assert_out_lacks "removed foreign" "nothing claims the foreign link was removed"
+	assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link survives"
+	assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is left alone"
+	assert_file_has "$CASE_DIR/planted" "foreign" "the file the symlink names is left alone"
+
+	ls_run link
+	assert_rc 1 "link with a symlinked manifest"
+	assert_out_has "is a symlink, not a regular file" "link refusal message"
+
+	ls_run check
+	assert_rc 1 "check with a symlinked manifest"
+	assert_out_has "is a symlink, not a regular file" "check refusal message"
+
+	# The hook never fails a session, and it changes nothing either.
+	ls_run hook
+	assert_rc 0 "hook with a symlinked manifest"
+	assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link still survives"
+	assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is still there"
+	assert_file_has "$CASE_DIR/planted" "foreign" "the planted file is still there"
+}
+
+# A '..' after a symlinked directory belongs to the directory that link really
+# points at. Collapsing the text first would answer the directory that holds
+# the symlink, and every link would land there.
+symlink_then_parent_resolves_physically() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$CASE_DIR/path" "$CASE_DIR/other/child"
+	ln -s "$CASE_DIR/other/child" "$CASE_DIR/path/alias"
+
+	ls_run --assembly "$CASE_DIR/path/alias/.." link
+	assert_rc 0 "--assembly through a symlink and a parent segment"
+	assert_link "$CASE_DIR/other/alpha" "$CASE_DIR/one/alpha" "the link lands beside the symlink target"
+	assert_exists "$CASE_DIR/other/.skill-links" "the manifest lands beside the symlink target"
+	assert_absent "$CASE_DIR/path/alpha" "nothing is linked where the symlink sits"
+	assert_absent "$CASE_DIR/path/.skill-links" "no manifest where the symlink sits"
+	assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
+}
+
+# An unquoted description that YAML reads as a list, a mapping or null is not a
+# description. The same characters inside quotes are text and must pass.
+validator_rejects_non_string_description() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for form in '[]' '{}' 'null' '~' 'Null' 'NULL' '[a, b]' '{a: b}' '&anchor' '*alias'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/bad-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/bad-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/bad-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"must be a plain string"*) ;;
+		*) fail "description '$form' must be reported as a non-string: $out" ;;
+		esac
+	done
+
+	mkdir -p "$CASE_DIR/plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a normal sentence that describes the skill\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a normal sentence must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/quoted-list/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "[not a list]"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/quoted-list/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/quoted-list" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted value that looks like a list must validate: $out"
+	fi
 }
 
 # unlink removes only the fetch-<digits> stamps it writes. Any other name in
@@ -2330,7 +2450,9 @@ main() {
 	run_case root_alias_assembly_refused
 	run_case absent_parent_root_alias_refused
 	run_case check_reports_orphan_link_as_error
+	run_case symlink_then_parent_resolves_physically
 	run_case manifest_write_failure_keeps_old_manifest
+	run_case unlink_refuses_symlinked_manifest
 	run_case unlink_leaves_foreign_file_in_stamp_dir
 	run_case prune_failure_keeps_manifest_entry
 	run_case directory_at_manifest_path_refused
@@ -2359,6 +2481,7 @@ main() {
 	run_case validator_block_indicator_either_order
 	run_case validator_strips_inline_comment
 	run_case validator_block_header_with_comment
+	run_case validator_rejects_non_string_description
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"

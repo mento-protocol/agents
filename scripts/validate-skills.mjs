@@ -9,6 +9,10 @@
 //   - description is present and non-empty after trimming, 1-1024 chars.
 //     A block scalar is folded into one line first, and an unquoted value
 //     loses its inline comment, so "description: # TODO" reads as empty
+//   - description is a plain string. An unquoted "[]", "{}", "null", "~",
+//     "Null" or "NULL", a value that opens a flow sequence or mapping, and a
+//     bare anchor or alias are all refused: YAML reads them as a list, a
+//     mapping or null, not as text. Quoting them makes them text again
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -47,6 +51,27 @@ const problems = [];
  */
 const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[0-9]*|[0-9]*[+-]?)$/;
 
+/**
+ * Raw unquoted values that YAML reads as something other than a string: the
+ * empty flow sequence and mapping, and the null spellings. A description that
+ * is any of these reaches a runtime as null or as a list, not as text.
+ */
+const NON_STRING_VALUES = new Set(["[]", "{}", "null", "~", "Null", "NULL"]);
+
+/**
+ * True when the raw text of an unquoted scalar is a YAML non-string form: one
+ * of the values above, the start of a flow sequence or mapping, or a bare
+ * anchor or alias such as "&x" or "*x". A quoted value is always a string, so
+ * the caller checks the quotes first.
+ */
+function isNonStringScalar(raw) {
+  if (raw === "") return false;
+  if (NON_STRING_VALUES.has(raw)) return true;
+  if (raw.startsWith("[") || raw.startsWith("{")) return true;
+  if (/^[&*]\S/.test(raw)) return true;
+  return false;
+}
+
 /** True when the value is wrapped in single or double quotes. */
 function isQuoted(value) {
   return (
@@ -73,7 +98,11 @@ function stripInlineComment(value) {
  * `description: # TODO` reads as empty. A block scalar (`description: >-`
  * followed by indented lines, with or without a trailing comment on the
  * header) is folded into one line, so its length is measured, not the two
- * marker characters. Returns a Map of key -> value.
+ * marker characters.
+ *
+ * Returns a Map of key -> { value, raw, quoted, block }. The raw text and the
+ * two flags are kept because the caller must tell an unquoted YAML non-string
+ * form apart from the same characters inside quotes.
  */
 function parseFrontmatter(lines) {
   const fields = new Map();
@@ -83,12 +112,16 @@ function parseFrontmatter(lines) {
     if (!match) continue;
     const key = match[1];
     let value = match[2].trim();
+    const raw = value;
+    let quoted = false;
+    let block = false;
     // A block scalar header may carry a trailing comment, as in
     // `description: >- # note`. The comment is removed before the header is
     // recognised, so such a line folds its indented body like any other block
     // scalar instead of reading as a plain two-character value.
     const header = value.replace(/\s+#.*$/, "").trim();
     if (BLOCK_SCALAR_RE.test(header)) {
+      block = true;
       value = header;
       const parts = [];
       let j = i + 1;
@@ -104,14 +137,18 @@ function parseFrontmatter(lines) {
       i = j - 1;
       value = parts.join(" ").replace(/\s+/g, " ").trim();
     } else if (isQuoted(value)) {
+      quoted = true;
       value = value.slice(1, -1);
     } else {
       value = stripInlineComment(value);
       // A quoted value followed by a comment only looks quoted once the
       // comment is gone.
-      if (isQuoted(value)) value = value.slice(1, -1);
+      if (isQuoted(value)) {
+        quoted = true;
+        value = value.slice(1, -1);
+      }
     }
-    fields.set(key, value);
+    fields.set(key, { value, raw, quoted, block });
   }
   return fields;
 }
@@ -186,7 +223,8 @@ function validateSkill(name) {
 
   const fields = parseFrontmatter(lines.slice(1, closeIndex));
 
-  const nameValue = fields.get("name");
+  const nameField = fields.get("name");
+  const nameValue = nameField === undefined ? undefined : nameField.value;
   if (nameValue === undefined || nameValue === "") {
     problems.push(`skills/${name}: frontmatter "name" is required`);
   } else {
@@ -205,11 +243,19 @@ function validateSkill(name) {
     }
   }
 
-  const descriptionValue = fields.get("description");
-  if (descriptionValue === undefined) {
+  const descriptionField = fields.get("description");
+  if (descriptionField === undefined) {
     problems.push(`skills/${name}: frontmatter "description" is required`);
+  } else if (
+    !descriptionField.quoted &&
+    !descriptionField.block &&
+    isNonStringScalar(descriptionField.raw)
+  ) {
+    // The characters are the same in "[not a list]", but there the quotes make
+    // them text. Unquoted, YAML hands the runtime a list, a mapping or null.
+    problems.push(`skills/${name}: "description" must be a plain string`);
   } else {
-    const trimmed = descriptionValue.trim();
+    const trimmed = descriptionField.value.trim();
     if (trimmed.length < 1 || trimmed.length > 1024) {
       problems.push(
         `skills/${name}: "description" must be 1-1024 chars after trimming`,

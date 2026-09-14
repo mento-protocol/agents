@@ -57,6 +57,7 @@ RAW_COUNT=0
 MAN_COUNT=0
 OUT_COUNT=0
 DUP_COUNT=0
+NEW_COUNT=0
 
 # Parallel arrays. bash 3.2 has no associative arrays, so every table is a set
 # of indexed arrays plus a count, and every loop is an index loop.
@@ -74,6 +75,7 @@ MAN_NAME=()
 MAN_TARGET=()
 OUT_NAME=()
 OUT_TARGET=()
+NEW_NAME=()
 
 # ---------------------------------------------------------------- output ----
 
@@ -255,16 +257,22 @@ normalize_lexical() {
 }
 
 # The physical path a name really points at, without requiring it to exist.
-# The path is normalized lexically first, so a '..' segment is removed even
-# when the directory before it does not exist: without that, '--assembly
-# $HOME/new/..' would pass the root check and then have 'new' created under it
-# while the links landed in $HOME. The longest prefix that does exist is then
-# canonicalized with cd and pwd -P, and the segments that do not exist yet are
-# appended to it. Symlinks, '..' segments and repeated slashes are all
-# resolved, so an alias for the filesystem root such as /tmp/.. , /. , a
-# symlink to / or /tmp/new/../.. comes back as /.
+#
+# The path is walked one segment at a time from the root. While the accumulated
+# prefix still exists it is resolved physically with cd and pwd -P before the
+# next segment is applied, so a symlink is followed first and a '..' after a
+# symlinked directory lands where that directory really sits: with 'alias' a
+# link to /other/child, '/path/alias/..' is /other, not /path. Normalizing the
+# text first would collapse the '..' against 'alias' and answer /path.
+#
+# Once a segment does not exist, the remaining segments are applied by text
+# alone, exactly as normalize_lexical does: a '..' pops the segment before it,
+# and nothing is created to resolve a name. Without that, '--assembly
+# $HOME/new/..' would have 'new' created under $HOME while the links landed in
+# $HOME itself. A '..' at the root stays at the root, so no spelling can climb
+# above /.
 canonical_path() {
-	local p prefix rest phys
+	local p seg cur rest next phys had_noglob oldifs
 	p=$1
 	if [ -z "$p" ]; then
 		printf '\n'
@@ -274,18 +282,54 @@ canonical_path() {
 	/*) ;;
 	*) p="$PWD/$p" ;;
 	esac
-	prefix=$(normalize_lexical "$p")
+	cur="/"
 	rest=""
-	while [ "$prefix" != "/" ] && [ ! -d "$prefix" ]; do
-		rest="/$(basename "$prefix")$rest"
-		prefix=$(dirname "$prefix")
-	done
-	if phys=$(cd "$prefix" 2>/dev/null && pwd -P); then
-		prefix=$phys
+	had_noglob=0
+	case "$-" in
+	*f*) had_noglob=1 ;;
+	esac
+	# A segment may hold a glob character, so globbing is off while the path is
+	# split on '/'. The split itself is the point, so word splitting is wanted.
+	set -f
+	oldifs=$IFS
+	IFS='/'
+	# shellcheck disable=SC2086
+	set -- $p
+	IFS=$oldifs
+	if [ "$had_noglob" -eq 0 ]; then
+		set +f
 	fi
-	case "$prefix" in
-	/) printf '/%s\n' "${rest#/}" ;;
-	*) printf '%s%s\n' "$prefix" "$rest" ;;
+	for seg in "$@"; do
+		case "$seg" in
+		"" | ".") continue ;;
+		esac
+		# Past the last segment that exists: text alone from here on.
+		if [ -n "$rest" ]; then
+			if [ "$seg" = ".." ]; then
+				rest=${rest%/*}
+			else
+				rest="$rest/$seg"
+			fi
+			continue
+		fi
+		if [ "$seg" = ".." ]; then
+			cur=$(dirname "$cur")
+			continue
+		fi
+		next="${cur%/}/$seg"
+		if [ -d "$next" ] && phys=$(cd "$next" 2>/dev/null && pwd -P); then
+			cur=$phys
+			continue
+		fi
+		rest="/$seg"
+	done
+	if [ -z "$rest" ]; then
+		printf '%s\n' "$cur"
+		return 0
+	fi
+	case "$cur" in
+	/) printf '%s\n' "$rest" ;;
+	*) printf '%s%s\n' "$cur" "$rest" ;;
 	esac
 	return 0
 }
@@ -808,6 +852,42 @@ record_output() {
 	OUT_COUNT=$((OUT_COUNT + 1))
 }
 
+# A name this run created a link for where no entry stood before. A link that
+# was already there and was only re-pointed or re-recorded is not one of these:
+# it survived the run before this one and it survives a failure here too.
+record_new_link() {
+	NEW_NAME[NEW_COUNT]="$1"
+	NEW_COUNT=$((NEW_COUNT + 1))
+}
+
+# Undo this run's own links. The manifest is the only record of what this
+# script may remove later, so a link no manifest covers is a link no later run
+# could prune. When the manifest cannot be written, the links this run created
+# are removed instead of being left behind unrecorded.
+rollback_new_links() {
+	local i name entry removed
+	removed=0
+	i=0
+	while [ "$i" -lt "$NEW_COUNT" ]; do
+		name=${NEW_NAME[$i]}
+		i=$((i + 1))
+		entry="$ASSEMBLY_DIR/$name"
+		if [ ! -L "$entry" ]; then
+			continue
+		fi
+		if remove_link "$entry"; then
+			removed=$((removed + 1))
+		else
+			err "could not remove $entry, the link this run created for $name"
+		fi
+	done
+	NEW_COUNT=0
+	if [ "$removed" -gt 0 ]; then
+		err "the manifest was not written, so the $removed link(s) this run created were removed"
+	fi
+	return 0
+}
+
 output_has() {
 	local i
 	i=0
@@ -961,6 +1041,7 @@ link_candidates() {
 		info "$PROG: linked $name -> $target"
 		LINKED=$((LINKED + 1))
 		record_output "$name" "$target"
+		record_new_link "$name"
 	done
 }
 
@@ -1133,9 +1214,15 @@ run_link() {
 	report_empty_sources
 	report_sources_used
 	OUT_COUNT=0
+	NEW_COUNT=0
 	link_candidates
 	prune_manifest
-	write_manifest || true
+	# The run is one transaction: either the manifest records every link this
+	# run created, or those links go away again.
+	if ! write_manifest; then
+		rollback_new_links
+		return 1
+	fi
 	ensure_runtime_links
 	return 0
 }
@@ -1386,6 +1473,11 @@ cmd_check() {
 	if [ ! -f "$SOURCES_FILE" ]; then
 		die "no sources file at $SOURCES_FILE; run '$PROG link' inside a clone to create one"
 	fi
+	# A manifest that is not a plain file this script owns says nothing about
+	# the assembly, so nothing is reported from it.
+	if ! manifest_path_usable; then
+		return 1
+	fi
 	detect_case_insensitive
 	load_manifest
 	load_sources
@@ -1519,6 +1611,12 @@ cmd_hook() {
 	if ! take_lock try; then
 		return 0
 	fi
+	# The hook links and prunes below, so it needs the same record every other
+	# command needs. A symlink or a directory at that path is refused here, and
+	# main turns the failure into a session that still starts.
+	if ! manifest_path_usable; then
+		return 1
+	fi
 	SECONDS=0
 	detect_case_insensitive
 	load_manifest
@@ -1582,9 +1680,12 @@ cmd_hook() {
 		collect_candidates
 		mkdir -p "$ASSEMBLY_DIR" 2>/dev/null || true
 		OUT_COUNT=0
+		NEW_COUNT=0
 		link_candidates
 		prune_manifest
-		write_manifest || true
+		if ! write_manifest; then
+			rollback_new_links
+		fi
 		ensure_runtime_links
 		if [ "$LINKED" -gt 0 ] || [ "$PRUNED" -gt 0 ]; then
 			hook_say "assembly updated: linked $LINKED, pruned $PRUNED"
@@ -1885,6 +1986,12 @@ cmd_unlink() {
 		err "another $PROG run holds the lock $LOCK_DIR; nothing was removed. Wait for it to finish, then run '$PROG unlink' again"
 		return 1
 	fi
+	# The manifest is the only list of links this script may remove. A symlink
+	# at that path would hand the run someone else's list, so it is refused
+	# before a single name is read from it.
+	if ! manifest_path_usable; then
+		return 1
+	fi
 	detect_case_insensitive
 	load_manifest
 	kept=0
@@ -2084,9 +2191,16 @@ main() {
 	else
 		SOURCES_FILE="$HOME/.agents/skill-sources"
 	fi
-	# A path is canonicalized before it is judged: '/tmp/..', '/.' and a symlink
-	# to / all name the filesystem root, and only the physical path shows it.
-	SOURCES_FILE=$(canonical_path "$(abs_path "$(expand_home "$SOURCES_FILE")")")
+	# A path is judged two ways, and the root is refused under either reading.
+	# By text, so that a spelling whose '..' segments climb to the root, such as
+	# '/tmp/..' or '/a/../..', is refused whatever those names resolve to. By
+	# the filesystem, so that '/.' and a symlink to / are refused too: only the
+	# physical path shows what they really name.
+	SOURCES_FILE=$(abs_path "$(expand_home "$SOURCES_FILE")")
+	case "$(normalize_lexical "$SOURCES_FILE")" in
+	"" | "/") die "the sources file must not be / or empty" ;;
+	esac
+	SOURCES_FILE=$(canonical_path "$SOURCES_FILE")
 	case "$SOURCES_FILE" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
@@ -2102,7 +2216,11 @@ main() {
 	else
 		ASSEMBLY_DIR="$HOME/.agents/skills"
 	fi
-	ASSEMBLY_DIR=$(canonical_path "$(abs_path "$(expand_home "$ASSEMBLY_DIR")")")
+	ASSEMBLY_DIR=$(abs_path "$(expand_home "$ASSEMBLY_DIR")")
+	case "$(normalize_lexical "$ASSEMBLY_DIR")" in
+	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
+	esac
+	ASSEMBLY_DIR=$(canonical_path "$ASSEMBLY_DIR")
 	case "$ASSEMBLY_DIR" in
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
