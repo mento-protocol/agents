@@ -2029,18 +2029,39 @@ cmd_hook() {
 	return 0
 }
 
-# Signal a background job and everything it started. In monitor mode the job
-# leads a process group of its own, so the group takes the signal: git, a git
-# hook the merge runs, and whatever those started in turn. A host that refuses
-# the process group leaves the job itself as the only thing to signal.
+# Print the pid of every process below the given one, one per line, from a
+# single ps snapshot. ps -A with pid and ppid columns is common to macOS and
+# Linux. A process that starts after the snapshot is missed; the deadline
+# path below tolerates that because the job's output never touches the
+# caller's descriptors.
+descendants_of() {
+	local parent table child
+	parent=$1
+	table=$(ps -A -o pid= -o ppid= 2>/dev/null) || return 0
+	printf '%s\n' "$table" | awk -v p="$parent" '$2 == p { print $1 }' |
+		while IFS= read -r child; do
+			[ -n "$child" ] || continue
+			printf '%s\n' "$child"
+			descendants_of "$child"
+		done
+	return 0
+}
+
+# Signal a background job and everything it started. The descendants are
+# collected first, because killing the job reparents its children and breaks
+# the chain. In monitor mode the job also leads a process group of its own,
+# so the group takes the signal too; a host without job control still gets
+# every descendant through the ps walk.
 kill_job() {
-	local sig pid
+	local sig pid kids kid
 	sig=$1
 	pid=$2
-	if kill -"$sig" -- "-$pid" 2>/dev/null; then
-		return 0
-	fi
+	kids=$(descendants_of "$pid")
+	kill -"$sig" -- "-$pid" 2>/dev/null || true
 	kill -"$sig" "$pid" 2>/dev/null || true
+	for kid in $kids; do
+		kill -"$sig" "$kid" 2>/dev/null || true
+	done
 	return 0
 }
 
@@ -2050,22 +2071,34 @@ kill_job() {
 # runs as one background job, in a process group of its own where the host
 # allows it, so nothing it started outlives the deadline. bash 3.2 gives a
 # background job its own process group only in monitor mode, and macOS has no
-# setsid(1) to do it instead.
+# setsid(1) to do it instead, so the deadline path also walks the process
+# tree.
+#
+# The body writes to two temporary files, not to the caller's descriptors:
+# a process the deadline missed cannot hold the session's pipe open past the
+# deadline, so the caller gets its answer on time whatever survived. The
+# files are replayed to stdout and stderr once the body is done or stopped.
 #
 # The session always starts: an expired deadline prints one line and exits 0.
 run_hook_bounded() {
-	local pid waited limit
+	local pid waited limit out errs tmpdir
+	tmpdir=${TMPDIR:-/tmp}
+	out=$(mktemp "$tmpdir/link-skills-hook-out.XXXXXX" 2>/dev/null) || out=""
+	errs=$(mktemp "$tmpdir/link-skills-hook-err.XXXXXX" 2>/dev/null) || errs=""
+	if [ -z "$out" ] || [ -z "$errs" ]; then
+		[ -n "$out" ] && rm -f "$out"
+		[ -n "$errs" ] && rm -f "$errs"
+		cmd_hook || true
+		return 0
+	fi
 	set -m 2>/dev/null || true
 	# A host that forbids setpgid makes bash report it, and that report belongs
-	# to no one. It is dropped, and the body keeps the real stderr through
-	# fd 9.
-	exec 9>&2
+	# to no one: it is dropped with the brace group's stderr. The body itself
+	# writes to the two files.
 	{ (
-		exec 2>&9
 		cmd_hook || true
-	) & } 2>/dev/null
+	) >"$out" 2>"$errs" & } 2>/dev/null
 	pid=$!
-	exec 9>&-
 	set +m 2>/dev/null || true
 	waited=0
 	limit=$((HOOK_DEADLINE_SECONDS * 5))
@@ -2075,6 +2108,7 @@ run_hook_bounded() {
 			sleep 1
 			kill_job KILL "$pid"
 			wait "$pid" 2>/dev/null || true
+			replay_hook_output "$out" "$errs"
 			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run 'bash $(shell_quote "$SCRIPT_PATH") check'"
 			return 0
 		fi
@@ -2082,6 +2116,23 @@ run_hook_bounded() {
 		waited=$((waited + 1))
 	done
 	wait "$pid" 2>/dev/null || true
+	replay_hook_output "$out" "$errs"
+	return 0
+}
+
+# Copy the hook body's captured stdout and stderr to the real ones, then
+# remove the two files.
+replay_hook_output() {
+	local out errs
+	out=$1
+	errs=$2
+	if [ -s "$out" ]; then
+		cat "$out"
+	fi
+	if [ -s "$errs" ]; then
+		cat "$errs" >&2
+	fi
+	rm -f "$out" "$errs"
 	return 0
 }
 
