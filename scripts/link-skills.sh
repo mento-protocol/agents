@@ -2031,19 +2031,31 @@ cmd_hook() {
 
 # Print the pid of every process below the given one, one per line, from a
 # single ps snapshot. ps -A with pid and ppid columns is common to macOS and
-# Linux. A process that starts after the snapshot is missed; the deadline
-# path below tolerates that because the job's output never touches the
-# caller's descriptors.
+# Linux, and awk computes the closure over that one listing, so the walk
+# costs one process however deep the tree is. A process that starts after
+# the snapshot is missed; the deadline path below tolerates that because the
+# job's output never touches the caller's descriptors.
 descendants_of() {
-	local parent table child
-	parent=$1
-	table=$(ps -A -o pid= -o ppid= 2>/dev/null) || return 0
-	printf '%s\n' "$table" | awk -v p="$parent" '$2 == p { print $1 }' |
-		while IFS= read -r child; do
-			[ -n "$child" ] || continue
-			printf '%s\n' "$child"
-			descendants_of "$child"
-		done
+	ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+		{ pid[NR] = $1; ppid[NR] = $2 }
+		END {
+			want[root] = 1
+			changed = 1
+			while (changed) {
+				changed = 0
+				for (i = 1; i <= NR; i++) {
+					if (!(pid[i] in want) && (ppid[i] in want)) {
+						want[pid[i]] = 1
+						changed = 1
+					}
+				}
+			}
+			for (p in want) {
+				if (p != root) {
+					print p
+				}
+			}
+		}'
 	return 0
 }
 
@@ -2081,7 +2093,7 @@ kill_job() {
 #
 # The session always starts: an expired deadline prints one line and exits 0.
 run_hook_bounded() {
-	local pid waited limit out errs tmpdir
+	local pid deadline out errs tmpdir
 	tmpdir=${TMPDIR:-/tmp}
 	out=$(mktemp "$tmpdir/link-skills-hook-out.XXXXXX" 2>/dev/null) || out=""
 	errs=$(mktemp "$tmpdir/link-skills-hook-err.XXXXXX" 2>/dev/null) || errs=""
@@ -2100,10 +2112,12 @@ run_hook_bounded() {
 	) >"$out" 2>"$errs" & } 2>/dev/null
 	pid=$!
 	set +m 2>/dev/null || true
-	waited=0
-	limit=$((HOOK_DEADLINE_SECONDS * 5))
+	# The deadline is wall clock, not a count of polls: each poll spawns a
+	# sleep, and on a slow host those add up to seconds the count would not
+	# see.
+	deadline=$((SECONDS + HOOK_DEADLINE_SECONDS))
 	while kill -0 "$pid" 2>/dev/null; do
-		if [ "$waited" -ge "$limit" ]; then
+		if [ "$SECONDS" -ge "$deadline" ]; then
 			kill_job TERM "$pid"
 			sleep 1
 			kill_job KILL "$pid"
@@ -2113,7 +2127,6 @@ run_hook_bounded() {
 			return 0
 		fi
 		sleep 0.2
-		waited=$((waited + 1))
 	done
 	wait "$pid" 2>/dev/null || true
 	replay_hook_output "$out" "$errs"
