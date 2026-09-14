@@ -4,9 +4,9 @@
 // Checks per skills/<name>/SKILL.md:
 //   - the file exists and its frontmatter is the first thing in it,
 //     delimited by "---" lines
-//   - name is present, equals the directory name, 1-64 chars, [a-z0-9-]
+//   - name is present, equals the directory name, 1-64 characters, [a-z0-9-]
 //     only, no leading/trailing hyphen, no "--"
-//   - description is present and non-empty after trimming, 1-1024 chars.
+//   - description is present and non-empty after trimming, 1-1024 characters.
 //     The value is decoded before it is measured: a block scalar keeps the
 //     whitespace inside its lines, a quoted scalar keeps every character
 //     between its quotes with the escapes resolved, and a plain scalar folds
@@ -14,8 +14,12 @@
 //     value loses its inline comment, so "description: # TODO" reads as empty
 //   - description is a plain string. Any unquoted value that YAML reads as
 //     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
-//     anchor or alias, the null spellings, the boolean spellings, a number in
-//     any YAML form, and a timestamp. Quoting them makes them text again
+//     anchor or alias, an explicit tag such as "!!int 123" or "!custom y", the
+//     null spellings, the boolean spellings, a number in any YAML form, and a
+//     timestamp. Quoting them makes them text again
+//
+// Both lengths count Unicode code points, not UTF-16 code units, so an emoji
+// or any other character outside the basic multilingual plane counts once.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -43,6 +47,15 @@ const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // link script treats the same names as noise, so the validator must not fail
 // a local checkout on them.
 const NOISE_NAMES = new Set([".DS_Store", ".localized", "Thumbs.db"]);
+
+/**
+ * The length of a string in Unicode code points. String.length counts UTF-16
+ * code units, so it counts every emoji and every other character outside the
+ * basic multilingual plane twice.
+ */
+function codePointLength(value) {
+  return Array.from(value).length;
+}
 
 /** Collect one problem line per issue found. */
 const problems = [];
@@ -77,9 +90,13 @@ const TYPED_SCALAR_RES = [
   // Decimal integers, with an optional sign. YAML 1.1 octal ("0755") is one
   // of these too.
   /^[+-]?[0-9]+$/,
-  // Hexadecimal and octal integers.
+  // Hexadecimal, octal and binary integers.
   /^[+-]?0x[0-9a-fA-F]+$/,
   /^[+-]?0o[0-7]+$/,
+  /^[+-]?0b[01][01_]*$/,
+  // Digit groups separated by underscores, which YAML 1.1 reads as one
+  // number: "1_000", "1_000.5", and the signed forms of both.
+  /^[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?$/,
   // Floats, with an optional exponent.
   /^[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?$/,
   // Infinity and not-a-number.
@@ -93,14 +110,18 @@ const TYPED_SCALAR_RES = [
 /**
  * True when the text of an unquoted scalar is a YAML non-string form: one of
  * the values above, the start of a flow sequence or mapping, a bare anchor or
- * alias such as "&x" or "*x", or any typed scalar. A quoted value is always a
- * string, so the caller checks the quotes first.
+ * alias such as "&x" or "*x", an explicit tag such as "!!int 123", or any
+ * typed scalar. A quoted value is always a string, so the caller checks the
+ * quotes first.
  */
 function isNonStringScalar(raw) {
   if (raw === "") return false;
   if (NON_STRING_VALUES.has(raw)) return true;
   if (raw.startsWith("[") || raw.startsWith("{")) return true;
   if (/^[&*]\S/.test(raw)) return true;
+  // An explicit tag names the type of the value, so the text after it is not
+  // the description a runtime reads. A plain scalar never starts with "!".
+  if (raw.startsWith("!")) return true;
   for (const re of TYPED_SCALAR_RES) {
     if (re.test(raw)) return true;
   }
@@ -434,7 +455,8 @@ function validateSkill(name) {
         `skills/${name}: frontmatter "name" (${nameValue}) must equal the directory name`,
       );
     }
-    if (nameValue.length < 1 || nameValue.length > 64) {
+    const nameLength = codePointLength(nameValue);
+    if (nameLength < 1 || nameLength > 64) {
       problems.push(`skills/${name}: "name" must be 1-64 chars`);
     }
     if (!NAME_RE.test(nameValue)) {
@@ -454,11 +476,12 @@ function validateSkill(name) {
   ) {
     // The characters are the same in "[not a list]", but there the quotes make
     // them text. Unquoted, YAML hands the runtime a list, a mapping, null, a
-    // boolean, a number or a date.
+    // boolean, a number, a date, or whatever type an explicit tag names.
     problems.push(`skills/${name}: "description" must be a plain string`);
   } else {
     const trimmed = descriptionField.value.trim();
-    if (trimmed.length < 1 || trimmed.length > 1024) {
+    const trimmedLength = codePointLength(trimmed);
+    if (trimmedLength < 1 || trimmedLength > 1024) {
       problems.push(
         `skills/${name}: "description" must be 1-1024 chars after trimming`,
       );

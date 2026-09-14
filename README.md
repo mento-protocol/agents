@@ -71,8 +71,8 @@ directory first: the very first run on a machine is locked like every other
 one. Each run gives its lock back when it ends, the session hook included. A
 lock left behind by a run that was killed is removed once its process is
 gone. A lock whose owner is still running is kept however old it is, and a
-lock that records no owner at
-all is removed after two minutes. A symlink or a file at the lock path is not a
+lock that records no owner at all is removed after two minutes. A symlink or
+a file at the lock path is not a
 lock this script made: `link` and `unlink` report it and exit 1 without reading
 or removing anything below it, and the hook steps aside in silence.
 
@@ -83,7 +83,9 @@ that is there but cannot be read is refused the same way: `link`, `check` and
 `unlink` report it and exit 1 before they change anything, and the hook steps
 aside. A run is one transaction: if the manifest cannot be written, the links
 that run created are removed again, links it found already recorded stay, and
-the run exits 1.
+the run exits 1. A recorded link that now has to point somewhere else and that
+the script cannot remove is reported, keeps the target it already had and its
+manifest entry, and makes `link` exit 1: no new link is created for it.
 
 `~/.agents/skill-sources` must be a regular file. Anything else at that path,
 such as a directory or a named pipe, is refused with exit 2 before the script
@@ -175,6 +177,13 @@ your own:
 
 A line that points one level too high links nothing; the script warns when a
 listed source holds no skill.
+
+A source directory the script cannot read says nothing about what belongs in
+the assembly, and neither does a skill directory inside a readable source that
+the script cannot read. Both keep their recorded links and their manifest
+entries, both are reported by path, and `link` and `check` exit 1. A skill
+directory that reads fine and no longer holds a `SKILL.md` is a skill that was
+removed, so its link is pruned.
 
 Skill names must be unique across every source. `link-skills.sh` refuses
 to link a name that collides between sources, keeps whichever link already

@@ -70,6 +70,7 @@ OUT_COUNT=0
 DUP_COUNT=0
 NEW_COUNT=0
 REPOINT_COUNT=0
+UNREAD_COUNT=0
 
 # Parallel arrays. bash 3.2 has no associative arrays, so every table is a set
 # of indexed arrays plus a count, and every loop is an index loop.
@@ -79,6 +80,7 @@ SRC_RAW=()
 SRC_OK=()
 SRC_FOUND=()
 DUP_NAME=()
+UNREAD_NAME=()
 RAW_NAME=()
 RAW_TARGET=()
 CAND_NAME=()
@@ -604,6 +606,39 @@ report_missing_sources() {
 	done
 }
 
+# True when a child of a source is there but cannot be searched, so that every
+# file test below it answers 'absent'. A directory whose search bit is off is
+# the plain case; a directory that is readable by its bits and still refuses a
+# listing is the ACL case. Either way the directory says nothing about whether
+# it holds a SKILL.md, and a deleted skill is the one thing it must not be
+# mistaken for.
+skill_dir_unsearchable() {
+	local d
+	d=$1
+	if [ ! -x "$d" ]; then
+		return 0
+	fi
+	if [ -r "$d" ] && ! ls -- "$d" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+# A skill name whose directory could not be read this run. Its link and its
+# manifest entry are kept: an unreadable directory is a transient problem, not
+# a skill that was deleted.
+unreadable_has() {
+	local i
+	i=0
+	while [ "$i" -lt "$UNREAD_COUNT" ]; do
+		if names_equal "${UNREAD_NAME[$i]}" "$1"; then
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 1
+}
+
 # Fill CAND_NAME/CAND_TARGET with every immediate child directory of every
 # source that holds a SKILL.md. A name claimed by two sources is an error and
 # neither copy is linked.
@@ -612,6 +647,7 @@ collect_candidates() {
 	RAW_COUNT=0
 	CAND_COUNT=0
 	DUP_COUNT=0
+	UNREAD_COUNT=0
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		src=${SRC_PATH[$i]}
@@ -638,10 +674,25 @@ collect_candidates() {
 			if [ ! -d "$entry" ]; then
 				continue
 			fi
+			name=$(basename "$entry")
+			# A child directory that cannot be searched answers the
+			# SKILL.md test with 'absent', which reads exactly like a
+			# skill that was deleted and would prune a link that is
+			# still good. The two are told apart before the test is
+			# believed.
+			if [ ! -f "$entry/SKILL.md" ] && skill_dir_unsearchable "$entry"; then
+				err "skill directory cannot be read: $entry; its recorded link is kept"
+				UNREAD_NAME[UNREAD_COUNT]="$name"
+				UNREAD_COUNT=$((UNREAD_COUNT + 1))
+				# It counts as something found, so the source is not
+				# also reported as one that holds no skill: what it
+				# holds is exactly what could not be read.
+				found=$((found + 1))
+				continue
+			fi
 			if [ ! -f "$entry/SKILL.md" ]; then
 				continue
 			fi
-			name=$(basename "$entry")
 			RAW_NAME[RAW_COUNT]="$name"
 			RAW_TARGET[RAW_COUNT]="$entry"
 			RAW_COUNT=$((RAW_COUNT + 1))
@@ -1181,10 +1232,20 @@ link_candidates() {
 					record_output "$name" "$target"
 					continue
 				fi
-				# Recorded before the link changes, so a failed manifest
-				# write can put the old target back.
+				# The old link goes first, and only a checked removal
+				# licenses the new one. An unchecked rm that failed
+				# would leave a symlink to a directory at the entry,
+				# and the 'ln -s' below would follow it and create the
+				# new link inside the old target directory, where
+				# neither the assembly nor the manifest can see it.
+				if ! remove_link "$entry"; then
+					err "could not remove $entry to point $name at $target; kept the link to $cur and its manifest entry"
+					record_output "$name" "$cur"
+					continue
+				fi
+				# Recorded once the old link is gone, so a failed
+				# manifest write can put the old target back.
 				record_repointed_link "$name" "$cur"
-				rm -f "$entry"
 				if ! ln -s "$target" "$entry"; then
 					err "could not link $entry -> $target; $name is now unlinked"
 					continue
@@ -1239,6 +1300,13 @@ prune_manifest() {
 			record_output "$name" "$target"
 			continue
 		fi
+		# The skill directory is there and could not be read, so it
+		# produced no candidate. That is not a skill that was deleted.
+		if unreadable_has "$name"; then
+			record_output "$name" "$target"
+			kept=$((kept + 1))
+			continue
+		fi
 		if target_source_unavailable "$target"; then
 			record_output "$name" "$target"
 			kept=$((kept + 1))
@@ -1275,7 +1343,7 @@ prune_manifest() {
 		fi
 	done
 	if [ "$kept" -gt 0 ]; then
-		info "$PROG: source unavailable; kept $kept link(s)"
+		info "$PROG: kept $kept link(s) whose source or skill directory could not be read"
 	fi
 }
 
@@ -1867,6 +1935,14 @@ cmd_check() {
 		if target_source_unavailable "$target"; then
 			if [ -L "$entry" ]; then
 				info "  link kept: $name; its source cannot be read now"
+			fi
+			continue
+		fi
+		# The same for one skill directory inside a source that reads
+		# fine: the candidate pass reported it and 'link' keeps it.
+		if unreadable_has "$name"; then
+			if [ -L "$entry" ]; then
+				info "  link kept: $name; its skill directory cannot be read now"
 			fi
 			continue
 		fi

@@ -3197,6 +3197,231 @@ install_hooks_ignores_similar_named_script() {
 	assert_file_has "$HOME/.claude/settings.json" "$LS hook" "this hook is there"
 }
 
+# An explicit YAML tag names the type of a value, so the text after it is not
+# the description. YAML 1.1 also reads a binary integer and a number written
+# with underscore digit groups as numbers. Quoting any of them makes it text.
+validator_rejects_tagged_and_more_numeric_scalars() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for form in '!!int 123' '!!str x' '!custom y' '!!float 1.5' \
+		'0b1010' '-0b1010' '+0b1010' \
+		'1_000' '-1_000' '+1_000' '1_000.5' '-1_000.5'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/tagged-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/tagged-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/tagged-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"must be a plain string"*) ;;
+		*) fail "description '$form' must be reported as a non-string: $out" ;;
+		esac
+	done
+
+	# The same characters inside quotes are text.
+	n=0
+	for form in '"!!int 123"' "'!custom y'" '"0b1010"' '"1_000"' '"1_000.5"'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/tagged-ok-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/tagged-ok-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/tagged-ok-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "quoted description $form must validate: $out"
+		fi
+	done
+
+	# A block scalar is text too.
+	mkdir -p "$CASE_DIR/tagged-block/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  !!int 123\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tagged-block/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tagged-block" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a block scalar holding a tag must validate: $out"
+	fi
+
+	# A sentence that only mentions these forms is an ordinary description.
+	mkdir -p "$CASE_DIR/tagged-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: reads 0b1010 and 1_000 out of a log file\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tagged-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tagged-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a sentence that mentions a number form must validate: $out"
+	fi
+}
+
+# Repeat text $1 $2 times on standard output. bash 3.2 has no repetition
+# operator, so the case builds the string one copy at a time.
+repeat_text_n() {
+	local out i
+	out=""
+	i=0
+	while [ "$i" -lt "$2" ]; do
+		out="$out$1"
+		i=$((i + 1))
+	done
+	printf '%s' "$out"
+}
+
+# The length limits count Unicode code points. JavaScript stores an emoji as
+# two UTF-16 code units, so String.length counts it twice and rejects a
+# description that is well inside the limit.
+validator_counts_code_points() {
+	local out rc emoji short long
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	emoji=$(printf '\360\237\230\200')
+	short=$(repeat_text_n "$emoji" 600)
+	long=$(repeat_text_n "$emoji" 1030)
+
+	mkdir -p "$CASE_DIR/cp-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: %s\n' "$short"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cp-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cp-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 600 code point description must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/cp-long/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: %s\n' "$long"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cp-long/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cp-long" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1030 code point description must fail"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "a 1030 code point description must be reported as too long: $out" ;;
+	esac
+}
+
+# A relink is a removal and a creation. When the removal fails and is not
+# checked, the old link stays and 'ln -s' follows it: the new link lands inside
+# the old target directory, where nothing ever finds it again.
+relink_failure_keeps_old_link_and_entry() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha points at the first source"
+	# The name comes from the other source now, so the recorded link has to be
+	# repointed. A read-only assembly refuses every removal in it.
+	write_sources
+	add_source "$CASE_DIR/two"
+	chmod 500 "$HOME/.agents/skills"
+	ls_run link
+	chmod 700 "$HOME/.agents/skills"
+	assert_rc 1 "link with a removal the filesystem refuses"
+	assert_out_has "could not remove" "the failure is reported"
+	assert_out_lacks "relinked alpha" "nothing claims the link was repointed"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha still points at the old target"
+	assert_absent "$CASE_DIR/one/alpha/alpha" "no nested link inside the old target"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest still records the old target"
+	ls_run link
+	assert_rc 0 "link once the assembly can be written again"
+	assert_out_has "relinked alpha" "the relink happens now"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/two/alpha" "alpha points at the new target"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/two/alpha" "the manifest records the new target"
+}
+
+# A skill directory that is there and cannot be searched answers the SKILL.md
+# test with 'absent', which reads exactly like a skill that was deleted.
+unreadable_skill_directory_keeps_link() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	chmod 000 "$CASE_DIR/one/beta"
+	ls_run link
+	assert_rc 1 "link with an unreadable skill directory"
+	assert_out_has "skill directory cannot be read: $CASE_DIR/one/beta" "the directory is named"
+	assert_out_has "its recorded link is kept" "the message says the link is kept"
+	assert_out_has "kept 1 link(s)" "the kept count"
+	assert_out_has "pruned 0" "nothing pruned"
+	assert_out_lacks "holds no skill" "the source itself reads fine"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link kept"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "beta" "the manifest keeps beta"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+
+	ls_run check
+	assert_rc 1 "check with an unreadable skill directory"
+	assert_out_has "skill directory cannot be read" "check names the directory"
+	assert_out_lacks "will prune it" "check promises no prune that link will not do"
+
+	chmod 755 "$CASE_DIR/one/beta"
+	ls_run link
+	assert_rc 0 "link once the directory reads again"
+	assert_out_has "errors 0" "a clean run"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta is still linked"
+
+	# A directory that reads fine and holds no SKILL.md is a skill that was
+	# removed, and its link goes.
+	rm -f "$CASE_DIR/one/beta/SKILL.md"
+	ls_run link
+	assert_rc 0 "link after the SKILL.md was removed"
+	assert_out_has "pruned 1" "beta pruned"
+	assert_absent "$HOME/.agents/skills/beta" "the beta link is gone"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "beta" "the manifest dropped beta"
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -3291,6 +3516,8 @@ main() {
 	run_case link_refuses_while_locked
 	run_case lock_taken_on_first_run
 	run_case nested_missing_assembly_is_created
+	run_case relink_failure_keeps_old_link_and_entry
+	run_case unreadable_skill_directory_keeps_link
 	run_case stale_lock_is_removed
 	run_case aged_lock_with_live_owner_is_kept
 	run_case symlinked_lock_refused
@@ -3325,6 +3552,8 @@ main() {
 	run_case validator_block_header_with_comment
 	run_case validator_rejects_non_string_description
 	run_case validator_rejects_typed_scalars
+	run_case validator_rejects_tagged_and_more_numeric_scalars
+	run_case validator_counts_code_points
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces
