@@ -66,14 +66,24 @@ One run at a time writes the assembly. `link` and `unlink` take the lock
 directory `~/.agents/skills/.skill-links.lock`, wait up to 10 seconds for a run
 already in progress, and then exit 1 having changed nothing; the session hook
 skips its own update silently instead of waiting. A lock left behind by a run
-that was killed is removed once its process is gone, and in any case after two
-minutes.
+that was killed is removed once its process is gone. A lock whose owner is
+still running is kept however old it is, and a lock that records no owner at
+all is removed after two minutes. A symlink or a file at the lock path is not a
+lock this script made: `link` and `unlink` report it and exit 1 without reading
+or removing anything below it, and the hook steps aside in silence.
 
 The manifest `~/.agents/skills/.skill-links` is the only record of what the
 script may remove later, so every command that reads it refuses a manifest path
-that is a symlink or is not a regular file, and changes nothing. A run is one
-transaction: if the manifest cannot be written, the links that run created are
-removed again, links it found already recorded stay, and the run exits 1.
+that is a symlink or is not a regular file, and changes nothing. A manifest
+that is there but cannot be read is refused the same way: `link`, `check` and
+`unlink` report it and exit 1 before they change anything, and the hook steps
+aside. A run is one transaction: if the manifest cannot be written, the links
+that run created are removed again, links it found already recorded stay, and
+the run exits 1.
+
+`~/.agents/skill-sources` must be a regular file. Anything else at that path,
+such as a directory or a named pipe, is refused with exit 2 before the script
+opens it.
 
 ### Status
 
@@ -107,13 +117,23 @@ Adds a Claude Code and Codex `SessionStart` hook that runs
 `link-skills.sh hook` and prints a one-line notice when a source clone is
 behind. To let the hook fast-forward a clean clone on its default branch
 automatically instead of only notifying, add `auto-update` after that
-source's path in `~/.agents/skill-sources`.
+source's path in `~/.agents/skill-sources`. An `auto-update` source is left
+alone when the update would overwrite a file the clone ignores: git replaces
+an ignored file without a word, so the hook names the file and prints the
+manual `git pull --ff-only` command instead.
 
 The hook fetches each source at most every 6 hours (override with
 `SKILL_SOURCES_FETCH_INTERVAL_HOURS`, `0` to fetch every time) and stops
 fetching once it has spent 20 seconds, so a notice can lag a teammate's push
 by that interval. Run `scripts/link-skills.sh check` to force a fresh look:
 that throttle is the hook's alone.
+
+The hook never blocks a session start. Its whole run, including fetches, the
+merge, any local git hook the merge runs, and the scan afterwards, is bounded
+by 25 seconds of wall clock: past that it stops the work it started, prints
+`hook timed out after 25s`, and exits 0. A path it cannot use, such as an
+unset `HOME` or a manifest that is not a regular file, is one line and exit 0
+too. The other commands keep exit 2 for the same refusal.
 
 `install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
 creating either file when it is missing, and copies the previous content of an
@@ -122,10 +142,12 @@ reports each runtime as installed once the hook is added and as already
 installed once the hook is already there, and exits 0 once every reachable
 runtime is in one of those states. A file that already runs the hook is left
 byte for byte as it is: it is neither reformatted nor backed up. A hook entry
-that matches by its trailing `link-skills.sh hook` but names a script path
-that no longer exists is dead, so it is repointed at this script instead of
-being kept, and the run reports that it replaced a stale hook. A file it
-creates itself gets mode `0600` and no backup. A backup name already in use
+whose script file name is exactly `link-skills.sh` and whose path no longer
+exists is dead, so it is repointed at this script instead of being kept, and
+the run reports that it replaced a stale hook. An entry that runs a different
+script, such as `custom-link-skills.sh hook`, is another tool's, so it is kept
+as it is and this hook is added beside it. A file it creates itself gets mode
+`0600` and no backup. A backup name already in use
 gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
 home directory does not exist yet is skipped and named in the output. The JSON
 merge needs `python3`; without it the command prints the group to add by hand

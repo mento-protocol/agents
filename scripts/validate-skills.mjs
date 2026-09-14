@@ -7,12 +7,15 @@
 //   - name is present, equals the directory name, 1-64 chars, [a-z0-9-]
 //     only, no leading/trailing hyphen, no "--"
 //   - description is present and non-empty after trimming, 1-1024 chars.
-//     A block scalar is folded into one line first, and an unquoted value
-//     loses its inline comment, so "description: # TODO" reads as empty
-//   - description is a plain string. An unquoted "[]", "{}", "null", "~",
-//     "Null" or "NULL", a value that opens a flow sequence or mapping, and a
-//     bare anchor or alias are all refused: YAML reads them as a list, a
-//     mapping or null, not as text. Quoting them makes them text again
+//     The value is decoded before it is measured: a block scalar keeps the
+//     whitespace inside its lines, a quoted scalar keeps every character
+//     between its quotes with the escapes resolved, and a plain scalar folds
+//     its indented continuation lines in with single spaces. An unquoted
+//     value loses its inline comment, so "description: # TODO" reads as empty
+//   - description is a plain string. Any unquoted value that YAML reads as
+//     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
+//     anchor or alias, the null spellings, the boolean spellings, a number in
+//     any YAML form, and a timestamp. Quoting them makes them text again
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -51,6 +54,9 @@ const problems = [];
  */
 const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[0-9]*|[0-9]*[+-]?)$/;
 
+/** The explicit indentation indicator of a block scalar header, if it has one. */
+const BLOCK_INDENT_RE = /[0-9]+/;
+
 /**
  * Raw unquoted values that YAML reads as something other than a string: the
  * empty flow sequence and mapping, and the null spellings. A description that
@@ -59,50 +65,245 @@ const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[0-9]*|[0-9]*[+-]?)$/;
 const NON_STRING_VALUES = new Set(["[]", "{}", "null", "~", "Null", "NULL"]);
 
 /**
- * True when the raw text of an unquoted scalar is a YAML non-string form: one
- * of the values above, the start of a flow sequence or mapping, or a bare
- * anchor or alias such as "&x" or "*x". A quoted value is always a string, so
- * the caller checks the quotes first.
+ * Unquoted scalars that YAML resolves to a type other than string. A runtime
+ * that reads such a description gets a boolean, a number, null or a date, so
+ * the validator refuses them and asks for quotes.
+ */
+const TYPED_SCALAR_RES = [
+  // Booleans, in every spelling YAML accepts, in any case.
+  /^(?:true|false|yes|no|on|off)$/i,
+  // Null.
+  /^null$/i,
+  // Decimal integers, with an optional sign. YAML 1.1 octal ("0755") is one
+  // of these too.
+  /^[+-]?[0-9]+$/,
+  // Hexadecimal and octal integers.
+  /^[+-]?0x[0-9a-fA-F]+$/,
+  /^[+-]?0o[0-7]+$/,
+  // Floats, with an optional exponent.
+  /^[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?$/,
+  // Infinity and not-a-number.
+  /^[+-]?\.inf$/i,
+  /^\.nan$/i,
+  // Timestamps: a bare date, and a date with a time and an optional zone.
+  /^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$/,
+  /^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:[ \t]*(?:Z|z|[-+][0-9]{1,2}(?::[0-9]{2})?))?$/,
+];
+
+/**
+ * True when the text of an unquoted scalar is a YAML non-string form: one of
+ * the values above, the start of a flow sequence or mapping, a bare anchor or
+ * alias such as "&x" or "*x", or any typed scalar. A quoted value is always a
+ * string, so the caller checks the quotes first.
  */
 function isNonStringScalar(raw) {
   if (raw === "") return false;
   if (NON_STRING_VALUES.has(raw)) return true;
   if (raw.startsWith("[") || raw.startsWith("{")) return true;
   if (/^[&*]\S/.test(raw)) return true;
+  for (const re of TYPED_SCALAR_RES) {
+    if (re.test(raw)) return true;
+  }
   return false;
 }
 
-/** True when the value is wrapped in single or double quotes. */
-function isQuoted(value) {
-  return (
-    value.length >= 2 &&
-    ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'")))
-  );
-}
-
 /**
- * Remove an inline YAML comment from an unquoted scalar: a "#" that starts
- * the value, or a "#" preceded by whitespace. A quoted value keeps its "#",
- * because there the character is part of the text.
+ * Remove an inline YAML comment from one line of an unquoted scalar: a "#"
+ * that starts the line, or a "#" preceded by whitespace. A quoted value never
+ * reaches this function, because there the character is part of the text.
  */
 function stripInlineComment(value) {
   if (value.startsWith("#")) return "";
   return value.replace(/\s+#.*$/, "").trim();
 }
 
+/** The number of leading space and tab characters of a line. */
+function indentWidth(line) {
+  const match = /^[ \t]*/.exec(line);
+  return match[0].length;
+}
+
+/**
+ * Resolve the escape sequences of a double-quoted YAML scalar: the single
+ * character escapes, "\xNN", "\uNNNN" and "\UNNNNNNNN". An escape that no rule
+ * matches keeps the escaped character itself, which is what YAML does for the
+ * quote and backslash forms.
+ */
+function decodeDoubleQuoted(body) {
+  const SIMPLE = new Map([
+    ["0", "\0"],
+    ["a", "\x07"],
+    ["b", "\b"],
+    ["t", "\t"],
+    ["n", "\n"],
+    ["v", "\v"],
+    ["f", "\f"],
+    ["r", "\r"],
+    ["e", "\x1b"],
+    [" ", " "],
+    ['"', '"'],
+    ["/", "/"],
+    ["\\", "\\"],
+    ["N", "\x85"],
+    ["_", "\xa0"],
+  ]);
+  const HEX_WIDTHS = new Map([
+    ["x", 2],
+    ["u", 4],
+    ["U", 8],
+  ]);
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    i += 1;
+    if (i >= body.length) {
+      out += "\\";
+      break;
+    }
+    const esc = body[i];
+    const simple = SIMPLE.get(esc);
+    if (simple !== undefined) {
+      out += simple;
+      continue;
+    }
+    const width = HEX_WIDTHS.get(esc);
+    if (width === undefined) {
+      out += esc;
+      continue;
+    }
+    const digits = body.slice(i + 1, i + 1 + width);
+    if (digits.length !== width || !/^[0-9a-fA-F]+$/.test(digits)) {
+      out += esc;
+      continue;
+    }
+    const code = parseInt(digits, 16);
+    if (code > 0x10ffff) {
+      out += esc;
+      continue;
+    }
+    out += String.fromCodePoint(code);
+    i += width;
+  }
+  return out;
+}
+
+/**
+ * Read a quoted scalar from the start of `text`, up to its closing quote. The
+ * scan runs before any comment is stripped, so a "#" inside the quotes stays
+ * in the value and a comment after the closing quote is dropped.
+ *
+ * Returns { value } for a well formed quoted scalar, or null when the text is
+ * not quoted, the quote never closes, or something other than a comment
+ * follows the closing quote. The caller then reads the line as a plain scalar.
+ */
+function readQuotedScalar(text) {
+  const quote = text[0];
+  if (quote !== '"' && quote !== "'") return null;
+  let end = -1;
+  if (quote === '"') {
+    for (let i = 1; i < text.length; i += 1) {
+      if (text[i] === "\\") {
+        i += 1;
+        continue;
+      }
+      if (text[i] === '"') {
+        end = i;
+        break;
+      }
+    }
+  } else {
+    for (let i = 1; i < text.length; i += 1) {
+      if (text[i] !== "'") continue;
+      if (text[i + 1] === "'") {
+        i += 1;
+        continue;
+      }
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return null;
+  const trailing = text.slice(end + 1);
+  if (!/^[ \t]*(?:#.*)?$/.test(trailing)) return null;
+  const body = text.slice(1, end);
+  const value =
+    quote === '"' ? decodeDoubleQuoted(body) : body.replace(/''/g, "'");
+  return { value };
+}
+
+/**
+ * Read a block scalar that starts at the header line `start`. The body is
+ * every following line that is indented, plus the blank lines between them; a
+ * line at column zero ends it.
+ *
+ * A literal block ("|") keeps each line verbatim after the common indentation
+ * is removed and joins them with newlines. A folded block (">") joins the same
+ * lines with single spaces. Neither collapses the whitespace inside a line, so
+ * the measured length is the length of the real value.
+ *
+ * Returns { value, end }, where `end` is the index of the last line consumed.
+ */
+function readBlockScalar(header, lines, start) {
+  const literal = header.startsWith("|");
+  const indicator = BLOCK_INDENT_RE.exec(header);
+  const bodyLines = [];
+  let end = start;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const next = lines[i].replace(/\r$/, "");
+    if (next.trim() !== "" && indentWidth(next) === 0) break;
+    bodyLines.push(next);
+    end = i;
+  }
+
+  let indent = indicator ? Number(indicator[0]) : Number.POSITIVE_INFINITY;
+  if (!indicator) {
+    for (const line of bodyLines) {
+      if (line.trim() === "") continue;
+      indent = Math.min(indent, indentWidth(line));
+    }
+    if (!Number.isFinite(indent)) indent = 0;
+  }
+
+  const parts = bodyLines.map((line) =>
+    line.slice(Math.min(indent, indentWidth(line))),
+  );
+  const value = literal ? parts.join("\n") : parts.join(" ");
+  return { value, end };
+}
+
+/**
+ * Read a plain (unquoted, unfolded) scalar that starts on the header line and
+ * continues on every following indented line. YAML folds those continuation
+ * lines into the value with single spaces, so they are measured with it. A
+ * line at column zero, such as the next "key:" line, ends the value.
+ *
+ * Returns { value, end }, where `end` is the index of the last line consumed.
+ */
+function readPlainScalar(first, lines, start) {
+  const parts = [stripInlineComment(first)];
+  let end = start;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const next = lines[i].replace(/\r$/, "");
+    if (next.trim() === "") break;
+    if (indentWidth(next) === 0) break;
+    parts.push(stripInlineComment(next.trim()));
+    end = i;
+  }
+  return { value: parts.filter((part) => part !== "").join(" "), end };
+}
+
 /**
  * Parse top-level "key: value" frontmatter lines from the lines between the
- * two "---" delimiters. Values may be single- or double-quoted; quotes are
- * stripped. An unquoted value loses its inline comment, so
- * `description: # TODO` reads as empty. A block scalar (`description: >-`
- * followed by indented lines, with or without a trailing comment on the
- * header) is folded into one line, so its length is measured, not the two
- * marker characters.
+ * two "---" delimiters.
  *
- * Returns a Map of key -> { value, raw, quoted, block }. The raw text and the
- * two flags are kept because the caller must tell an unquoted YAML non-string
- * form apart from the same characters inside quotes.
+ * Returns a Map of key -> { value, raw, quoted, block }. `value` is the
+ * decoded text. `raw` is the significant text of a plain scalar, which the
+ * caller needs to tell an unquoted YAML non-string form apart from the same
+ * characters inside quotes; the two flags say which form the value took.
  */
 function parseFrontmatter(lines) {
   const fields = new Map();
@@ -111,44 +312,44 @@ function parseFrontmatter(lines) {
     const match = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line);
     if (!match) continue;
     const key = match[1];
-    let value = match[2].trim();
-    const raw = value;
-    let quoted = false;
-    let block = false;
+    const rest = match[2].trim();
+
     // A block scalar header may carry a trailing comment, as in
     // `description: >- # note`. The comment is removed before the header is
     // recognised, so such a line folds its indented body like any other block
     // scalar instead of reading as a plain two-character value.
-    const header = value.replace(/\s+#.*$/, "").trim();
+    const header = rest.replace(/\s+#.*$/, "").trim();
     if (BLOCK_SCALAR_RE.test(header)) {
-      block = true;
-      value = header;
-      const parts = [];
-      let j = i + 1;
-      for (; j < lines.length; j += 1) {
-        const next = lines[j].replace(/\r$/, "");
-        if (next.trim() === "") {
-          parts.push("");
-          continue;
-        }
-        if (!/^[ \t]/.test(next)) break;
-        parts.push(next.trim());
-      }
-      i = j - 1;
-      value = parts.join(" ").replace(/\s+/g, " ").trim();
-    } else if (isQuoted(value)) {
-      quoted = true;
-      value = value.slice(1, -1);
-    } else {
-      value = stripInlineComment(value);
-      // A quoted value followed by a comment only looks quoted once the
-      // comment is gone.
-      if (isQuoted(value)) {
-        quoted = true;
-        value = value.slice(1, -1);
-      }
+      const block = readBlockScalar(header, lines, i);
+      i = block.end;
+      fields.set(key, {
+        value: block.value,
+        raw: "",
+        quoted: false,
+        block: true,
+      });
+      continue;
     }
-    fields.set(key, { value, raw, quoted, block });
+
+    const quoted = readQuotedScalar(rest);
+    if (quoted !== null) {
+      fields.set(key, {
+        value: quoted.value,
+        raw: rest,
+        quoted: true,
+        block: false,
+      });
+      continue;
+    }
+
+    const plain = readPlainScalar(rest, lines, i);
+    i = plain.end;
+    fields.set(key, {
+      value: plain.value,
+      raw: plain.value,
+      quoted: false,
+      block: false,
+    });
   }
   return fields;
 }
@@ -252,7 +453,8 @@ function validateSkill(name) {
     isNonStringScalar(descriptionField.raw)
   ) {
     // The characters are the same in "[not a list]", but there the quotes make
-    // them text. Unquoted, YAML hands the runtime a list, a mapping or null.
+    // them text. Unquoted, YAML hands the runtime a list, a mapping, null, a
+    // boolean, a number or a date.
     problems.push(`skills/${name}: "description" must be a plain string`);
   } else {
     const trimmed = descriptionField.value.trim();

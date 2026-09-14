@@ -1704,6 +1704,7 @@ link_refuses_while_locked() {
 }
 
 # A lock left behind by a run that was killed must not block every later run.
+# The owner decides first; the age decides only when no pid was recorded.
 stale_lock_is_removed() {
 	local lock pid
 	mkskill "$CASE_DIR/one" alpha
@@ -1723,18 +1724,233 @@ stale_lock_is_removed() {
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 	assert_absent "$lock" "the stale lock is gone"
 
-	# A live owner, but a lock older than the stale age.
+	# No owner recorded at all, and older than the stale age.
+	mkdir "$lock"
+	touch -t 200001010000 "$lock"
+	ls_run link
+	assert_rc 0 "link over an aged lock with no pid file"
+	assert_out_has "unchanged 1" "the run did its work"
+	assert_absent "$lock" "the aged lock is gone"
+}
+
+# Age never takes a lock away from a run that is still alive: a long run is
+# still a run, and two runs must never write the assembly at once.
+aged_lock_with_live_owner_is_kept() {
+	local lock pid
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
 	mkdir "$lock"
 	sleep 60 &
 	pid=$!
 	printf '%s\n' "$pid" >"$lock/pid"
 	touch -t 200001010000 "$lock"
+
 	ls_run link
-	assert_rc 0 "link over a lock older than the stale age"
-	assert_out_has "unchanged 1" "the run did its work"
-	assert_absent "$lock" "the aged lock is gone"
+	assert_rc 1 "link over an aged lock whose owner is alive"
+	assert_out_has "holds the lock" "lock message"
+	assert_exists "$lock/pid" "the live owner keeps its lock"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+
+	# The same aged lock, once its owner is gone.
 	kill "$pid" 2>/dev/null
 	wait "$pid" 2>/dev/null
+	ls_run link
+	assert_rc 0 "link once the owner is gone"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the lock is gone"
+}
+
+# A symlink at the lock path names files this script does not own. Nothing
+# below it is read or removed, and the run stops instead of going on unlocked.
+symlinked_lock_refused() {
+	local lock foreign
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	foreign="$CASE_DIR/foreign-lock"
+	mkdir -p "$foreign"
+	printf '%s\n' "1" >"$foreign/pid"
+	ln -s "$foreign" "$lock"
+
+	ls_run link
+	assert_rc 1 "link over a symlinked lock"
+	assert_out_has "is a symlink" "refusal message"
+	assert_out_has "errors 1" "the summary counts it"
+	assert_exists "$foreign/pid" "the foreign pid file is left alone"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+
+	ls_run unlink
+	assert_rc 1 "unlink over a symlinked lock"
+	assert_out_has "is a symlink" "refusal message"
+	assert_exists "$foreign/pid" "the foreign pid file is left alone by unlink"
+
+	ls_run hook
+	assert_rc 0 "hook over a symlinked lock"
+	assert_out_empty "the hook steps aside in silence"
+	assert_exists "$foreign/pid" "the foreign pid file is left alone by the hook"
+
+	if [ ! -L "$lock" ]; then
+		fail "the symlink at the lock path was removed"
+	fi
+}
+
+# A regular file at the lock path is not a lock. mkdir can never win against
+# it, so the run must stop rather than take the silence for success.
+regular_file_at_lock_path_refused() {
+	local lock
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	printf 'not a lock\n' >"$lock"
+
+	ls_run link
+	assert_rc 1 "link with a file at the lock path"
+	assert_out_has "is not a directory" "refusal message"
+	assert_out_has "errors 1" "the summary counts it"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+	assert_file_has "$lock" "not a lock" "the file at the lock path is left alone"
+
+	ls_run unlink
+	assert_rc 1 "unlink with a file at the lock path"
+	assert_out_has "is not a directory" "refusal message"
+	assert_file_has "$lock" "not a lock" "the file is left alone by unlink"
+
+	ls_run hook
+	assert_rc 0 "hook with a file at the lock path"
+	assert_out_empty "the hook steps aside in silence"
+	assert_file_has "$lock" "not a lock" "the file is left alone by the hook"
+}
+
+# A path segment that exists and is not a directory ends the path. A '..' after
+# it must not pop through it into a directory the spelling never names.
+parent_traversal_through_file_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$CASE_DIR/parent"
+	printf 'file content\n' >"$CASE_DIR/parent/file"
+
+	ls_run --assembly "$CASE_DIR/parent/file/.." link
+	assert_rc 2 "--assembly through a file"
+	assert_out_has "not a directory" "refusal message"
+	assert_absent "$CASE_DIR/parent/alpha" "no link in the popped directory"
+	assert_absent "$CASE_DIR/parent/.skill-links" "no manifest in the popped directory"
+	assert_file_has "$CASE_DIR/parent/file" "file content" "the file is untouched"
+
+	ls_run --assembly "$CASE_DIR/parent/file/below" link
+	assert_rc 2 "--assembly below a file"
+	assert_out_has "not a directory" "refusal message"
+	assert_absent "$CASE_DIR/parent/file/below" "nothing was created below the file"
+
+	ls_run --sources "$CASE_DIR/parent/file/../sources" link
+	assert_rc 2 "--sources through a file"
+	assert_out_has "not a directory" "refusal message"
+	assert_absent "$CASE_DIR/parent/sources" "no sources file in the popped directory"
+
+	assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
+}
+
+# A manifest that is there but cannot be opened is not an empty manifest. Every
+# command that would act on the record stops before it changes anything.
+unreadable_manifest_aborts() {
+	local manifest
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	manifest="$HOME/.agents/skills/.skill-links"
+
+	mkskill "$CASE_DIR/one" beta
+	chmod 000 "$manifest"
+
+	ls_run link
+	assert_rc 1 "link with an unreadable manifest"
+	assert_out_has "could not read the manifest" "refusal message"
+	assert_absent "$HOME/.agents/skills/beta" "no link was created"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the recorded link is untouched"
+
+	ls_run check
+	assert_rc 1 "check with an unreadable manifest"
+	assert_out_has "could not read the manifest" "refusal message"
+
+	ls_run hook
+	assert_rc 0 "hook with an unreadable manifest"
+	assert_out_empty "the hook steps aside in silence"
+
+	ls_run unlink
+	assert_rc 1 "unlink with an unreadable manifest"
+	assert_out_has "could not read the manifest" "refusal message"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "unlink removed nothing"
+
+	chmod 600 "$manifest"
+	assert_file_has "$manifest" "alpha" "the manifest still records alpha"
+	assert_file_lacks "$manifest" "beta" "the manifest was never rewritten"
+}
+
+# A FIFO at the sources path would hold the first open until something writes
+# to it. The bootstrap in a clone opens that path for writing, so the run would
+# never return. The path is judged before anything opens it.
+fifo_at_sources_path_refused() {
+	local out waited blocked pid
+	# The script must sit in a clone that carries skills, so that the run
+	# reaches the bootstrap write instead of the "no sources file" notice.
+	fixture_company
+	mkdir -p "$HOME/.agents"
+	if ! mkfifo "$HOME/.agents/skill-sources" 2>/dev/null; then
+		printf '    (skipped: mkfifo is not available)\n'
+		return
+	fi
+	out="$CASE_DIR/fifo-run.out"
+
+	# A bash-native timeout: the run goes to the background and the loop below
+	# gives it five seconds. 'timeout' is not on every machine this runs on.
+	"$BASH_BIN" "$LS" link >"$out" 2>&1 &
+	pid=$!
+	waited=0
+	blocked=1
+	while [ "$waited" -lt 50 ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			blocked=0
+			break
+		fi
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	if [ "$blocked" -eq 1 ]; then
+		kill -9 "$pid" 2>/dev/null
+		wait "$pid" 2>/dev/null
+		fail "link did not return within five seconds with a FIFO at the sources path"
+		return
+	fi
+	wait "$pid" 2>/dev/null
+	LS_RC=$?
+	LS_OUT=$(cat "$out")
+	assert_rc 2 "link with a FIFO at the sources path"
+	assert_out_has "is not a regular file" "refusal message"
+	assert_absent "$HOME/.agents/skills" "nothing was created"
+
+	# A directory at the same path is refused the same way.
+	rm -f "$HOME/.agents/skill-sources"
+	mkdir "$HOME/.agents/skill-sources"
+	ls_run link
+	assert_rc 2 "link with a directory at the sources path"
+	assert_out_has "is not a regular file" "refusal message"
+	assert_absent "$HOME/.agents/skills" "nothing was created"
 }
 
 # A removal that fails is reported, keeps its manifest entry, and fails the run.
@@ -2315,6 +2531,266 @@ validator_rejects_non_string_description() {
 	fi
 }
 
+# YAML resolves an unquoted scalar to a type. A description written as a
+# boolean, a number, a null form or a timestamp reaches a runtime as that
+# type, not as text, so the validator must refuse it and ask for quotes.
+validator_rejects_typed_scalars() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for form in 'true' 'false' 'True' 'False' 'TRUE' 'FALSE' 'yes' 'No' 'ON' 'off' \
+		'null' 'Null' 'NULL' '~' \
+		'42' '-7' '+3' '3.14' '.5' '0x1F' '0o17' '1e3' '-2.5E-3' \
+		'.inf' '-.INF' '.nan' \
+		'2026-01-01' '2026-1-1' '2026-01-01T10:20:30Z'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/typed-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/typed-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/typed-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"must be a plain string"*) ;;
+		*) fail "description '$form' must be reported as a non-string: $out" ;;
+		esac
+	done
+
+	# The same characters inside quotes are text, and a block scalar is text
+	# too. Both must validate.
+	n=0
+	for form in '"true"' '"42"' "'2026-01-01'" '"~"'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/typed-ok-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/typed-ok-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/typed-ok-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "quoted description $form must validate: $out"
+		fi
+	done
+
+	mkdir -p "$CASE_DIR/typed-block/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  true\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/typed-block/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/typed-block" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a block scalar holding 'true' must validate: $out"
+	fi
+
+	# A word that only starts like a number or a boolean is an ordinary
+	# description.
+	mkdir -p "$CASE_DIR/typed-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: 42 ways to describe a skill, on or off\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/typed-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/typed-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a sentence that starts with a number must validate: $out"
+	fi
+}
+
+# A plain scalar continues on every following indented line, and YAML folds
+# those lines into the value. The validator must measure the folded value, or
+# a description far past the limit passes on its first line alone. A line at
+# column zero, such as the next "key:" line, ends the value.
+validator_folds_plain_scalar_continuation() {
+	local out rc head tail
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	head=$(printf '%550s' '' | tr ' ' 'A')
+	tail=$(printf '%550s' '' | tr ' ' 'B')
+	mkdir -p "$CASE_DIR/continued/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: %s\n' "$head"
+		printf '  %s\n' "$tail"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/continued/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/continued" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1101-character continued description must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/continued-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'description: a description that runs on to\n'
+		printf '  a second indented line\n'
+		printf 'name: noted\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/continued-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/continued-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a short continued description must validate: $out"
+	fi
+}
+
+# A quoted scalar runs to its closing quote. A "#" inside the quotes is part
+# of the text, a comment after the closing quote is not, and the escapes are
+# resolved before the value is measured.
+validator_quoted_scalar_edge_cases() {
+	local out rc head tail
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/escaped/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\n\\t"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/escaped/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/escaped" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a description of only escaped whitespace must fail: $out"
+	fi
+	case "$out" in
+	*description*) ;;
+	*) fail "the failure must name the description: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/hashed/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "  # a description that keeps its hash" # note\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/hashed/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/hashed" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted description with an inner hash must validate: $out"
+	fi
+
+	# 548 + " # " + 549 = 1100 characters inside the quotes, and a comment
+	# after them. Cutting the value at the inner hash would hide the length.
+	head=$(printf '%548s' '' | tr ' ' 'A')
+	tail=$(printf '%549s' '' | tr ' ' 'B')
+	mkdir -p "$CASE_DIR/hashed-long/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s # %s" # note\n' "$head" "$tail"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/hashed-long/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/hashed-long" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1100-character quoted description must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
+# A block scalar holds its text as written. The validator must not collapse
+# the whitespace inside a line, or a description far past the limit measures
+# as a few characters.
+validator_block_scalar_keeps_internal_spaces() {
+	local out rc spaces
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	spaces=$(printf '%1100s' '')
+	mkdir -p "$CASE_DIR/literal/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |\n'
+		printf '  A%sB\n' "$spaces"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/literal/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/literal" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1102-character literal description must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/folded-wide/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >\n'
+		printf '  A%sB\n' "$spaces"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-wide/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-wide" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1102-character folded description must fail: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/literal-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  a literal description with  inner  spaces\n'
+		printf '  and a second line\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/literal-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/literal-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a short literal description must validate: $out"
+	fi
+}
+
 # unlink removes only the fetch-<digits> stamps it writes. Any other name in
 # the stamp directory belongs to someone else, and keeps the directory too.
 unlink_leaves_foreign_file_in_stamp_dir() {
@@ -2370,6 +2846,204 @@ prune_failure_keeps_manifest_entry() {
 	assert_file_has "$HOME/.agents/skills/.skill-links" "beta" "the manifest still records beta"
 }
 
+# A run that repoints a link and then cannot write the manifest must put that
+# link back: the manifest that survives the failure still names the old target,
+# and a link the manifest does not match is a link no later run prunes.
+manifest_write_failure_restores_repointed_link() {
+	local shims before
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha links into the first source"
+	before="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$before"
+
+	# The same skill name in another directory, and only that directory is a
+	# source now: the next run repoints the link that is already there.
+	mkskill "$CASE_DIR/two" alpha
+	write_sources
+	add_source "$CASE_DIR/two"
+
+	shims="$CASE_DIR/shims"
+	make_breaking_mktemp "$shims"
+	use_shims "$shims"
+	LS_TEST_UNWRITABLE_TMP=1
+	export LS_TEST_UNWRITABLE_TMP
+	ls_run link
+	unset LS_TEST_UNWRITABLE_TMP
+	drop_shims
+	assert_rc 1 "link with an unwritable temporary file"
+	assert_out_has "could not write the manifest" "the failure is reported"
+	assert_out_has "were restored to their previous target" "the restore is reported"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the repointed link carries its old target again"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
+}
+
+# git refuses to overwrite an untracked file and overwrites an ignored one
+# without a word. A commit that starts tracking an ignored path must not be
+# fast-forwarded over the user's copy.
+hook_refuses_update_over_ignored_file() {
+	local before after
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	printf 'notes.txt\n' >"$COMPANY/.git/info/exclude"
+	printf 'USER DATA\n' >"$COMPANY/notes.txt"
+	printf 'FROM UPSTREAM\n' >"$SEED/notes.txt"
+	gitc "$SEED" add -A
+	gitc "$SEED" commit -q -m "start tracking notes.txt"
+	git -C "$SEED" push -q origin main
+	before=$(head_of "$COMPANY")
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_has "did not update $COMPANY" "the skip is reported"
+	assert_out_has "notes.txt" "the notice names the file"
+	after=$(head_of "$COMPANY")
+	if [ "$before" != "$after" ]; then
+		fail "a clone that would lose an ignored file must not be fast-forwarded"
+	fi
+	assert_file_has "$COMPANY/notes.txt" "USER DATA" "the ignored file keeps its content"
+}
+
+# A stamp carries no content, but truncating one writes through every name its
+# inode has. A file hard-linked to the stamp path must survive a fetch.
+hardlinked_stamp_not_truncated() {
+	local stamp notes
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	ls_run check
+	assert_rc 0 "first check"
+	stamp=$(find "$HOME/.agents/skills/.skill-links.d" -type f -name 'fetch-*' 2>/dev/null | head -n 1)
+	if [ -z "$stamp" ]; then
+		fail "no fetch stamp was written"
+		return
+	fi
+	notes="$CASE_DIR/notes.txt"
+	printf 'KEEP ME\n' >"$notes"
+	rm -f "$stamp"
+	ln "$notes" "$stamp"
+	ls_run check
+	assert_rc 0 "second check"
+	assert_out_has "it was not written" "the refusal is reported"
+	assert_file_has "$notes" "KEEP ME" "the hard-linked file keeps its content"
+	assert_file_has "$stamp" "KEEP ME" "the stamp path was not truncated"
+}
+
+# The hook must end the session start it runs in, whatever it started. A local
+# git hook that outlasts the deadline is stopped with everything below it.
+hook_bounded_by_deadline() {
+	local started elapsed childpid
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	# The merge below runs this hook, which records the pid of the sleep it
+	# starts so the case can see whether anything survived the deadline.
+	# The single-quoted lines are hook source, not expansions.
+	# shellcheck disable=SC2016
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'sleep 40 &' \
+		"printf '%s\\n' \"\$!\" >\"$CASE_DIR/sleep.pid\"" \
+		'wait' >"$COMPANY/.git/hooks/post-merge"
+	chmod +x "$COMPANY/.git/hooks/post-merge"
+	started=$(date +%s)
+	ls_run hook
+	elapsed=$(($(date +%s) - started))
+	assert_rc 0 "hook"
+	assert_out_has "hook timed out after 25s" "the deadline is reported"
+	if [ "$elapsed" -gt 30 ]; then
+		fail "the hook took ${elapsed}s, expected it to return inside 30s"
+	fi
+	childpid=$(cat "$CASE_DIR/sleep.pid" 2>/dev/null || printf '')
+	if [ -z "$childpid" ]; then
+		fail "the git hook did not record the pid of its sleep"
+	elif kill -0 "$childpid" 2>/dev/null; then
+		fail "the sleep the hook started outlived the deadline"
+		kill -9 "$childpid" 2>/dev/null || true
+	fi
+}
+
+# A path the script cannot use fails every other command with exit 2 and ends
+# the session hook with one line and exit 0.
+hook_exits_zero_on_init_failure() {
+	local lines
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	SKILLS_ASSEMBLY_DIR=/
+	export SKILLS_ASSEMBLY_DIR
+	ls_run hook
+	assert_rc 0 "hook with a root assembly directory"
+	assert_out_has "[link-skills]" "hook notice"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one line for the root assembly, got $lines: $LS_OUT"
+	fi
+	ls_run link
+	assert_rc 2 "link keeps exit 2 for the same refusal"
+	unset SKILLS_ASSEMBLY_DIR
+
+	LS_OUT=$(HOME="" "$BASH_BIN" "$LS" hook 2>&1)
+	LS_RC=$?
+	assert_rc 0 "hook with an empty HOME"
+	assert_out_has "[link-skills]" "hook notice"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one line for the empty HOME, got $lines: $LS_OUT"
+	fi
+}
+
+# A command that runs another script whose name merely ends with this script
+# name belongs to another tool. It is kept, and this hook is added beside it.
+install_hooks_ignores_similar_named_script() {
+	local custom
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	custom="$CASE_DIR/custom-link-skills.sh"
+	printf '#!/bin/sh\n' >"$custom"
+	chmod +x "$custom"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"bash $custom hook\"" \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$HOME/.claude/settings.json"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	assert_out_has "added the SessionStart hook" "this hook is added"
+	assert_file_has "$HOME/.claude/settings.json" "$custom hook" "the unrelated hook is kept"
+	assert_file_has "$HOME/.claude/settings.json" "$LS hook" "this hook is there"
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -2423,6 +3097,10 @@ main() {
 	run_case hook_auto_update_when_clean
 	run_case hook_refused_when_dirty
 	run_case hook_refused_off_default_branch
+	run_case hook_refuses_update_over_ignored_file
+	run_case hook_bounded_by_deadline
+	run_case hook_exits_zero_on_init_failure
+	run_case hardlinked_stamp_not_truncated
 	run_case install_hooks_missing_file
 	run_case install_hooks_existing_groups_preserved
 	run_case install_hooks_idempotent
@@ -2452,12 +3130,19 @@ main() {
 	run_case check_reports_orphan_link_as_error
 	run_case symlink_then_parent_resolves_physically
 	run_case manifest_write_failure_keeps_old_manifest
+	run_case manifest_write_failure_restores_repointed_link
 	run_case unlink_refuses_symlinked_manifest
 	run_case unlink_leaves_foreign_file_in_stamp_dir
 	run_case prune_failure_keeps_manifest_entry
 	run_case directory_at_manifest_path_refused
 	run_case link_refuses_while_locked
 	run_case stale_lock_is_removed
+	run_case aged_lock_with_live_owner_is_kept
+	run_case symlinked_lock_refused
+	run_case regular_file_at_lock_path_refused
+	run_case parent_traversal_through_file_refused
+	run_case unreadable_manifest_aborts
+	run_case fifo_at_sources_path_refused
 	run_case unlink_reports_deletion_failure
 	run_case interval_with_leading_zero_accepted
 	run_case missing_runtime_home_reported
@@ -2475,6 +3160,7 @@ main() {
 	run_case install_hooks_backups_never_overwritten
 	run_case install_hooks_leaves_minified_file_unchanged
 	run_case install_hooks_replaces_dead_script_path
+	run_case install_hooks_ignores_similar_named_script
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
 	run_case validator_ignores_finder_metadata
@@ -2482,6 +3168,10 @@ main() {
 	run_case validator_strips_inline_comment
 	run_case validator_block_header_with_comment
 	run_case validator_rejects_non_string_description
+	run_case validator_rejects_typed_scalars
+	run_case validator_folds_plain_scalar_continuation
+	run_case validator_quoted_scalar_edge_cases
+	run_case validator_block_scalar_keeps_internal_spaces
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"

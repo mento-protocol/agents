@@ -17,6 +17,11 @@ PROG="link-skills"
 FETCH_TIMEOUT_SECONDS=15
 HOOK_FETCH_BUDGET_SECONDS=20
 HOOK_TIMEOUT_SECONDS=60
+# The whole hook, not just its fetches: git status, the merge, any local git
+# hook the merge runs, and the candidate scan all happen inside this budget.
+# It stays well below the timeout the installed hook entry carries, so a
+# session start ends on this script's own terms and with its own message.
+HOOK_DEADLINE_SECONDS=25
 
 # A stalled HTTP transfer must give up inside the fetch timeout, so that the
 # bash-native timeout below is a second line of defence, not the only one.
@@ -35,12 +40,18 @@ MANIFEST=""
 LOCK_DIR=""
 SCRIPT_PATH=""
 FETCH_INTERVAL_HOURS=6
+# 1 while the session hook is the command being run. A session start must end
+# well whatever it finds, so every refusal below reports one line and exits 0.
+HOOK_MODE=0
 
 # Serialisation of the runs that write the assembly. A run waits this long for a
 # lock another run holds, and treats a lock older than this as left behind.
 LOCK_WAIT_SECONDS=10
 LOCK_STALE_MINUTES=2
 LOCK_HELD=0
+# What is wrong with the lock path, set when take_lock returns 2. The caller
+# decides whether to print it: the session hook steps aside without a word.
+LOCK_PROBLEM=""
 
 # -1 until the probe below has run: 1 on a filesystem that treats 'Foo' and
 # 'foo' as one name, 0 otherwise.
@@ -58,6 +69,7 @@ MAN_COUNT=0
 OUT_COUNT=0
 DUP_COUNT=0
 NEW_COUNT=0
+REPOINT_COUNT=0
 
 # Parallel arrays. bash 3.2 has no associative arrays, so every table is a set
 # of indexed arrays plus a count, and every loop is an index loop.
@@ -76,6 +88,8 @@ MAN_TARGET=()
 OUT_NAME=()
 OUT_TARGET=()
 NEW_NAME=()
+REPOINT_NAME=()
+REPOINT_OLD=()
 
 # ---------------------------------------------------------------- output ----
 
@@ -97,7 +111,14 @@ warn() {
 	fi
 }
 
+# A refusal that stops the run. The session hook is the exception: a session
+# must start whatever this script finds, so in hook mode the same refusal is
+# one '[link-skills]' line and exit 0. Every other command keeps exit 2.
 die() {
+	if [ "$HOOK_MODE" -eq 1 ]; then
+		hook_say "$*"
+		exit 0
+	fi
 	printf '%s: %s\n' "$PROG" "$*" >&2
 	exit 2
 }
@@ -122,10 +143,14 @@ usage() {
 		'                  runs, and writes a fetch-* stamp in the' \
 		'                  .skill-links.d directory inside the assembly.' \
 		'  hook            SessionStart hook mode. Silent when current, never fails.' \
+		'                  Bounded by 25 seconds of wall clock, everything it' \
+		'                  starts included.' \
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
 		'                  A settings file that already runs the hook is left' \
-		'                  byte for byte as it is. A hook entry whose script' \
-		'                  path no longer exists is repointed at this script.' \
+		'                  byte for byte as it is. An entry that runs a' \
+		'                  link-skills.sh whose path no longer exists is' \
+		'                  repointed at this script; an entry that runs another' \
+		'                  script is left alone.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
 		'  help            Print this text.' \
 		'' \
@@ -144,8 +169,9 @@ usage() {
 		'Exit codes:' \
 		'  0  nothing to report' \
 		'  1  at least one problem was reported' \
-		'  2  wrong usage, or no source to work from: no sources file, or a' \
-		'     sources file that lists none' \
+		'  2  wrong usage, or no source to work from: no sources file, a' \
+		'     sources file that is not a regular file or lists no source, or' \
+		'     a path whose components are not all directories' \
 		'' \
 		'Sources file format, one entry per line. Each path names the directory' \
 		'whose immediate children are skill directories holding a SKILL.md:' \
@@ -271,9 +297,16 @@ normalize_lexical() {
 # $HOME/new/..' would have 'new' created under $HOME while the links landed in
 # $HOME itself. A '..' at the root stays at the root, so no spelling can climb
 # above /.
+#
+# A segment that exists and is not a directory ends the path: a name below it
+# can never resolve, and a '..' after it must not pop through it. Popping would
+# answer with that file's parent directory, which is a directory the spelling
+# never names and the run would then write into. Such a path is refused, and
+# the caller stops the run.
 canonical_path() {
-	local p seg cur rest next phys had_noglob oldifs
+	local p seg cur rest next phys had_noglob oldifs nondir
 	p=$1
+	nondir=0
 	if [ -z "$p" ]; then
 		printf '\n'
 		return 0
@@ -305,6 +338,10 @@ canonical_path() {
 		esac
 		# Past the last segment that exists: text alone from here on.
 		if [ -n "$rest" ]; then
+			if [ "$nondir" -eq 1 ]; then
+				err "not a directory: ${cur%/}$rest"
+				return 1
+			fi
 			if [ "$seg" = ".." ]; then
 				rest=${rest%/*}
 			else
@@ -320,6 +357,11 @@ canonical_path() {
 		if [ -d "$next" ] && phys=$(cd "$next" 2>/dev/null && pwd -P); then
 			cur=$phys
 			continue
+		fi
+		# A regular file, a FIFO, a socket, or a symlink to one of those. The
+		# path may end here; it may not continue through it.
+		if [ -e "$next" ]; then
+			nondir=1
 		fi
 		rest="/$seg"
 	done
@@ -470,6 +512,20 @@ names_equal() {
 
 trim() {
 	printf '%s' "$1" | sed -e 's/^[[:space:]][[:space:]]*//' -e 's/[[:space:]][[:space:]]*$//'
+}
+
+# The sources file must be a regular file, or nothing at all. A FIFO would hold
+# the first open until something else writes to it, which is forever in a
+# session hook. A directory, a socket, and a symlink to either hold no list of
+# sources. The test below judges the path without opening it.
+sources_path_usable() {
+	if [ -f "$SOURCES_FILE" ]; then
+		return 0
+	fi
+	if [ -e "$SOURCES_FILE" ] || [ -L "$SOURCES_FILE" ]; then
+		return 1
+	fi
+	return 0
 }
 
 load_sources() {
@@ -732,11 +788,18 @@ cand_index_of() {
 
 # -------------------------------------------------------------- manifest ----
 
+# Read the recorded links. Status 1 says the manifest is there but could not be
+# opened, which is not the same as an empty record: the caller must abort the
+# command rather than act on a list it could not read. The message is left to
+# the caller, so that the session hook can step aside without a word.
 load_manifest() {
 	local n t
 	MAN_COUNT=0
 	if [ ! -f "$MANIFEST" ]; then
 		return 0
+	fi
+	if ! (: <"$MANIFEST") 2>/dev/null; then
+		return 1
 	fi
 	n=""
 	t=""
@@ -860,6 +923,15 @@ record_new_link() {
 	NEW_COUNT=$((NEW_COUNT + 1))
 }
 
+# A link that stood before this run and that this run pointed somewhere else,
+# with the target it carried before. The old manifest still names that target,
+# so a run whose manifest write fails must put it back.
+record_repointed_link() {
+	REPOINT_NAME[REPOINT_COUNT]="$1"
+	REPOINT_OLD[REPOINT_COUNT]="$2"
+	REPOINT_COUNT=$((REPOINT_COUNT + 1))
+}
+
 # Undo this run's own links. The manifest is the only record of what this
 # script may remove later, so a link no manifest covers is a link no later run
 # could prune. When the manifest cannot be written, the links this run created
@@ -888,6 +960,40 @@ rollback_new_links() {
 	return 0
 }
 
+# Undo this run's own repointing. The manifest that survives a failed write
+# names the target each of these links carried before, so the link must carry
+# it again: a link and a manifest that disagree is a link no later run prunes.
+restore_repointed_links() {
+	local i name old entry restored
+	restored=0
+	i=0
+	while [ "$i" -lt "$REPOINT_COUNT" ]; do
+		name=${REPOINT_NAME[$i]}
+		old=${REPOINT_OLD[$i]}
+		i=$((i + 1))
+		entry="$ASSEMBLY_DIR/$name"
+		# Only a link is replaced. Anything else there now is not this run's.
+		if [ -e "$entry" ] && [ ! -L "$entry" ]; then
+			err "could not restore $entry to $old: something else is there now"
+			continue
+		fi
+		if [ -L "$entry" ] && ! remove_link "$entry"; then
+			err "could not restore $entry to $old"
+			continue
+		fi
+		if ! ln -s "$old" "$entry"; then
+			err "could not restore $entry to $old; $name is now unlinked"
+			continue
+		fi
+		restored=$((restored + 1))
+	done
+	REPOINT_COUNT=0
+	if [ "$restored" -gt 0 ]; then
+		err "the manifest was not written, so the $restored link(s) this run repointed were restored to their previous target"
+	fi
+	return 0
+}
+
 output_has() {
 	local i
 	i=0
@@ -906,38 +1012,45 @@ output_has() {
 # on every filesystem in use here, so two runs that start at the same moment
 # cannot both believe they own it.
 
+# The lock path must be a directory this script can make and remove, or
+# nothing at all. A symlink there would send every read and every removal below
+# it somewhere this script does not own, and a regular file, a FIFO or a socket
+# there is not a lock at all: mkdir can never succeed against it, so a run must
+# stop instead of going on unlocked. The reason is recorded, not printed: the
+# session hook steps aside in silence, the other commands report it.
+lock_path_usable() {
+	LOCK_PROBLEM=""
+	# -L first: every other test below follows a symlink.
+	if [ -L "$LOCK_DIR" ]; then
+		LOCK_PROBLEM="the lock path $LOCK_DIR is a symlink; move it aside, then run the command again. Nothing was changed"
+		return 1
+	fi
+	if [ -e "$LOCK_DIR" ] && [ ! -d "$LOCK_DIR" ]; then
+		LOCK_PROBLEM="the lock path $LOCK_DIR is not a directory; move it aside, then run the command again. Nothing was changed"
+		return 1
+	fi
+	return 0
+}
+
 release_lock() {
+	local pid
 	if [ "$LOCK_HELD" -ne 1 ] || [ -z "$LOCK_DIR" ]; then
 		return 0
 	fi
 	LOCK_HELD=0
-	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
-	rmdir "$LOCK_DIR" 2>/dev/null || true
-	return 0
-}
-
-# A lock whose owner is gone, and a lock older than LOCK_STALE_MINUTES, are both
-# left over from a run that was killed. Either one is removed, so one interrupted
-# run never blocks every later one. A lock with no pid yet is a run that has just
-# taken it, and it is left alone until it ages out.
-clear_stale_lock() {
-	local pid
-	if [ ! -d "$LOCK_DIR" ]; then
-		return 0
-	fi
-	if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
-		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
-		rmdir "$LOCK_DIR" 2>/dev/null || true
+	# Whatever sits there now, it is not the directory this run made.
+	if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ]; then
 		return 0
 	fi
 	pid=""
 	if [ -f "$LOCK_DIR/pid" ]; then
 		pid=$(head -n 1 "$LOCK_DIR/pid" 2>/dev/null | tr -dc '0-9')
 	fi
-	if [ -z "$pid" ]; then
-		return 0
-	fi
-	if kill -0 "$pid" 2>/dev/null; then
+	# The lock this run took can have been cleared as stale and taken again by
+	# another run while this one worked. Removing it then would strand that
+	# run. A lock with no pid recorded is this run's own: the pid write is the
+	# only thing that puts one there.
+	if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
 		return 0
 	fi
 	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
@@ -945,10 +1058,46 @@ clear_stale_lock() {
 	return 0
 }
 
+# A lock left over from a run that was killed must not block every later run.
+# The owner decides first, the age only when there is no owner to ask:
+#
+#   pid alive            keep the lock, however old it is. A long run is still
+#                        a run, and taking its lock away would let two runs
+#                        write the assembly at once.
+#   pid dead or unreadable  remove the lock. Its owner cannot come back.
+#   no pid file          a run that has just taken the lock, or one that died
+#                        before writing its pid. Only age separates the two, so
+#                        a lock older than LOCK_STALE_MINUTES is removed.
+#
+# Nothing below the lock path is read or removed unless that path is a real
+# directory: a symlink there names someone else's files.
+clear_stale_lock() {
+	local pid
+	if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ]; then
+		return 0
+	fi
+	if [ -f "$LOCK_DIR/pid" ]; then
+		pid=$(head -n 1 "$LOCK_DIR/pid" 2>/dev/null | tr -dc '0-9')
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			return 0
+		fi
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		return 0
+	fi
+	if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+	fi
+	return 0
+}
+
 # Take the lock. 'wait' retries for LOCK_WAIT_SECONDS and then fails; 'try'
-# fails at once. A mkdir that fails while the lock directory does not exist is
-# not contention but an assembly this run cannot write, which the work itself
+# fails at once. A mkdir that fails while the lock path holds nothing is not
+# contention but an assembly this run cannot write, which the work itself
 # reports in its own words, so the run goes on unlocked.
+#
+# Status: 0 the lock is held, 1 another run holds it, 2 the lock path is not
+# usable and LOCK_PROBLEM says why.
 take_lock() {
 	local mode waited limit
 	mode=$1
@@ -962,10 +1111,18 @@ take_lock() {
 	limit=$((LOCK_WAIT_SECONDS * 5))
 	while [ "$waited" -le "$limit" ]; do
 		waited=$((waited + 1))
+		if ! lock_path_usable; then
+			return 2
+		fi
 		if mkdir "$LOCK_DIR" 2>/dev/null; then
 			LOCK_HELD=1
 			printf '%s\n' "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
 			return 0
+		fi
+		# mkdir lost to something. A symlink or a file that appeared between
+		# the two tests is refused here rather than read as contention.
+		if ! lock_path_usable; then
+			return 2
 		fi
 		if [ ! -d "$LOCK_DIR" ]; then
 			return 0
@@ -1013,6 +1170,9 @@ link_candidates() {
 					record_output "$name" "$target"
 					continue
 				fi
+				# Recorded before the link changes, so a failed manifest
+				# write can put the old target back.
+				record_repointed_link "$name" "$cur"
 				rm -f "$entry"
 				if ! ln -s "$target" "$entry"; then
 					err "could not link $entry -> $target; $name is now unlinked"
@@ -1163,6 +1323,12 @@ ensure_runtime_links() {
 # where the script lives and no sources file exists yet.
 ensure_sources_file() {
 	local dir parent
+	# Checked in main as well, before any command runs. It is checked again
+	# here because the write below would otherwise open whatever now sits at
+	# that path.
+	if ! sources_path_usable; then
+		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
+	fi
 	if [ -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
@@ -1186,12 +1352,19 @@ ensure_sources_file() {
 }
 
 run_link() {
+	local rc
 	ensure_sources_file
 	if ! mkdir -p "$ASSEMBLY_DIR"; then
 		err "could not create the assembly directory $ASSEMBLY_DIR"
 		return 1
 	fi
-	if ! take_lock wait; then
+	rc=0
+	take_lock wait || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		err "$LOCK_PROBLEM"
+		return 1
+	fi
+	if [ "$rc" -ne 0 ]; then
 		err "another $PROG run holds the lock $LOCK_DIR; nothing was changed. Wait for it to finish, then run '$PROG link' again"
 		return 1
 	fi
@@ -1201,7 +1374,13 @@ run_link() {
 		return 1
 	fi
 	detect_case_insensitive
-	load_manifest
+	# The manifest is the only record of what this run may remove. A run that
+	# cannot read it must change nothing at all, or it would prune links it can
+	# no longer account for.
+	if ! load_manifest; then
+		err "could not read the manifest $MANIFEST; nothing was changed"
+		return 1
+	fi
 	load_sources
 	# A sources file that names no source says nothing about what belongs in the
 	# assembly. Removing every link because a file was truncated would be the
@@ -1215,11 +1394,14 @@ run_link() {
 	report_sources_used
 	OUT_COUNT=0
 	NEW_COUNT=0
+	REPOINT_COUNT=0
 	link_candidates
 	prune_manifest
 	# The run is one transaction: either the manifest records every link this
-	# run created, or those links go away again.
+	# run created and every link it repointed, or the assembly goes back to
+	# what the manifest on disk still describes.
 	if ! write_manifest; then
+		restore_repointed_links
 		rollback_new_links
 		return 1
 	fi
@@ -1288,6 +1470,66 @@ git_upstream() {
 	return 1
 }
 
+# git refuses to overwrite an untracked file, but it overwrites an ignored one
+# without a word. A clone that keeps local notes, a local settings file or a
+# build directory under .gitignore would lose them the moment the upstream
+# commit starts tracking that path. --no-overwrite-ignore makes git refuse
+# too, on the versions that have it.
+#
+# 'git merge -h' prints its options and exits; 'git merge --help' opens the
+# manual page, which must never happen inside a session start.
+git_merge_keeps_ignored() {
+	git -C "$1" merge -h 2>&1 | grep -q -- '--no-overwrite-ignore'
+}
+
+# Every path the work tree ignores, one per line. awk drops the '!! ' status
+# prefix: bash 3.2 misparses a quoted prefix in a parameter expansion inside a
+# command substitution, and this list is read inside one.
+ignored_paths() {
+	git -C "$1" status --porcelain --ignored 2>/dev/null |
+		awk '/^!! / { print substr($0, 4) }'
+}
+
+# The first ignored path in the work tree that the upstream commit tracks, or
+# nothing. A 'path/' entry names a whole ignored directory, so any tracked
+# path below it counts; every other entry is one file and must match exactly.
+first_ignored_path_taken_over() {
+	local root up tracked hit
+	root=$1
+	up=$2
+	tracked=$(git -C "$root" ls-tree -r --name-only "$up" 2>/dev/null) || return 1
+	if [ -z "$tracked" ]; then
+		return 1
+	fi
+	# The loop runs in the subshell of a pipeline, so the name it finds leaves
+	# it as output, not as a variable.
+	hit=$(ignored_paths "$root" |
+		while IFS= read -r path; do
+			if [ -z "$path" ]; then
+				continue
+			fi
+			# awk decides the directory case too. bash 3.2 misparses a case
+			# statement inside a command substitution, and this loop is one.
+			if printf '%s\n' "$tracked" | awk -v p="$path" '
+				BEGIN { dir = (substr(p, length(p)) == "/") }
+				{
+					if (dir) {
+						if (index($0, p) == 1) { found = 1; exit }
+					} else if ($0 == p) { found = 1; exit }
+				}
+				END { exit found ? 0 : 1 }
+			'; then
+				printf '%s\n' "$path"
+				break
+			fi
+		done)
+	if [ -n "$hit" ]; then
+		printf '%s\n' "$hit"
+		return 0
+	fi
+	return 1
+}
+
 git_behind_count() {
 	local root up
 	root=$1
@@ -1324,15 +1566,55 @@ stamp_file() {
 	printf '%s/fetch-%s\n' "$STAMP_DIR" "$h"
 }
 
+# Hard links to a path, as a number. BSD stat and GNU stat spell the field
+# differently, so the one that answers decides. An unreadable path answers 0.
+link_count() {
+	local n
+	n=$(stat -f %l "$1" 2>/dev/null) || n=""
+	if [ -z "$n" ]; then
+		n=$(stat -c %h "$1" 2>/dev/null) || n=""
+	fi
+	case "$n" in
+	'' | *[!0-9]*) n=0 ;;
+	esac
+	printf '%s\n' "$n"
+}
+
+# A stamp carries no content: only its name and its modification time matter.
+# It is still never truncated in place. Truncating writes through every name
+# the inode has, so a stamp someone hard-linked their own file to would lose
+# that file's content. A fresh file is written and moved over the stamp path
+# instead, which replaces the name and leaves any other name alone, and a
+# stamp that already has more than one name is left exactly as it is.
 write_stamp() {
+	local stamp tmp n
+	stamp=$1
 	if ! ensure_stamp_dir; then
 		return 0
 	fi
-	if [ -L "$1" ]; then
-		warn "the fetch stamp $1 is a symlink; it was not written"
+	if [ -L "$stamp" ]; then
+		warn "the fetch stamp $stamp is a symlink; it was not written"
 		return 0
 	fi
-	: >"$1" 2>/dev/null || true
+	if [ -e "$stamp" ] && [ ! -f "$stamp" ]; then
+		warn "the fetch stamp $stamp is not a regular file; it was not written"
+		return 0
+	fi
+	if [ -f "$stamp" ]; then
+		n=$(link_count "$stamp")
+		if [ "$n" -gt 1 ]; then
+			warn "the fetch stamp $stamp has $n names; it was not written"
+			return 0
+		fi
+	fi
+	if ! tmp=$(mktemp "$STAMP_DIR/fetch-tmp.XXXXXX" 2>/dev/null); then
+		warn "could not write the fetch stamp $stamp"
+		return 0
+	fi
+	if ! mv -f "$tmp" "$stamp" 2>/dev/null; then
+		rm -f "$tmp" 2>/dev/null || true
+		warn "could not write the fetch stamp $stamp"
+	fi
 	return 0
 }
 
@@ -1479,7 +1761,12 @@ cmd_check() {
 		return 1
 	fi
 	detect_case_insensitive
-	load_manifest
+	# A manifest that cannot be read is reported, and nothing is reported from
+	# it: every name in it would look unrecorded.
+	if ! load_manifest; then
+		err "could not read the manifest $MANIFEST"
+		return 1
+	fi
 	load_sources
 	if [ "$SRC_COUNT" -eq 0 ]; then
 		die "no source is listed in $SOURCES_FILE; add one skills directory per line"
@@ -1599,7 +1886,7 @@ cmd_check() {
 # ------------------------------------------------------------------ hook ----
 
 cmd_hook() {
-	local i src flag root branch behind def note_fetch changed missing name entry rem up
+	local i src flag root branch behind def note_fetch changed missing name entry rem up taken merge_ok
 
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
@@ -1612,14 +1899,20 @@ cmd_hook() {
 		return 0
 	fi
 	# The hook links and prunes below, so it needs the same record every other
-	# command needs. A symlink or a directory at that path is refused here, and
-	# main turns the failure into a session that still starts.
-	if ! manifest_path_usable; then
-		return 1
+	# command needs. A symlink or a directory at that path is refused here in
+	# the hook's own voice: one line, and a session that still starts.
+	if ! manifest_path_usable 2>/dev/null; then
+		ERRORS=0
+		hook_say "the manifest $MANIFEST is not a regular file this script can replace; run: bash $(shell_quote "$SCRIPT_PATH") link"
+		return 0
 	fi
 	SECONDS=0
 	detect_case_insensitive
-	load_manifest
+	# A session start never fails and never shouts. A manifest it cannot read
+	# is left to the next 'link' run, which says so in its own words.
+	if ! load_manifest; then
+		return 0
+	fi
 	load_sources
 	if [ "$SRC_COUNT" -eq 0 ]; then
 		return 0
@@ -1662,10 +1955,29 @@ cmd_hook() {
 		if [ "$flag" = "auto-update" ] && [ "$branch" = "$def" ] && [ "$note_fetch" != "failed" ] && ! git_is_dirty "$root"; then
 			up=""
 			up=$(git_upstream "$root") || up=""
-			if [ -n "$up" ] && git -C "$root" merge --ff-only --quiet "$up" >/dev/null 2>&1; then
-				hook_say "updated $root ($behind commit(s) fast-forwarded on $branch)"
-				changed=1
-				continue
+			taken=""
+			if [ -n "$up" ]; then
+				taken=$(first_ignored_path_taken_over "$root" "$up") || taken=""
+			fi
+			if [ -n "$taken" ]; then
+				# Named, not just refused: the file is the user's own, and
+				# only the user can decide what to do with it.
+				hook_say "did not update $root: the update would overwrite the ignored file $taken; move that file aside first"
+				up=""
+			fi
+			if [ -n "$up" ]; then
+				if git_merge_keeps_ignored "$root"; then
+					merge_ok=0
+					git -C "$root" merge --ff-only --no-overwrite-ignore --quiet "$up" >/dev/null 2>&1 || merge_ok=1
+				else
+					merge_ok=0
+					git -C "$root" merge --ff-only --quiet "$up" >/dev/null 2>&1 || merge_ok=1
+				fi
+				if [ "$merge_ok" -eq 0 ]; then
+					hook_say "updated $root ($behind commit(s) fast-forwarded on $branch)"
+					changed=1
+					continue
+				fi
 			fi
 		fi
 		hook_say "$root is $behind commit(s) behind; run: cd $(shell_quote "$root") && git pull --ff-only && bash $(shell_quote "$SCRIPT_PATH") link"
@@ -1676,14 +1988,18 @@ cmd_hook() {
 		LINKED=0
 		UNCHANGED=0
 		PRUNED=0
-		load_manifest
+		if ! load_manifest; then
+			return 0
+		fi
 		collect_candidates
 		mkdir -p "$ASSEMBLY_DIR" 2>/dev/null || true
 		OUT_COUNT=0
 		NEW_COUNT=0
+		REPOINT_COUNT=0
 		link_candidates
 		prune_manifest
 		if ! write_manifest; then
+			restore_repointed_links
 			rollback_new_links
 		fi
 		ensure_runtime_links
@@ -1710,6 +2026,62 @@ cmd_hook() {
 	if [ "$missing" -gt 0 ]; then
 		hook_say "$missing skill(s) are not linked; run: bash $(shell_quote "$SCRIPT_PATH") link"
 	fi
+	return 0
+}
+
+# Signal a background job and everything it started. In monitor mode the job
+# leads a process group of its own, so the group takes the signal: git, a git
+# hook the merge runs, and whatever those started in turn. A host that refuses
+# the process group leaves the job itself as the only thing to signal.
+kill_job() {
+	local sig pid
+	sig=$1
+	pid=$2
+	if kill -"$sig" -- "-$pid" 2>/dev/null; then
+		return 0
+	fi
+	kill -"$sig" "$pid" 2>/dev/null || true
+	return 0
+}
+
+# The session hook, bounded by HOOK_DEADLINE_SECONDS of wall clock. The fetch
+# budget covers the fetches only; a slow git status, a merge, a local git hook
+# the merge runs and the scan afterwards all count against this one. The body
+# runs as one background job, in a process group of its own where the host
+# allows it, so nothing it started outlives the deadline. bash 3.2 gives a
+# background job its own process group only in monitor mode, and macOS has no
+# setsid(1) to do it instead.
+#
+# The session always starts: an expired deadline prints one line and exits 0.
+run_hook_bounded() {
+	local pid waited limit
+	set -m 2>/dev/null || true
+	# A host that forbids setpgid makes bash report it, and that report belongs
+	# to no one. It is dropped, and the body keeps the real stderr through
+	# fd 9.
+	exec 9>&2
+	{ (
+		exec 2>&9
+		cmd_hook || true
+	) & } 2>/dev/null
+	pid=$!
+	exec 9>&-
+	set +m 2>/dev/null || true
+	waited=0
+	limit=$((HOOK_DEADLINE_SECONDS * 5))
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ "$waited" -ge "$limit" ]; then
+			kill_job TERM "$pid"
+			sleep 1
+			kill_job KILL "$pid"
+			wait "$pid" 2>/dev/null || true
+			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run 'bash $(shell_quote "$SCRIPT_PATH") check'"
+			return 0
+		fi
+		sleep 0.2
+		waited=$((waited + 1))
+	done
+	wait "$pid" 2>/dev/null || true
 	return 0
 }
 
@@ -1784,7 +2156,10 @@ def script_of(value):
         parts = text.split()
     if len(parts) >= 2 and parts[-1] == "hook":
         token = parts[-2].strip(chr(34) + chr(39))
-        if token.endswith(marker):
+        # The file name must be this script name, not merely end with it:
+        # "custom-link-skills.sh hook" belongs to another tool, and rewriting
+        # it or counting it as ours would break that session start.
+        if os.path.basename(token) == marker:
             return token
     return None
 
@@ -1981,8 +2356,14 @@ cmd_install_hooks() {
 # ---------------------------------------------------------------- unlink ----
 
 cmd_unlink() {
-	local i name target entry cur stamp kept
-	if ! take_lock wait; then
+	local i name target entry cur stamp kept rc
+	rc=0
+	take_lock wait || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		err "$LOCK_PROBLEM"
+		return 1
+	fi
+	if [ "$rc" -ne 0 ]; then
 		err "another $PROG run holds the lock $LOCK_DIR; nothing was removed. Wait for it to finish, then run '$PROG unlink' again"
 		return 1
 	fi
@@ -1993,7 +2374,12 @@ cmd_unlink() {
 		return 1
 	fi
 	detect_case_insensitive
-	load_manifest
+	# The manifest is the list of what may be removed. A run that cannot read
+	# it removes nothing.
+	if ! load_manifest; then
+		err "could not read the manifest $MANIFEST; nothing was removed"
+		return 1
+	fi
 	kept=0
 	OUT_COUNT=0
 	i=0
@@ -2154,6 +2540,13 @@ main() {
 		cmd="link"
 	fi
 
+	# Set before the first path is derived below: every refusal from here on is
+	# one line and exit 0 when the session hook is what runs, so a session
+	# start never fails on a path this script cannot use.
+	if [ "$cmd" = "hook" ]; then
+		HOOK_MODE=1
+	fi
+
 	# The help text needs no paths, so it prints before anything is derived from
 	# HOME and works in an environment that has none.
 	if [ "$cmd" = "help" ]; then
@@ -2200,10 +2593,17 @@ main() {
 	case "$(normalize_lexical "$SOURCES_FILE")" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
-	SOURCES_FILE=$(canonical_path "$SOURCES_FILE")
+	if ! SOURCES_FILE=$(canonical_path "$SOURCES_FILE"); then
+		die "the sources file path cannot be resolved"
+	fi
 	case "$SOURCES_FILE" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
+	# Judged once, here, for every command: the readers below all reach this
+	# path, and the bootstrap in ensure_sources_file writes to it.
+	if ! sources_path_usable; then
+		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
+	fi
 
 	if [ "$ASSEMBLY_SET" -eq 1 ]; then
 		case "$ASSEMBLY_OPT" in
@@ -2220,7 +2620,9 @@ main() {
 	case "$(normalize_lexical "$ASSEMBLY_DIR")" in
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
-	ASSEMBLY_DIR=$(canonical_path "$ASSEMBLY_DIR")
+	if ! ASSEMBLY_DIR=$(canonical_path "$ASSEMBLY_DIR"); then
+		die "the assembly directory path cannot be resolved"
+	fi
 	case "$ASSEMBLY_DIR" in
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
@@ -2249,7 +2651,7 @@ main() {
 		if ! cmd_check; then rc=1; fi
 		;;
 	hook)
-		cmd_hook || true
+		run_hook_bounded
 		rc=0
 		;;
 	install-hooks)
