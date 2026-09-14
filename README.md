@@ -62,22 +62,32 @@ scripts/link-skills.sh
 `git pull` brings in new or changed skills; `link-skills.sh` (its default
 subcommand is `link`) re-links the assembly directory to match.
 
+One run at a time writes the assembly. `link` and `unlink` take the lock
+directory `~/.agents/skills/.skill-links.lock`, wait up to 10 seconds for a run
+already in progress, and then exit 1 having changed nothing; the session hook
+skips its own update silently instead of waiting. A lock left behind by a run
+that was killed is removed once its process is gone, and in any case after two
+minutes.
+
 ### Status
 
 ```bash
 scripts/link-skills.sh check
 ```
 
-Reports drift in the assembly directory (missing, collided, or foreign
+Reports drift in the assembly directory (missing, stale, collided, or foreign
 links) and, for each git source, how many commits it is behind its
 `origin`. It creates and removes no links. Entries the script did not create
-are not reported by `check`; they are left alone.
+are not reported by `check`; they are left alone. A link that points at a
+skill directory other than the one the sources now produce is stale drift, and
+counts as a problem: run `link` to repoint it.
 
-`check` does reach the network: it runs `git fetch` for every git source,
-throttled to once every 6 hours per source, and records each fetch in a
-`~/.agents/skills/.skill-links.d/fetch-*` stamp file. A failed fetch is a
-note, not an error. `check` exits 1 when it reports a problem, 0 when it does
-not, and 2 when there is no sources file to work from.
+`check` does reach the network: it runs `git fetch` for every git source every
+time you run it, and records each fetch in a
+`~/.agents/skills/.skill-links.d/fetch-*` stamp file. The 6-hour throttle
+below applies to the session hook, not to `check`. A failed fetch is a note,
+not an error. `check` exits 1 when it reports a problem, 0 when it does not,
+and 2 when there is no sources file to work from.
 
 ### Session notice
 
@@ -94,16 +104,22 @@ source's path in `~/.agents/skill-sources`.
 The hook fetches each source at most every 6 hours (override with
 `SKILL_SOURCES_FETCH_INTERVAL_HOURS`, `0` to fetch every time) and stops
 fetching once it has spent 20 seconds, so a notice can lag a teammate's push
-by that interval. Run `scripts/link-skills.sh check` to force a fresh look.
+by that interval. Run `scripts/link-skills.sh check` to force a fresh look:
+that throttle is the hook's alone.
 
 `install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
 creating either file when it is missing, and copies the previous content of an
 existing file to `<file>.bak-<UTC timestamp>` before it changes anything. It
 reports each runtime as installed once the hook is added and as already
 installed once the hook is already there, and exits 0 once every reachable
-runtime is in one of those states. A file it creates itself gets mode `0600`
-and no backup. A backup name already in use gets a `.1`, `.2` suffix, so no
-earlier backup is overwritten. A runtime whose home directory does not exist
+runtime is in one of those states. A file that already runs the hook is left
+byte for byte as it is: it is neither reformatted nor backed up. A hook entry
+that matches by its trailing `link-skills.sh hook` but names a script path
+that no longer exists is dead, so it is repointed at this script instead of
+being kept, and the run reports that it replaced a stale hook. A file it
+creates itself gets mode `0600` and no backup. A backup name already in use
+gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
+home directory does not exist
 yet is skipped and named in the output. The JSON merge needs `python3`;
 without it the command prints the group to add by hand and exits 1.
 
@@ -140,6 +156,9 @@ Removes the skill links this script recorded, and the manifest. Everything
 else in `~/.agents/skills` stays untouched, including the `~/.claude/skills`
 and `~/.codex/skills` symlinks: remove those by hand if you are uninstalling
 completely, before you delete `~/.agents/skills`.
+
+A link `unlink` cannot remove is reported, keeps its manifest entry so a later
+run still recognises it, and makes the command exit 1.
 
 ## Development
 

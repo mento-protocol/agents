@@ -6,7 +6,9 @@
 //     delimited by "---" lines
 //   - name is present, equals the directory name, 1-64 chars, [a-z0-9-]
 //     only, no leading/trailing hyphen, no "--"
-//   - description is present and non-empty after trimming, 1-1024 chars
+//   - description is present and non-empty after trimming, 1-1024 chars.
+//     A block scalar is folded into one line first, and an unquoted value
+//     loses its inline comment, so "description: # TODO" reads as empty
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -38,15 +40,39 @@ const NOISE_NAMES = new Set([".DS_Store", ".localized", "Thumbs.db"]);
 /** Collect one problem line per issue found. */
 const problems = [];
 
-/** A YAML block scalar header: ">", ">-", "|", "|2-" and so on. */
-const BLOCK_SCALAR_RE = /^[|>][+-]?[0-9]*$/;
+/**
+ * A YAML block scalar header: ">", ">-", "|", "|2-", "|-2" and so on. YAML
+ * accepts the indentation indicator and the chomping indicator in either
+ * order, so both spellings are matched.
+ */
+const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[0-9]*|[0-9]*[+-]?)$/;
+
+/** True when the value is wrapped in single or double quotes. */
+function isQuoted(value) {
+  return (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'")))
+  );
+}
+
+/**
+ * Remove an inline YAML comment from an unquoted scalar: a "#" that starts
+ * the value, or a "#" preceded by whitespace. A quoted value keeps its "#",
+ * because there the character is part of the text.
+ */
+function stripInlineComment(value) {
+  if (value.startsWith("#")) return "";
+  return value.replace(/\s+#.*$/, "").trim();
+}
 
 /**
  * Parse top-level "key: value" frontmatter lines from the lines between the
  * two "---" delimiters. Values may be single- or double-quoted; quotes are
- * stripped. A block scalar (`description: >-` followed by indented lines) is
- * folded into one line, so its length is measured, not the two marker
- * characters. Returns a Map of key -> value.
+ * stripped. An unquoted value loses its inline comment, so
+ * `description: # TODO` reads as empty. A block scalar (`description: >-`
+ * followed by indented lines) is folded into one line, so its length is
+ * measured, not the two marker characters. Returns a Map of key -> value.
  */
 function parseFrontmatter(lines) {
   const fields = new Map();
@@ -70,12 +96,13 @@ function parseFrontmatter(lines) {
       }
       i = j - 1;
       value = parts.join(" ").replace(/\s+/g, " ").trim();
-    } else if (
-      value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
-    ) {
+    } else if (isQuoted(value)) {
       value = value.slice(1, -1);
+    } else {
+      value = stripInlineComment(value);
+      // A quoted value followed by a comment only looks quoted once the
+      // comment is gone.
+      if (isQuoted(value)) value = value.slice(1, -1);
     }
     fields.set(key, value);
   }

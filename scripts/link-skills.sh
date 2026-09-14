@@ -32,8 +32,15 @@ SOURCES_FILE=""
 ASSEMBLY_DIR=""
 STAMP_DIR=""
 MANIFEST=""
+LOCK_DIR=""
 SCRIPT_PATH=""
 FETCH_INTERVAL_HOURS=6
+
+# Serialisation of the runs that write the assembly. A run waits this long for a
+# lock another run holds, and treats a lock older than this as left behind.
+LOCK_WAIT_SECONDS=10
+LOCK_STALE_MINUTES=2
+LOCK_HELD=0
 
 # -1 until the probe below has run: 1 on a filesystem that treats 'Foo' and
 # 'foo' as one name, 0 otherwise.
@@ -109,11 +116,14 @@ usage() {
 		'  link            Link every skill in every source into the assembly' \
 		'                  directory and refresh the runtime symlinks. Default.' \
 		'  check           Report source and assembly state. Creates and removes' \
-		'                  no links. Fetches every git source, throttled, and' \
-		'                  writes a fetch-* stamp in the .skill-links.d' \
-		'                  directory inside the assembly.' \
+		'                  no links. Fetches every git source every time it' \
+		'                  runs, and writes a fetch-* stamp in the' \
+		'                  .skill-links.d directory inside the assembly.' \
 		'  hook            SessionStart hook mode. Silent when current, never fails.' \
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
+		'                  A settings file that already runs the hook is left' \
+		'                  byte for byte as it is. A hook entry whose script' \
+		'                  path no longer exists is repointed at this script.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
 		'  help            Print this text.' \
 		'' \
@@ -125,8 +135,9 @@ usage() {
 		'Environment:' \
 		'  SKILL_SOURCES_FILE                   Same as --sources.' \
 		'  SKILLS_ASSEMBLY_DIR                  Same as --assembly.' \
-		'  SKILL_SOURCES_FETCH_INTERVAL_HOURS   Fetch throttle in hours (default 6,' \
-		'                                       0 fetches every time).' \
+		'  SKILL_SOURCES_FETCH_INTERVAL_HOURS   Hook fetch throttle in hours' \
+		'                                       (default 6, 0 fetches every' \
+		'                                       time). check always fetches.' \
 		'' \
 		'Exit codes:' \
 		'  0  nothing to report' \
@@ -207,6 +218,39 @@ phys_dir() {
 		return 1
 	fi
 	(cd "$1" && pwd -P)
+}
+
+# The physical path a name really points at, without requiring it to exist. A
+# directory is canonicalized directly; any other name has its parent
+# canonicalized and its last component appended. Symlinks, '..' segments and
+# repeated slashes are all resolved, so an alias for the filesystem root such as
+# /tmp/.. , /. or a symlink to / comes back as /.
+canonical_path() {
+	local p dir base phys
+	p=$1
+	if [ -z "$p" ]; then
+		printf '\n'
+		return 0
+	fi
+	if [ -d "$p" ]; then
+		if phys=$(cd "$p" 2>/dev/null && pwd -P); then
+			printf '%s\n' "$phys"
+			return 0
+		fi
+		printf '%s\n' "$p"
+		return 0
+	fi
+	dir=$(dirname "$p")
+	base=$(basename "$p")
+	if ! phys=$(cd "$dir" 2>/dev/null && pwd -P); then
+		printf '%s\n' "$p"
+		return 0
+	fi
+	case "$phys" in
+	/) printf '/%s\n' "$base" ;;
+	*) printf '%s/%s\n' "$phys" "$base" ;;
+	esac
+	return 0
 }
 
 same_path() {
@@ -435,13 +479,24 @@ collect_candidates() {
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		src=${SRC_PATH[$i]}
 		found=0
+		# A source counts as usable only once its contents have really been
+		# listed. Until then its recorded links must survive: an unreadable
+		# directory says nothing about what belongs in the assembly.
+		SRC_OK[i]=0
+		SRC_FOUND[i]=0
 		if [ ! -d "$src" ]; then
-			SRC_OK[i]=0
-			SRC_FOUND[i]=0
 			i=$((i + 1))
 			continue
 		fi
-		SRC_OK[i]=1
+		# A directory the glob below cannot read matches nothing and reports
+		# nothing, which would look exactly like a source that holds no skill.
+		# The permission bits and the exit status of a real listing tell the two
+		# apart.
+		if [ ! -r "$src" ] || [ ! -x "$src" ] || ! ls -- "$src" >/dev/null 2>&1; then
+			err "source directory cannot be read: $src; its recorded links are kept"
+			i=$((i + 1))
+			continue
+		fi
 		for entry in "$src"/*; do
 			if [ ! -d "$entry" ]; then
 				continue
@@ -455,6 +510,7 @@ collect_candidates() {
 			RAW_COUNT=$((RAW_COUNT + 1))
 			found=$((found + 1))
 		done
+		SRC_OK[i]=1
 		SRC_FOUND[i]=$found
 		i=$((i + 1))
 	done
@@ -658,10 +714,29 @@ entry_is_recorded_link() {
 	same_path "$cur" "$rec"
 }
 
+# The manifest is the only record of what this script may remove later, so it
+# must be a plain file this script can replace. A directory would survive every
+# write, and a symlink would send the record somewhere else. Either one is
+# refused before a single link is created.
+manifest_path_usable() {
+	if [ -L "$MANIFEST" ]; then
+		err "the manifest path $MANIFEST is a symlink, not a regular file; move it aside, then run '$PROG link' again"
+		return 1
+	fi
+	if [ -e "$MANIFEST" ] && [ ! -f "$MANIFEST" ]; then
+		err "the manifest path $MANIFEST is not a regular file; move it aside, then run '$PROG link' again"
+		return 1
+	fi
+	return 0
+}
+
 # The temporary file is allocated by mktemp, never at a name another process
 # could have created first, and only that file is removed on failure.
 write_manifest() {
 	local tmp i
+	if ! manifest_path_usable; then
+		return 1
+	fi
 	if ! tmp=$(mktemp "$ASSEMBLY_DIR/.skill-links.tmp.XXXXXX" 2>/dev/null); then
 		err "could not write the manifest $MANIFEST"
 		return 1
@@ -693,6 +768,88 @@ output_has() {
 			return 0
 		fi
 		i=$((i + 1))
+	done
+	return 1
+}
+
+# ------------------------------------------------------------------ lock ----
+
+# Every run that writes the assembly takes one lock directory. mkdir is atomic
+# on every filesystem in use here, so two runs that start at the same moment
+# cannot both believe they own it.
+
+release_lock() {
+	if [ "$LOCK_HELD" -ne 1 ] || [ -z "$LOCK_DIR" ]; then
+		return 0
+	fi
+	LOCK_HELD=0
+	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+	return 0
+}
+
+# A lock whose owner is gone, and a lock older than LOCK_STALE_MINUTES, are both
+# left over from a run that was killed. Either one is removed, so one interrupted
+# run never blocks every later one. A lock with no pid yet is a run that has just
+# taken it, and it is left alone until it ages out.
+clear_stale_lock() {
+	local pid
+	if [ ! -d "$LOCK_DIR" ]; then
+		return 0
+	fi
+	if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		return 0
+	fi
+	pid=""
+	if [ -f "$LOCK_DIR/pid" ]; then
+		pid=$(head -n 1 "$LOCK_DIR/pid" 2>/dev/null | tr -dc '0-9')
+	fi
+	if [ -z "$pid" ]; then
+		return 0
+	fi
+	if kill -0 "$pid" 2>/dev/null; then
+		return 0
+	fi
+	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+	return 0
+}
+
+# Take the lock. 'wait' retries for LOCK_WAIT_SECONDS and then fails; 'try'
+# fails at once. A mkdir that fails while the lock directory does not exist is
+# not contention but an assembly this run cannot write, which the work itself
+# reports in its own words, so the run goes on unlocked.
+take_lock() {
+	local mode waited limit
+	mode=$1
+	if [ "$LOCK_HELD" -eq 1 ]; then
+		return 0
+	fi
+	if [ -z "$LOCK_DIR" ]; then
+		return 0
+	fi
+	waited=0
+	limit=$((LOCK_WAIT_SECONDS * 5))
+	while [ "$waited" -le "$limit" ]; do
+		waited=$((waited + 1))
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			LOCK_HELD=1
+			printf '%s\n' "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
+			return 0
+		fi
+		if [ ! -d "$LOCK_DIR" ]; then
+			return 0
+		fi
+		clear_stale_lock
+		if [ ! -d "$LOCK_DIR" ]; then
+			continue
+		fi
+		if [ "$mode" != "wait" ]; then
+			return 1
+		fi
+		sleep 0.2
 	done
 	return 1
 }
@@ -893,6 +1050,15 @@ run_link() {
 	ensure_sources_file
 	if ! mkdir -p "$ASSEMBLY_DIR"; then
 		err "could not create the assembly directory $ASSEMBLY_DIR"
+		return 1
+	fi
+	if ! take_lock wait; then
+		err "another $PROG run holds the lock $LOCK_DIR; nothing was changed. Wait for it to finish, then run '$PROG link' again"
+		return 1
+	fi
+	# The manifest is checked before the first link, so a refusal leaves the
+	# assembly exactly as it was instead of half written.
+	if ! manifest_path_usable; then
 		return 1
 	fi
 	detect_case_insensitive
@@ -1105,13 +1271,15 @@ run_git_fetch() {
 	return "$rc"
 }
 
-# Fetch when the throttle allows it. Prints a short note. Never fails.
+# Fetch when the throttle allows it, or always when the caller passes 'force'.
+# Prints a short note. Never fails.
 maybe_fetch() {
-	local root stamp tmo
+	local root stamp tmo force
 	root=$1
 	tmo=${2:-$FETCH_TIMEOUT_SECONDS}
+	force=${3-}
 	stamp=$(stamp_file "$root")
-	if ! fetch_due "$stamp"; then
+	if [ "$force" != "force" ] && ! fetch_due "$stamp"; then
 		printf 'skipped\n'
 		return 0
 	fi
@@ -1155,9 +1323,10 @@ check_runtime_link() {
 cmd_check() {
 	local i name target entry cur src root branch state behind fetch_note
 
+	# No sources file is no source to work from, which is exit 2 everywhere
+	# else in this script.
 	if [ ! -f "$SOURCES_FILE" ]; then
-		err "no sources file at $SOURCES_FILE; run '$PROG link' inside a clone to create one"
-		return 1
+		die "no sources file at $SOURCES_FILE; run '$PROG link' inside a clone to create one"
 	fi
 	detect_case_insensitive
 	load_manifest
@@ -1176,6 +1345,12 @@ cmd_check() {
 			err "source $src: missing"
 			continue
 		fi
+		# A source whose contents cannot be listed was already reported by the
+		# candidate pass, so it is named here without being counted twice.
+		if [ ! -r "$src" ] || [ ! -x "$src" ]; then
+			info "source $src: cannot be read"
+			continue
+		fi
 		info "source $src: ok"
 		if ! root=$(git_root "$src"); then
 			info "  git: not a clone"
@@ -1187,7 +1362,9 @@ cmd_check() {
 		else
 			state="clean"
 		fi
-		fetch_note=$(maybe_fetch "$root")
+		# check is the command a person runs to get a fresh answer, so it
+		# fetches every time. The throttle belongs to the session hook.
+		fetch_note=$(maybe_fetch "$root" "$FETCH_TIMEOUT_SECONDS" force)
 		behind=$(git_behind_count "$root")
 		info "  git: branch $branch, $state, behind $behind"
 		info "  fetch: $fetch_note"
@@ -1210,8 +1387,11 @@ cmd_check() {
 				err "link dangling: $name -> $cur"
 				continue
 			fi
+			# A link that now names a different source is drift like any other:
+			# the assembly does not hold what the sources say it should, so it
+			# is reported as a problem and not only as a note.
 			if entry_is_recorded_link "$name" "$entry"; then
-				info "  link stale: $name -> $cur, expected $target; run '$PROG link'"
+				err "link stale: $name -> $cur, expected $target; run '$PROG link'"
 				continue
 			fi
 			err "link collision: $name is a foreign symlink to $cur"
@@ -1233,6 +1413,15 @@ cmd_check() {
 			continue
 		fi
 		entry="$ASSEMBLY_DIR/$name"
+		# A source that is missing or unreadable this run produces no candidate,
+		# and 'link' keeps its links rather than pruning them. Say that, instead
+		# of promising a prune that will not happen.
+		if target_source_unavailable "$target"; then
+			if [ -L "$entry" ]; then
+				info "  link kept: $name; its source cannot be read now"
+			fi
+			continue
+		fi
 		if [ -L "$entry" ] && [ ! -e "$entry" ]; then
 			err "link dangling: $name (recorded target $target)"
 			continue
@@ -1263,6 +1452,12 @@ cmd_hook() {
 		return 0
 	fi
 	QUIET=1
+	# A session start must never wait on another run, and a notice it skips
+	# costs nothing: the next session prints it. A link or unlink run in
+	# progress is also about to make this run's reading of the assembly wrong.
+	if ! take_lock try; then
+		return 0
+	fi
 	SECONDS=0
 	detect_case_insensitive
 	load_manifest
@@ -1380,12 +1575,17 @@ print_hook_snippet() {
 }
 
 # Passed to python3 with -c, so that no here document is needed. The program
-# must not contain a single quote. It writes the merged JSON to a temporary
-# file of its own next to the settings file and prints that path, so the name
-# is never predictable and never collides with a second run.
+# must not contain a single quote. It prints a status word on the first line:
+#   unchanged  the hook is already installed; nothing is written
+#   added      a new SessionStart group holds the hook
+#   replaced   an entry whose script path is gone now holds the hook
+# For "added" and "replaced" it writes the merged JSON to a temporary file of
+# its own next to the settings file and prints that path on the second line,
+# so the name is never predictable and never collides with a second run.
 PY_MERGE_HOOK='
 import json
 import os
+import shlex
 import stat
 import sys
 import tempfile
@@ -1414,26 +1614,50 @@ if not isinstance(groups, list):
     sys.exit("link-skills: %s has a SessionStart key that is not a list" % path)
 
 
-def installed(value):
+def script_of(value):
     text = str(value)
-    if text.strip() == command.strip():
-        return True
-    parts = text.split()
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
     if len(parts) >= 2 and parts[-1] == "hook":
-        if parts[-2].strip(chr(34) + chr(39)).endswith(marker):
-            return True
-    return False
+        token = parts[-2].strip(chr(34) + chr(39))
+        if token.endswith(marker):
+            return token
+    return None
 
 
 found = False
+stale = []
 for group in groups:
     if not isinstance(group, dict):
         continue
-    for entry in group.get("hooks") or []:
-        if isinstance(entry, dict) and installed(entry.get("command", "")):
+    entries = group.get("hooks")
+    if not isinstance(entries, list):
+        continue
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("command", ""))
+        if text.strip() == command.strip():
             found = True
+            continue
+        token = script_of(text)
+        if token is None:
+            continue
+        if os.path.isfile(token):
+            found = True
+        else:
+            stale.append(entry)
+
+status = "unchanged"
+if not found and stale:
+    stale[0]["command"] = command
+    found = True
+    status = "replaced"
 
 if not found:
+    status = "added"
     groups.append(
         {
             "hooks": [
@@ -1446,6 +1670,10 @@ if not found:
         }
     )
 
+if status == "unchanged":
+    sys.stdout.write(status + "\n")
+    sys.exit(0)
+
 mode = stat.S_IMODE(os.stat(path).st_mode)
 fd, out = tempfile.mkstemp(
     prefix=".link-skills-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(path))
@@ -1457,13 +1685,15 @@ try:
 except Exception:
     os.unlink(out)
     raise
-sys.stdout.write(out + "\n")
+sys.stdout.write(status + "\n" + out + "\n")
 '
 
 # The command string is compared exactly, and the last two tokens of any other
 # command are compared with the script name, so a group written by an older
 # version, by another clone, or with a quoted path is recognised instead of
-# duplicated. Prints the path of the merged temporary file.
+# duplicated. A matching command whose script path no longer exists is dead,
+# so it is rewritten to the current command instead of being kept. Prints the
+# status word, and the path of the merged temporary file when there is one.
 merge_hook_json() {
 	python3 -c "$PY_MERGE_HOOK" "$1" \
 		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS"
@@ -1490,7 +1720,7 @@ backup_path() {
 }
 
 install_hook_file() {
-	local parent file tmp stamp real created bak
+	local parent file merged status tmp stamp real created bak
 	parent=$1
 	file=$2
 	created=0
@@ -1531,19 +1761,21 @@ install_hook_file() {
 		print_hook_snippet >&2
 		return 1
 	fi
-	tmp=""
-	tmp=$(merge_hook_json "$file") || tmp=""
+	merged=""
+	merged=$(merge_hook_json "$file") || merged=""
+	status=$(printf '%s\n' "$merged" | sed -n '1p')
+	tmp=$(printf '%s\n' "$merged" | sed -n '2p')
+	# An installed hook leaves the file alone: no reformatting, no backup.
+	if [ "$status" = "unchanged" ]; then
+		info "$PROG: $file already runs the hook"
+		return 0
+	fi
 	if [ -z "$tmp" ] || [ ! -f "$tmp" ]; then
 		if [ -n "$tmp" ]; then
 			rm -f "$tmp"
 		fi
 		err "could not merge the SessionStart hook into $file"
 		return 1
-	fi
-	if cmp -s "$file" "$tmp"; then
-		rm -f "$tmp"
-		info "$PROG: $file already runs the hook"
-		return 0
 	fi
 	if [ "$created" -eq 0 ]; then
 		stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -1564,7 +1796,11 @@ install_hook_file() {
 		err "could not write $file"
 		return 1
 	fi
-	info "$PROG: added the SessionStart hook to $file"
+	if [ "$status" = "replaced" ]; then
+		info "$PROG: replaced a stale hook in $file"
+	else
+		info "$PROG: added the SessionStart hook to $file"
+	fi
 	return 0
 }
 
@@ -1583,9 +1819,15 @@ cmd_install_hooks() {
 # ---------------------------------------------------------------- unlink ----
 
 cmd_unlink() {
-	local i name target entry cur stamp
+	local i name target entry cur stamp kept
+	if ! take_lock wait; then
+		err "another $PROG run holds the lock $LOCK_DIR; nothing was removed. Wait for it to finish, then run '$PROG unlink' again"
+		return 1
+	fi
 	detect_case_insensitive
 	load_manifest
+	kept=0
+	OUT_COUNT=0
 	i=0
 	while [ "$i" -lt "$MAN_COUNT" ]; do
 		name=${MAN_NAME[$i]}
@@ -1599,31 +1841,86 @@ cmd_unlink() {
 		# A dangling link that no longer points where the manifest recorded
 		# belongs to whoever made it.
 		if [ ! -e "$entry" ]; then
-			if [ "$cur" = "$target" ]; then
-				rm -f "$entry"
+			if [ "$cur" != "$target" ]; then
+				info "$PROG: $name is a foreign dangling link to $cur; left alone"
+				continue
+			fi
+			# A link this run could not remove is still this script's to remove
+			# later, so its manifest entry stays.
+			if remove_link "$entry"; then
 				info "$PROG: removed dangling $name"
 			else
-				info "$PROG: $name is a foreign dangling link to $cur; left alone"
+				err "could not remove the dangling link $entry; kept its manifest entry"
+				record_output "$name" "$target"
+				kept=$((kept + 1))
 			fi
 			continue
 		fi
 		if same_path "$cur" "$target"; then
-			rm -f "$entry"
-			info "$PROG: removed $name"
+			if remove_link "$entry"; then
+				info "$PROG: removed $name"
+			else
+				err "could not remove $entry; kept its manifest entry"
+				record_output "$name" "$target"
+				kept=$((kept + 1))
+			fi
 		fi
 	done
-	rm -f "$MANIFEST"
-	# Only regular files inside the stamp directory, then the directory itself.
-	# No wildcard ever runs in the assembly root, where the user's own files are.
-	if [ -d "$STAMP_DIR" ] && [ ! -L "$STAMP_DIR" ]; then
-		for stamp in "$STAMP_DIR"/*; do
-			if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then
-				rm -f "$stamp"
-			fi
-		done
-		rmdir "$STAMP_DIR" 2>/dev/null || true
+	if [ "$kept" -gt 0 ]; then
+		write_manifest || true
+		info "$PROG: kept the manifest $MANIFEST for $kept link(s) that are still there"
+	elif rm -f "$MANIFEST"; then
+		info "$PROG: removed the manifest $MANIFEST"
+	else
+		err "could not remove the manifest $MANIFEST"
 	fi
-	info "$PROG: removed the manifest $MANIFEST"
+	remove_stamp_dir
+	if [ "$ERRORS" -gt 0 ]; then
+		return 1
+	fi
+	return 0
+}
+
+# Remove one link this script recorded. rm -f reports nothing for a name that is
+# already gone, so the entry is checked again: a permission the kernel refuses
+# must not read as success.
+remove_link() {
+	if ! rm -f "$1" 2>/dev/null; then
+		return 1
+	fi
+	if [ -e "$1" ] || [ -L "$1" ]; then
+		return 1
+	fi
+	return 0
+}
+
+# Only regular files inside the stamp directory, then the directory itself. No
+# wildcard ever runs in the assembly root, where the user's own files are.
+remove_stamp_dir() {
+	local stamp
+	if [ ! -d "$STAMP_DIR" ] || [ -L "$STAMP_DIR" ]; then
+		return 0
+	fi
+	for stamp in "$STAMP_DIR"/*; do
+		if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then
+			if ! rm -f "$stamp" 2>/dev/null || [ -e "$stamp" ]; then
+				err "could not remove the fetch stamp $stamp"
+			fi
+		fi
+	done
+	if [ ! -d "$STAMP_DIR" ]; then
+		return 0
+	fi
+	if rmdir "$STAMP_DIR" 2>/dev/null; then
+		return 0
+	fi
+	# Anything the loop left behind is not this script's, and keeping the
+	# directory for it is the right outcome, not a failure.
+	if dir_is_empty "$STAMP_DIR"; then
+		err "could not remove the fetch stamp directory $STAMP_DIR"
+	else
+		info "$PROG: kept $STAMP_DIR: it holds entries this script did not write"
+	fi
 	return 0
 }
 
@@ -1715,7 +2012,9 @@ main() {
 	else
 		SOURCES_FILE="$HOME/.agents/skill-sources"
 	fi
-	SOURCES_FILE=$(abs_path "$(expand_home "$SOURCES_FILE")")
+	# A path is canonicalized before it is judged: '/tmp/..', '/.' and a symlink
+	# to / all name the filesystem root, and only the physical path shows it.
+	SOURCES_FILE=$(canonical_path "$(abs_path "$(expand_home "$SOURCES_FILE")")")
 	case "$SOURCES_FILE" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
@@ -1731,18 +2030,25 @@ main() {
 	else
 		ASSEMBLY_DIR="$HOME/.agents/skills"
 	fi
-	ASSEMBLY_DIR=$(abs_path "$(expand_home "$ASSEMBLY_DIR")")
+	ASSEMBLY_DIR=$(canonical_path "$(abs_path "$(expand_home "$ASSEMBLY_DIR")")")
 	case "$ASSEMBLY_DIR" in
-	"" | "/") die "the assembly directory must not be / or empty" ;;
+	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
 	ASSEMBLY_DIR=${ASSEMBLY_DIR%/}
 	MANIFEST="$ASSEMBLY_DIR/.skill-links"
 	STAMP_DIR="$ASSEMBLY_DIR/.skill-links.d"
+	LOCK_DIR="$ASSEMBLY_DIR/.skill-links.lock"
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
 	case "$FETCH_INTERVAL_HOURS" in
 	'' | *[!0-9]*) FETCH_INTERVAL_HOURS=6 ;;
 	esac
+	# '08' is a number of hours, never an octal literal, so the base is stated.
+	FETCH_INTERVAL_HOURS=$((10#$FETCH_INTERVAL_HOURS))
+
+	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
+	# it is registered once, here, for every command below.
+	trap release_lock EXIT
 
 	rc=0
 	case "$cmd" in

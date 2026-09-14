@@ -513,15 +513,48 @@ check_reports_behind() {
 	assert_out_has "fetch: ok" "fetch note"
 	assert_out_has "clean" "worktree state"
 
-	# The fetch throttle must skip a second fetch inside the interval.
+	# check is user-invoked, so the throttle never applies to it.
 	SKILL_SOURCES_FETCH_INTERVAL_HOURS=6
 	export SKILL_SOURCES_FETCH_INTERVAL_HOURS
 	ls_run check
-	assert_rc 0 "throttled check"
-	assert_out_has "fetch: skipped" "throttle note"
+	assert_rc 0 "second check"
+	assert_out_has "fetch: ok" "check fetches again inside the interval"
+	assert_out_lacks "fetch: skipped" "check is never throttled"
 	ls_run --quiet check
 	assert_rc 0 "quiet check"
 	assert_out_empty "quiet check is silent when nothing is wrong"
+}
+
+# The throttle stamp belongs to the session hook. check is user-invoked: it must
+# fetch every time, however fresh the stamp is.
+check_fetches_despite_fresh_stamp() {
+	local stamp
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	ls_run check
+	assert_rc 0 "first check"
+	stamp=$(find "$HOME/.agents/skills/.skill-links.d" -type f -name 'fetch-*' 2>/dev/null | head -n 1)
+	if [ -z "$stamp" ]; then
+		fail "check wrote no fetch stamp"
+		return
+	fi
+	SKILL_SOURCES_FETCH_INTERVAL_HOURS=6
+	export SKILL_SOURCES_FETCH_INTERVAL_HOURS
+	push_beta
+	# The hook is the throttled command: a fresh stamp stops its fetch, so it
+	# still sees nothing to report.
+	touch "$stamp"
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_empty "the hook honours the throttle stamp"
+	touch "$stamp"
+	ls_run check
+	assert_rc 0 "second check"
+	assert_out_has "fetch: ok" "the fresh stamp does not stop the fetch"
+	assert_out_has "behind 1" "the new commit is seen"
 }
 
 hook_auto_update_when_clean() {
@@ -1429,6 +1462,289 @@ install_hooks_backups_never_overwritten() {
 	fi
 }
 
+# A settings file that already runs the hook is left exactly as it is: a
+# minified one-line file is not reformatted, and no backup is taken.
+install_hooks_leaves_minified_file_unchanged() {
+	local file before n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	before="$CASE_DIR/before.json"
+	printf '%s\n' "{\"model\":\"sonnet\",\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bash $LS hook\",\"timeout\":20}]}]}}" >"$file"
+	cp "$file" "$before"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	assert_out_has "already runs the hook" "idempotent message"
+	if ! cmp -s "$before" "$file"; then
+		fail "the settings file was rewritten"
+		printf '      now: %s\n' "$(cat "$file")"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "an unchanged file needs no backup, found $n"
+	fi
+}
+
+# A hook command that matches only by its trailing "link-skills.sh hook", and
+# whose script path is gone, is dead. Point it at this script instead of
+# leaving a command that fails on every session start.
+install_hooks_replaces_dead_script_path() {
+	local file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"bash $CASE_DIR/gone/scripts/link-skills.sh hook\"," \
+		'            "timeout": 20' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$file"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	assert_out_has "replaced a stale hook" "replacement reported"
+	assert_file_has "$file" "$LS hook" "the current script path is installed"
+	assert_file_lacks "$file" "gone/scripts" "the dead path is gone"
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	# The entry now works, and a second run finds it.
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the replacement is recognised"
+}
+
+# An assembly path that resolves to the filesystem root is refused, however it
+# is spelled: the check is on the physical path, not on the text.
+root_alias_assembly_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ln -s / "$CASE_DIR/link-to-root"
+	ls_run --assembly "$CASE_DIR/link-to-root" link
+	assert_rc 2 "--assembly through a symlink to /"
+	assert_out_has "must not be / or empty" "refusal message"
+	ls_run --assembly /tmp/.. link
+	assert_rc 2 "--assembly /tmp/.."
+	assert_out_has "must not be / or empty" "refusal message"
+	ls_run --assembly=/. link
+	assert_rc 2 "--assembly=/."
+	assert_absent "/.skill-links" "no manifest at the filesystem root"
+	assert_absent "/alpha" "no link at the filesystem root"
+	assert_absent "$HOME/.agents/skills" "nothing was created"
+}
+
+# A link that still points where the manifest recorded, while the sources now
+# produce that name from somewhere else, is drift: check must exit 1 for it.
+check_reports_stale_link_as_error() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	mkskill "$CASE_DIR/two" alpha
+	write_sources
+	add_source "$CASE_DIR/two"
+	ls_run check
+	assert_rc 1 "check"
+	assert_out_has "link stale: alpha" "stale link reported"
+	ls_run --quiet check
+	assert_rc 1 "quiet check"
+	assert_out_has "link stale: alpha" "quiet check still reports it"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "check changed no link"
+}
+
+# No sources file is no source to work from, which is exit 2, not exit 1.
+check_without_sources_file_exits_2() {
+	mkskill "$CASE_DIR/one" alpha
+	ls_run check
+	assert_rc 2 "check without a sources file"
+	assert_out_has "no sources file at" "message"
+}
+
+# A source directory that exists but cannot be listed says nothing about what
+# belongs in the assembly, so its links stay.
+unreadable_source_keeps_links() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" other
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 0 "first link"
+	chmod 000 "$CASE_DIR/two"
+	ls_run link
+	chmod 700 "$CASE_DIR/two"
+	assert_rc 1 "second link"
+	assert_out_has "cannot be read" "unreadable source reported"
+	assert_out_has "kept 1 link(s)" "kept message"
+	assert_out_has "pruned 0" "nothing pruned"
+	assert_out_lacks "holds no skill" "an unreadable source is not an empty one"
+	assert_link "$HOME/.agents/skills/other" "$CASE_DIR/two/other" "link kept"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "other" "manifest keeps the entry"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+
+	chmod 000 "$CASE_DIR/two"
+	ls_run check
+	chmod 700 "$CASE_DIR/two"
+	assert_rc 1 "check with an unreadable source"
+	assert_out_has "cannot be read" "check names the unreadable source"
+	assert_out_lacks "will prune it" "check promises no prune that link will not do"
+}
+
+# The manifest must be a plain file this script can replace. A directory at that
+# path is refused before the first link is created.
+directory_at_manifest_path_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills/.skill-links"
+	ls_run link
+	assert_rc 1 "link"
+	assert_out_has "is not a regular file" "refusal message"
+	assert_out_has "errors 1" "the summary counts it"
+	assert_absent "$HOME/.agents/skills/alpha" "no link was created"
+	assert_is_dir_not_link "$HOME/.agents/skills/.skill-links" "the directory is left alone"
+}
+
+# One run at a time writes the assembly. A held lock stops link and unlink with
+# a message, and the session hook steps aside in silence.
+link_refuses_while_locked() {
+	local lock pid
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	mkdir "$lock"
+	sleep 60 &
+	pid=$!
+	printf '%s\n' "$pid" >"$lock/pid"
+	ls_run link
+	assert_rc 1 "link while locked"
+	assert_out_has "holds the lock" "lock message"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+	ls_run hook
+	assert_rc 0 "hook while locked"
+	assert_out_empty "the hook is silent while locked"
+	ls_run unlink
+	assert_rc 1 "unlink while locked"
+	assert_out_has "holds the lock" "lock message"
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	rm -f "$lock/pid"
+	rmdir "$lock"
+	ls_run link
+	assert_rc 0 "link once the lock is gone"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the lock is released on exit"
+}
+
+# A lock left behind by a run that was killed must not block every later run.
+stale_lock_is_removed() {
+	local lock pid
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+
+	# An owner that is gone.
+	mkdir "$lock"
+	"$BASH_BIN" -c 'exit 0' &
+	pid=$!
+	wait "$pid" 2>/dev/null
+	printf '%s\n' "$pid" >"$lock/pid"
+	ls_run link
+	assert_rc 0 "link over a lock whose owner is gone"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the stale lock is gone"
+
+	# A live owner, but a lock older than the stale age.
+	mkdir "$lock"
+	sleep 60 &
+	pid=$!
+	printf '%s\n' "$pid" >"$lock/pid"
+	touch -t 200001010000 "$lock"
+	ls_run link
+	assert_rc 0 "link over a lock older than the stale age"
+	assert_out_has "unchanged 1" "the run did its work"
+	assert_absent "$lock" "the aged lock is gone"
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+}
+
+# A removal that fails is reported, keeps its manifest entry, and fails the run.
+unlink_reports_deletion_failure() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	chmod 500 "$HOME/.agents/skills"
+	ls_run unlink
+	chmod 700 "$HOME/.agents/skills"
+	assert_rc 1 "unlink"
+	assert_out_has "could not remove" "failure reported"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link is still there"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "the manifest entry is kept"
+}
+
+# A throttle written as '08' is eight hours, never an octal literal.
+interval_with_leading_zero_accepted() {
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	SKILL_SOURCES_FETCH_INTERVAL_HOURS=08
+	export SKILL_SOURCES_FETCH_INTERVAL_HOURS
+	ls_run link
+	assert_rc 0 "link"
+	ls_run hook
+	assert_rc 0 "first hook"
+	assert_out_lacks "value too great for base" "the interval parses as decimal"
+	assert_out_empty "the first hook has nothing to report"
+	push_beta
+	ls_run hook
+	assert_rc 0 "second hook"
+	assert_out_lacks "value too great for base" "the interval parses as decimal"
+	assert_out_empty "the stamp is fresh, so the throttle holds"
+}
+
 # ------------------------------------------------- validate-skills.mjs cases -
 
 VALIDATOR="$HERE/validate-skills.mjs"
@@ -1541,6 +1857,134 @@ validator_ignores_finder_metadata() {
 	esac
 }
 
+# YAML accepts the indentation indicator and the chomping indicator of a block
+# scalar in either order, so "|2-" and "|-2" are the same header. Both must be
+# read as a block scalar, not as a literal description.
+validator_block_indicator_either_order() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/empty/skills/blocky"
+	{
+		printf -- '---\n'
+		printf 'name: blocky\n'
+		printf 'description: |2-\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/empty/skills/blocky/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/empty" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an empty |2- description must fail: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/empty-swapped/skills/blocky"
+	{
+		printf -- '---\n'
+		printf 'name: blocky\n'
+		printf 'description: |-2\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/empty-swapped/skills/blocky/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/empty-swapped" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an empty |-2 description must fail: $out"
+	fi
+	case "$out" in
+	*description*) ;;
+	*) fail "the failure must name the description: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/full/skills/blocky"
+	{
+		printf -- '---\n'
+		printf 'name: blocky\n'
+		printf 'description: |-2\n'
+		printf '  A literal description that YAML writes over\n'
+		printf '  more than one line.\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/full/skills/blocky/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/full" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a |-2 description with a body must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/other/skills/blocky"
+	{
+		printf -- '---\n'
+		printf 'name: blocky\n'
+		printf 'description: >2-\n'
+		printf '  A folded description.\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/other/skills/blocky/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/other" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a >2- description must validate: $out"
+	fi
+}
+
+# An unquoted value loses its inline comment, so a description that holds only
+# a comment is empty. A quoted value keeps every character it holds.
+validator_strips_inline_comment() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/comment/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: # TODO write this\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a comment-only description must fail: $out"
+	fi
+	case "$out" in
+	*description*) ;;
+	*) fail "the failure must name the description: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/trailing/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a real description # and a note\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/trailing/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/trailing" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a description with a trailing comment must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/quoted/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "# 1 rule of skills"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/quoted/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted description keeps its hash: $out"
+	fi
+}
+
 # This harness must refuse to run when mktemp -d cannot create the temporary
 # root, and it must register no cleanup trap before that check. The failing
 # run starts from a throwaway working directory that holds a sentinel file and
@@ -1633,6 +2077,9 @@ main() {
 	run_case populated_real_claude_skills_refused
 	run_case check_offline_does_not_fail
 	run_case check_reports_behind
+	run_case check_fetches_despite_fresh_stamp
+	run_case check_reports_stale_link_as_error
+	run_case check_without_sources_file_exits_2
 	run_case hook_auto_update_when_clean
 	run_case hook_refused_when_dirty
 	run_case hook_refused_off_default_branch
@@ -1644,6 +2091,7 @@ main() {
 	run_case source_listed_twice
 	run_case duplicate_keeps_existing_link
 	run_case missing_source_keeps_links
+	run_case unreadable_source_keeps_links
 	run_case emptied_source_prunes_links
 	run_case foreign_matching_link_not_adopted
 	run_case foreign_dangling_not_pruned
@@ -1659,6 +2107,12 @@ main() {
 	run_case empty_home_refused
 	run_case unset_home_hook_exits_zero
 	run_case root_assembly_refused
+	run_case root_alias_assembly_refused
+	run_case directory_at_manifest_path_refused
+	run_case link_refuses_while_locked
+	run_case stale_lock_is_removed
+	run_case unlink_reports_deletion_failure
+	run_case interval_with_leading_zero_accepted
 	run_case missing_runtime_home_reported
 	run_case nameonly_manifest_line_ignored
 	run_case recorded_target_mismatch_not_replaced
@@ -1672,9 +2126,13 @@ main() {
 	run_case install_hooks_apostrophe_path_idempotent
 	run_case settings_mode_preserved
 	run_case install_hooks_backups_never_overwritten
+	run_case install_hooks_leaves_minified_file_unchanged
+	run_case install_hooks_replaces_dead_script_path
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
 	run_case validator_ignores_finder_metadata
+	run_case validator_block_indicator_either_order
+	run_case validator_strips_inline_comment
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
