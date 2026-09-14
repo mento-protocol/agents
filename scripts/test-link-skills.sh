@@ -761,6 +761,75 @@ install_hooks_idempotent() {
 	fi
 }
 
+# A session hook runs with none of the environment the person who installed it
+# had, so an installation on a non-default sources file or assembly directory
+# has to carry both paths in the command itself.
+install_hooks_embeds_custom_paths() {
+	local sources assembly command rc
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	sources="$CASE_DIR/custom-sources"
+	assembly="$CASE_DIR/custom-assembly"
+	printf '%s\n' "$CASE_DIR/one" >"$sources"
+	mkdir -p "$HOME/.claude" "$HOME/.codex"
+	ls_run --sources "$sources" --assembly "$assembly" install-hooks
+	assert_rc 0 "install-hooks with custom paths"
+	assert_file_has "$HOME/.claude/settings.json" "--sources $sources" \
+		"the command names the sources file"
+	assert_file_has "$HOME/.claude/settings.json" "--assembly $assembly" \
+		"the command names the assembly directory"
+	assert_file_has "$HOME/.codex/hooks.json" "--assembly $assembly" \
+		"the codex command names the assembly directory too"
+
+	# The stored command, run the way a session start runs it.
+	command=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"])' \
+		"$HOME/.claude/settings.json")
+	rc=0
+	LS_OUT=$(sh -c "$command" 2>&1) || rc=$?
+	LS_RC=$rc
+	assert_rc 0 "the stored hook command"
+	assert_is_dir_not_link "$assembly" "the hook works on the custom assembly"
+	assert_absent "$HOME/.agents/skills" "the default assembly is left alone"
+	# What the hook tells the user to run names the same installation.
+	assert_out_has "--assembly $assembly" "the advice names the custom assembly"
+	assert_out_has "--sources $sources" "the advice names the custom sources file"
+
+	ls_run --sources "$sources" --assembly "$assembly" install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the custom command is recognised"
+}
+
+# The manifest, the lock and the fetch stamps are this script's own record of
+# what it may remove later. A sources path that names one of them would have a
+# run read that record as a list of sources, or write a bootstrap sources file
+# over it.
+sources_path_inside_assembly_refused() {
+	local assembly
+	mkskill "$CASE_DIR/one" alpha
+	assembly="$CASE_DIR/assembly"
+	ls_run --assembly "$assembly" --sources "$assembly/.skill-links" link
+	assert_rc 2 "--sources at the manifest path"
+	assert_out_has "must not be an assembly control file" "refusal message"
+	assert_absent "$assembly" "nothing was created"
+	ls_run --assembly "$assembly" --sources "$assembly/.skill-links.lock" link
+	assert_rc 2 "--sources at the lock path"
+	assert_absent "$assembly" "nothing was created for the lock path"
+	ls_run --assembly "$assembly" --sources "$assembly/.skill-links.d" link
+	assert_rc 2 "--sources at the stamp directory"
+	ls_run --assembly "$assembly" --sources "$assembly/.skill-links.d/fetch-1" link
+	assert_rc 2 "--sources inside the stamp directory"
+	assert_absent "$assembly" "nothing was created for the stamp paths"
+
+	# A sources file anywhere else still works, inside the assembly included.
+	printf '%s\n' "$CASE_DIR/one" >"$CASE_DIR/sources"
+	ls_run --assembly "$assembly" --sources "$CASE_DIR/sources" link
+	assert_rc 0 "a sources file elsewhere"
+	assert_link "$assembly/alpha" "$CASE_DIR/one/alpha" "alpha link"
+}
+
 unlink_leaves_foreign_entries() {
 	mkskill "$CASE_DIR/one" alpha
 	mkdir -p "$CASE_DIR/other/kept"
@@ -3038,11 +3107,52 @@ manifest_write_failure_restores_repointed_link() {
 	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
 }
 
+# A pruned link is this run's own change too. The manifest that survives a
+# failed write still records the name, so the link has to be there again: a
+# recorded link the assembly no longer holds is a skill gone from every
+# runtime and a record no later run can act on.
+manifest_write_failure_restores_pruned_links() {
+	local shims before
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/two/beta" "beta links into the second source"
+	before="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$before"
+
+	# The second source is off the list, so the next run prunes beta.
+	write_sources
+	add_source "$CASE_DIR/one"
+
+	shims="$CASE_DIR/shims"
+	make_breaking_mktemp "$shims"
+	use_shims "$shims"
+	LS_TEST_UNWRITABLE_TMP=1
+	export LS_TEST_UNWRITABLE_TMP
+	ls_run link
+	unset LS_TEST_UNWRITABLE_TMP
+	drop_shims
+	assert_rc 1 "link with an unwritable temporary file"
+	assert_out_has "could not write the manifest" "the failure is reported"
+	assert_out_has "were created again at their recorded target" "the restore is reported"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/two/beta" "the pruned link points at its old target again"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link this run left alone survives"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
+}
+
 # git refuses to overwrite an untracked file and overwrites an ignored one
 # without a word. A commit that starts tracking an ignored path must not be
 # fast-forwarded over the user's copy.
 hook_refuses_update_over_ignored_file() {
-	local before after
+	local before after body probe rc mentions help
 	fixture_company
 	write_sources
 	add_source "$COMPANY/skills auto-update"
@@ -3064,6 +3174,61 @@ hook_refuses_update_over_ignored_file() {
 		fail "a clone that would lose an ignored file must not be fast-forwarded"
 	fi
 	assert_file_has "$COMPANY/notes.txt" "USER DATA" "the ignored file keeps its content"
+
+	# A path with a space in it. git quotes such a path in its status output
+	# and not in its tree listing, so a guard that compares the two spellings
+	# as they come would let this one through.
+	rm -f "$COMPANY/notes.txt"
+	printf 'notes.txt\nmy notes.txt\n' >"$COMPANY/.git/info/exclude"
+	printf 'USER DATA\n' >"$COMPANY/my notes.txt"
+	printf 'FROM UPSTREAM\n' >"$SEED/my notes.txt"
+	gitc "$SEED" add -A
+	gitc "$SEED" commit -q -m "start tracking my notes.txt"
+	git -C "$SEED" push -q origin main
+	before=$(head_of "$COMPANY")
+	ls_run hook
+	assert_rc 0 "hook with a spaced ignored path"
+	assert_out_has "did not update $COMPANY" "the skip is reported"
+	assert_out_has "my notes.txt" "the notice names the spaced file"
+	after=$(head_of "$COMPANY")
+	if [ "$before" != "$after" ]; then
+		fail "a clone that would lose a spaced ignored file must not be fast-forwarded"
+	fi
+	assert_file_has "$COMPANY/my notes.txt" "USER DATA" "the spaced ignored file keeps its content"
+
+	# The capability detection, on this machine's git. The function is lifted
+	# out of the script under test and run on its own, so the assertion is on
+	# the real pattern and not on a copy of it. git spells the option
+	# '--[no-]overwrite-ignore' in its help text and older versions spell it
+	# '--no-overwrite-ignore'; either one means the merge can keep an ignored
+	# file, and the detection has to say so.
+	body=$(sed -n '/^git_merge_keeps_ignored() {$/,/^}$/p' "$SOURCE_SCRIPT")
+	if [ -z "$body" ]; then
+		fail "could not read git_merge_keeps_ignored from $SOURCE_SCRIPT"
+		return
+	fi
+	probe="$CASE_DIR/capability-probe.sh"
+	# The last line is probe source, not an expansion for this shell.
+	# shellcheck disable=SC2016
+	{
+		printf 'set -o pipefail\n'
+		printf '%s\n' "$body"
+		printf 'git_merge_keeps_ignored "$1"\n'
+	} >"$probe"
+	rc=0
+	"$BASH_BIN" "$probe" "$COMPANY" >/dev/null 2>&1 || rc=$?
+	# 'git merge -h' exits 129, and this harness runs with 'set -o pipefail',
+	# so the help text is captured before it is searched here too.
+	help=$(git -C "$COMPANY" merge -h 2>&1) || true
+	mentions=1
+	printf '%s\n' "$help" |
+		grep -q -E -- '--(\[no-\])?overwrite-ignore' || mentions=0
+	if [ "$mentions" = "1" ] && [ "$rc" != "0" ]; then
+		fail "git merge -h names overwrite-ignore, but the detection answered no"
+	fi
+	if [ "$mentions" = "0" ] && [ "$rc" = "0" ]; then
+		fail "git merge -h does not name overwrite-ignore, but the detection answered yes"
+	fi
 }
 
 # A stamp carries no content, but truncating one writes through every name its
@@ -3718,6 +3883,8 @@ main() {
 	run_case install_hooks_missing_file
 	run_case install_hooks_existing_groups_preserved
 	run_case install_hooks_idempotent
+	run_case install_hooks_embeds_custom_paths
+	run_case sources_path_inside_assembly_refused
 	run_case unlink_leaves_foreign_entries
 	run_case personal_skill_untouched
 	run_case source_listed_twice
@@ -3745,6 +3912,7 @@ main() {
 	run_case symlink_then_parent_resolves_physically
 	run_case manifest_write_failure_keeps_old_manifest
 	run_case manifest_write_failure_restores_repointed_link
+	run_case manifest_write_failure_restores_pruned_links
 	run_case unlink_refuses_symlinked_manifest
 	run_case unlink_leaves_foreign_file_in_stamp_dir
 	run_case prune_failure_keeps_manifest_entry

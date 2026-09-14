@@ -35,6 +35,11 @@ ASSEMBLY_OPT=""
 ASSEMBLY_SET=0
 SOURCES_FILE=""
 ASSEMBLY_DIR=""
+# The two paths this script would use with no option and no environment set,
+# in the same canonical form as the two above. The hook command names a path
+# only when the effective one differs from its default.
+DEFAULT_SOURCES_FILE=""
+DEFAULT_ASSEMBLY_DIR=""
 STAMP_DIR=""
 MANIFEST=""
 LOCK_DIR=""
@@ -70,6 +75,7 @@ OUT_COUNT=0
 DUP_COUNT=0
 NEW_COUNT=0
 REPOINT_COUNT=0
+PRUNEBACK_COUNT=0
 UNREAD_COUNT=0
 
 # Parallel arrays. bash 3.2 has no associative arrays, so every table is a set
@@ -93,6 +99,8 @@ OUT_TARGET=()
 NEW_NAME=()
 REPOINT_NAME=()
 REPOINT_OLD=()
+PRUNEBACK_NAME=()
+PRUNEBACK_TARGET=()
 
 # ---------------------------------------------------------------- output ----
 
@@ -173,8 +181,9 @@ usage() {
 		'  0  nothing to report' \
 		'  1  at least one problem was reported' \
 		'  2  wrong usage, or no source to work from: no sources file, a' \
-		'     sources file that is not a regular file or lists no source, or' \
-		'     a path whose components are not all directories' \
+		'     sources file that is not a regular file, names one of the' \
+		'     assembly control paths, or lists no source, or a path whose' \
+		'     components are not all directories' \
 		'' \
 		'Sources file format, one entry per line. Each path names the directory' \
 		'whose immediate children are skill directories holding a SKILL.md:' \
@@ -233,6 +242,24 @@ shell_quote() {
 		;;
 	*) printf '%s\n' "$p" ;;
 	esac
+}
+
+# This script, spelled as a shell command, with the options that name the
+# installation in effect. A path is written only when it differs from the
+# default for the HOME in effect, so the common spelling stays 'bash <script>'.
+# Every command this script prints for a person to run, and the command
+# install-hooks stores, is built from this: advice that dropped the options
+# would name the default installation, which is not the one being reported on.
+script_command_prefix() {
+	local out
+	out="bash $(shell_quote "$SCRIPT_PATH")"
+	if [ "$SOURCES_FILE" != "$DEFAULT_SOURCES_FILE" ]; then
+		out="$out --sources $(shell_quote "$SOURCES_FILE")"
+	fi
+	if [ "$ASSEMBLY_DIR" != "$DEFAULT_ASSEMBLY_DIR" ]; then
+		out="$out --assembly $(shell_quote "$ASSEMBLY_DIR")"
+	fi
+	printf '%s\n' "$out"
 }
 
 abs_path() {
@@ -529,6 +556,33 @@ sources_path_usable() {
 		return 1
 	fi
 	return 0
+}
+
+# True when the sources path names one of the paths this script keeps for its
+# own bookkeeping inside the assembly: the manifest, the lock directory, the
+# stamp directory or anything below it, and any entry in the assembly root
+# whose name starts with '.skill-links'. Reading one of those as a list of
+# sources, or writing a bootstrap sources file over one, would destroy the
+# record of what this script may remove later. Both paths are canonical here,
+# so a spelling that reaches the same file through a symlink is refused too.
+sources_is_control_path() {
+	local base dir
+	if [ -z "$ASSEMBLY_DIR" ]; then
+		return 1
+	fi
+	case "$SOURCES_FILE" in
+	"$MANIFEST" | "$LOCK_DIR" | "$STAMP_DIR") return 0 ;;
+	"$STAMP_DIR"/*) return 0 ;;
+	esac
+	dir=$(dirname "$SOURCES_FILE")
+	if [ "$dir" != "$ASSEMBLY_DIR" ]; then
+		return 1
+	fi
+	base=$(basename "$SOURCES_FILE")
+	case "$base" in
+	.skill-links*) return 0 ;;
+	esac
+	return 1
 }
 
 load_sources() {
@@ -1011,6 +1065,16 @@ record_repointed_link() {
 	REPOINT_COUNT=$((REPOINT_COUNT + 1))
 }
 
+# A link this run removed because no source produces its name any more, with
+# the target the manifest recorded for it. The old manifest still names it, so
+# a run whose manifest write fails must put that link back: a manifest entry
+# whose link is gone describes an assembly that no longer exists.
+record_pruned_link() {
+	PRUNEBACK_NAME[PRUNEBACK_COUNT]="$1"
+	PRUNEBACK_TARGET[PRUNEBACK_COUNT]="$2"
+	PRUNEBACK_COUNT=$((PRUNEBACK_COUNT + 1))
+}
+
 # Undo this run's own links. The manifest is the only record of what this
 # script may remove later, so a link no manifest covers is a link no later run
 # could prune. When the manifest cannot be written, the links this run created
@@ -1069,6 +1133,38 @@ restore_repointed_links() {
 	REPOINT_COUNT=0
 	if [ "$restored" -gt 0 ]; then
 		err "the manifest was not written, so the $restored link(s) this run repointed were restored to their previous target"
+	fi
+	return 0
+}
+
+# Undo this run's own pruning. The manifest that survives a failed write still
+# records every one of these names, so each link is created again at the target
+# that manifest holds: otherwise the record would claim links the assembly no
+# longer has, and the skills they carried would be gone from every runtime.
+restore_pruned_links() {
+	local i name target entry restored
+	restored=0
+	i=0
+	while [ "$i" -lt "$PRUNEBACK_COUNT" ]; do
+		name=${PRUNEBACK_NAME[$i]}
+		target=${PRUNEBACK_TARGET[$i]}
+		i=$((i + 1))
+		entry="$ASSEMBLY_DIR/$name"
+		# The entry was removed by this run. Anything at that name now is
+		# someone else's, and replacing it is not this script's to do.
+		if [ -e "$entry" ] || [ -L "$entry" ]; then
+			err "could not restore $entry to $target: something else is there now"
+			continue
+		fi
+		if ! ln -s "$target" "$entry"; then
+			err "could not restore $entry to $target; $name is now unlinked"
+			continue
+		fi
+		restored=$((restored + 1))
+	done
+	PRUNEBACK_COUNT=0
+	if [ "$restored" -gt 0 ]; then
+		err "the manifest was not written, so the $restored link(s) this run pruned were created again at their recorded target"
 	fi
 	return 0
 }
@@ -1370,6 +1466,7 @@ prune_manifest() {
 				if remove_link "$entry"; then
 					info "$PROG: pruned dangling $name"
 					PRUNED=$((PRUNED + 1))
+					record_pruned_link "$name" "$target"
 				else
 					err "could not remove the dangling link $entry; kept its manifest entry"
 					record_output "$name" "$target"
@@ -1383,6 +1480,9 @@ prune_manifest() {
 			if remove_link "$entry"; then
 				info "$PROG: pruned $name"
 				PRUNED=$((PRUNED + 1))
+				# Recorded with the target the link really carried, so a
+				# failed manifest write can create exactly that link again.
+				record_pruned_link "$name" "$cur"
 			else
 				err "could not remove $entry; kept its manifest entry"
 				record_output "$name" "$target"
@@ -1521,13 +1621,15 @@ run_link() {
 	OUT_COUNT=0
 	NEW_COUNT=0
 	REPOINT_COUNT=0
+	PRUNEBACK_COUNT=0
 	link_candidates
 	prune_manifest
 	# The run is one transaction: either the manifest records every link this
-	# run created and every link it repointed, or the assembly goes back to
-	# what the manifest on disk still describes.
+	# run created, every link it repointed and every link it pruned, or the
+	# assembly goes back to what the manifest on disk still describes.
 	if ! write_manifest; then
 		restore_repointed_links
+		restore_pruned_links
 		rollback_new_links
 		return 1
 	fi
@@ -1604,15 +1706,32 @@ git_upstream() {
 #
 # 'git merge -h' prints its options and exits; 'git merge --help' opens the
 # manual page, which must never happen inside a session start.
+#
+# The help text is captured before it is searched. 'git merge -h' exits 129,
+# and this script runs with 'set -o pipefail', so the status of a pipeline
+# through git would be that 129 and never the grep's answer.
+#
+# git prints the option as '--[no-]overwrite-ignore', and older versions print
+# '--no-overwrite-ignore', so both spellings count.
 git_merge_keeps_ignored() {
-	git -C "$1" merge -h 2>&1 | grep -q -- '--no-overwrite-ignore'
+	local help
+	help=$(git -C "$1" merge -h 2>&1) || true
+	printf '%s\n' "$help" | grep -q -E -- '--(\[no-\])?overwrite-ignore'
 }
 
-# Every path the work tree ignores, one per line. awk drops the '!! ' status
-# prefix: bash 3.2 misparses a quoted prefix in a parameter expansion inside a
-# command substitution, and this list is read inside one.
+# Every path the work tree ignores, one per line. '-z' is what makes the paths
+# comparable with the ls-tree listing below: without it git quotes a path that
+# holds a space or a non-ASCII byte, and 'my notes.txt' would then never match
+# the tracked path of the same name. awk drops the '!! ' status prefix: bash
+# 3.2 misparses a quoted prefix in a parameter expansion inside a command
+# substitution, and this list is read inside one.
+#
+# A path that holds a newline is out of scope: it survives the NUL-separated
+# transfer but not the line-by-line reading below, and git can neither ignore
+# nor track it on the platforms this script runs on without the same caveat.
 ignored_paths() {
-	git -C "$1" status --porcelain --ignored 2>/dev/null |
+	git -C "$1" status --porcelain=v1 -z --ignored 2>/dev/null |
+		tr '\0' '\n' |
 		awk '/^!! / { print substr($0, 4) }'
 }
 
@@ -1623,7 +1742,9 @@ first_ignored_path_taken_over() {
 	local root up tracked hit
 	root=$1
 	up=$2
-	tracked=$(git -C "$root" ls-tree -r --name-only "$up" 2>/dev/null) || return 1
+	# '-z' for the same reason as in ignored_paths: both listings must spell a
+	# path with a space the one way, or the comparison below never matches.
+	tracked=$(git -C "$root" ls-tree -r --name-only -z "$up" 2>/dev/null | tr '\0' '\n') || return 1
 	if [ -z "$tracked" ]; then
 		return 1
 	fi
@@ -2044,7 +2165,7 @@ cmd_hook() {
 	# the hook's own voice: one line, and a session that still starts.
 	if ! manifest_path_usable 2>/dev/null; then
 		ERRORS=0
-		hook_say "the manifest $MANIFEST is not a regular file this script can replace; run: bash $(shell_quote "$SCRIPT_PATH") link"
+		hook_say "the manifest $MANIFEST is not a regular file this script can replace; run: $(script_command_prefix) link"
 		return 0
 	fi
 	SECONDS=0
@@ -2121,7 +2242,7 @@ cmd_hook() {
 				fi
 			fi
 		fi
-		hook_say "$root is $behind commit(s) behind; run: cd $(shell_quote "$root") && git pull --ff-only && bash $(shell_quote "$SCRIPT_PATH") link"
+		hook_say "$root is $behind commit(s) behind; run: cd $(shell_quote "$root") && git pull --ff-only && $(script_command_prefix) link"
 	done
 
 	if [ "$changed" -eq 1 ]; then
@@ -2137,10 +2258,12 @@ cmd_hook() {
 		OUT_COUNT=0
 		NEW_COUNT=0
 		REPOINT_COUNT=0
+		PRUNEBACK_COUNT=0
 		link_candidates
 		prune_manifest
 		if ! write_manifest; then
 			restore_repointed_links
+			restore_pruned_links
 			rollback_new_links
 		fi
 		ensure_runtime_links
@@ -2165,7 +2288,7 @@ cmd_hook() {
 		missing=$((missing + 1))
 	done
 	if [ "$missing" -gt 0 ]; then
-		hook_say "$missing skill(s) are not linked; run: bash $(shell_quote "$SCRIPT_PATH") link"
+		hook_say "$missing skill(s) are not linked; run: $(script_command_prefix) link"
 	fi
 	return 0
 }
@@ -2272,7 +2395,7 @@ run_hook_bounded() {
 			kill_job KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			replay_hook_output "$out" "$errs"
-			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run 'bash $(shell_quote "$SCRIPT_PATH") check'"
+			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(script_command_prefix) check'"
 			return 0
 		fi
 		sleep 0.2
@@ -2302,8 +2425,15 @@ replay_hook_output() {
 
 # The command is a shell string, so a script path holding a space must be
 # quoted or the hook splits into two words and fails on every session start.
+#
+# An installation that does not use the default paths must be named in the
+# command: the session hook runs with none of the environment the person who
+# installed it had, so without the options it would inspect the default
+# installation and report on an assembly nobody uses. Only a path that differs
+# from the default for the HOME in effect is written, so the common command
+# stays 'bash <script> hook'.
 hook_command_string() {
-	printf 'bash %s hook\n' "$(shell_quote "$SCRIPT_PATH")"
+	printf '%s hook\n' "$(script_command_prefix)"
 }
 
 print_hook_snippet() {
@@ -2362,18 +2492,29 @@ if not isinstance(groups, list):
 
 
 def script_of(value):
+    # The command is "bash <script> [options] hook": an installation on a
+    # non-default sources file or assembly directory names those paths between
+    # the script and the final word. The script position is read directly, so
+    # that the argument of an option can never be mistaken for the script.
     text = str(value)
+    quotes = chr(34) + chr(39)
     try:
         parts = shlex.split(text)
     except ValueError:
         parts = text.split()
-    if len(parts) >= 2 and parts[-1] == "hook":
-        token = parts[-2].strip(chr(34) + chr(39))
-        # The file name must be this script name, not merely end with it:
-        # "custom-link-skills.sh hook" belongs to another tool, and rewriting
-        # it or counting it as ours would break that session start.
-        if os.path.basename(token) == marker:
-            return token
+    if len(parts) < 2 or parts[-1] != "hook":
+        return None
+    index = 0
+    if os.path.basename(parts[0].strip(quotes)) in ("bash", "sh"):
+        index = 1
+    if index > len(parts) - 2:
+        return None
+    token = parts[index].strip(quotes)
+    # The file name must be this script name, not merely end with it:
+    # "custom-link-skills.sh hook" belongs to another tool, and rewriting
+    # it or counting it as ours would break that session start.
+    if os.path.basename(token) == marker:
+        return token
     return None
 
 
@@ -2827,11 +2968,6 @@ main() {
 	case "$SOURCES_FILE" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
-	# Judged once, here, for every command: the readers below all reach this
-	# path, and the bootstrap in ensure_sources_file writes to it.
-	if ! sources_path_usable; then
-		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
-	fi
 
 	if [ "$ASSEMBLY_SET" -eq 1 ]; then
 		case "$ASSEMBLY_OPT" in
@@ -2858,6 +2994,33 @@ main() {
 	MANIFEST="$ASSEMBLY_DIR/.skill-links"
 	STAMP_DIR="$ASSEMBLY_DIR/.skill-links.d"
 	LOCK_DIR="$ASSEMBLY_DIR/.skill-links.lock"
+
+	# The same two paths with no option and no environment, canonicalized the
+	# same way, so that the hook command names only what really differs. A
+	# default that cannot be resolved is compared as it is spelled; nothing
+	# reads or writes it, and the run's own paths were judged above.
+	DEFAULT_SOURCES_FILE="$HOME/.agents/skill-sources"
+	DEFAULT_SOURCES_FILE=$(canonical_path "$DEFAULT_SOURCES_FILE" 2>/dev/null) ||
+		DEFAULT_SOURCES_FILE="$HOME/.agents/skill-sources"
+	DEFAULT_ASSEMBLY_DIR="$HOME/.agents/skills"
+	DEFAULT_ASSEMBLY_DIR=$(canonical_path "$DEFAULT_ASSEMBLY_DIR" 2>/dev/null) ||
+		DEFAULT_ASSEMBLY_DIR="$HOME/.agents/skills"
+	DEFAULT_ASSEMBLY_DIR=${DEFAULT_ASSEMBLY_DIR%/}
+
+	# The sources file is read by every command and written by the bootstrap in
+	# ensure_sources_file. A path that names one of this script's own control
+	# paths inside the assembly would have a run read its bookkeeping as a list
+	# of sources, or write a sources file over it. The comparison is on the
+	# canonical paths, so an alias is refused as well as the plain spelling,
+	# and it runs before anything is read, written or created.
+	if sources_is_control_path; then
+		die "the sources file must not be an assembly control file: $SOURCES_FILE"
+	fi
+	# Judged once, here, for every command: the readers below all reach this
+	# path, and the bootstrap in ensure_sources_file writes to it.
+	if ! sources_path_usable; then
+		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
+	fi
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
 	case "$FETCH_INTERVAL_HOURS" in

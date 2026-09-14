@@ -84,14 +84,22 @@ that is a symlink or is not a regular file, and changes nothing. A manifest
 that is there but cannot be read is refused the same way: `link`, `check` and
 `unlink` report it and exit 1 before they change anything, and the hook steps
 aside. A run is one transaction: if the manifest cannot be written, the links
-that run created are removed again, links it found already recorded stay, and
-the run exits 1. A recorded link that now has to point somewhere else and that
-the script cannot remove is reported, keeps the target it already had and its
-manifest entry, and makes `link` exit 1: no new link is created for it.
+that run created are removed again, the links it repointed carry their previous
+target again, the links it pruned are created again at the target the manifest
+still records, links it found already recorded stay, and the run exits 1. A
+recorded link that now has to point somewhere else and that the script cannot
+remove is reported, keeps the target it already had and its manifest entry,
+and makes `link` exit 1: no new link is created for it.
 
 `~/.agents/skill-sources` must be a regular file. Anything else at that path,
 such as a directory or a named pipe, is refused with exit 2 before the script
-opens it.
+opens it. A sources path that names one of the assembly's own control paths is
+refused the same way, whatever spelling reaches it: the manifest, the lock
+directory, the fetch stamp directory `.skill-links.d` and anything inside it,
+and any entry in the assembly root whose name starts with `.skill-links`. A
+run would otherwise read its own record as a list of sources, or write a
+bootstrap sources file over it. The refusal comes before anything is read,
+written or created.
 
 ### Status
 
@@ -129,6 +137,16 @@ source's path in `~/.agents/skill-sources`. An `auto-update` source is left
 alone when the update would overwrite a file the clone ignores: git replaces
 an ignored file without a word, so the hook names the file and prints the
 manual `git pull --ff-only` command instead.
+
+A session hook runs with none of the environment the person who installed it
+had, so `install-hooks` writes the paths of the installation it was run for
+into the command: `--sources` and `--assembly` are added when `--sources`,
+`--assembly`, `SKILL_SOURCES_FILE` or `SKILLS_ASSEMBLY_DIR` set a path that
+differs from the default for the `HOME` in effect. An installation on the
+default paths keeps the plain `bash <script> hook` command. A rerun of
+`install-hooks` recognises either form and reports the hook as already
+installed. Every command the hook prints for you to run carries the same
+options, so the advice names the installation it reported on.
 
 The hook fetches each source at most every 6 hours (override with
 `SKILL_SOURCES_FETCH_INTERVAL_HOURS`, `0` to fetch every time) and stops
