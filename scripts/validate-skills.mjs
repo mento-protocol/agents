@@ -9,7 +9,9 @@
 //   - description is present and non-empty after trimming, 1-1024 chars
 //
 // Also fails on:
-//   - a skills/* entry that is not a directory
+//   - a skills/* entry that is not a directory, except Finder and Explorer
+//     metadata files (.DS_Store, .localized, Thumbs.db), which are ignored
+//     the same way scripts/link-skills.sh ignores them
 //   - a SKILL.md nested deeper than skills/<name>/SKILL.md
 //
 // Usage: node scripts/validate-skills.mjs [repo-root]
@@ -27,6 +29,11 @@ const repoRoot = rootArg ? resolve(rootArg) : join(scriptDir, "..");
 const skillsDir = join(repoRoot, "skills");
 
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+// Filesystem noise that a macOS or Windows checkout leaves in skills/. The
+// link script treats the same names as noise, so the validator must not fail
+// a local checkout on them.
+const NOISE_NAMES = new Set([".DS_Store", ".localized", "Thumbs.db"]);
 
 /** Collect one problem line per issue found. */
 const problems = [];
@@ -189,6 +196,7 @@ function main() {
   let validatedCount = 0;
   for (const entry of entries) {
     if (!entry.isDirectory()) {
+      if (NOISE_NAMES.has(entry.name)) continue;
       problems.push(`skills/${entry.name}: not a directory`);
       continue;
     }

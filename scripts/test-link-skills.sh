@@ -1500,6 +1500,47 @@ validator_accepts_crlf_frontmatter() {
 	fi
 }
 
+# A macOS checkout can hold skills/.DS_Store. The validator must ignore the
+# same Finder and Explorer metadata names the link script ignores, while a
+# stray regular file of any other name still fails validation.
+validator_ignores_finder_metadata() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/noise/skills/tidy"
+	{
+		printf -- '---\n'
+		printf 'name: tidy\n'
+		printf 'description: a skill beside Finder metadata\n'
+		printf -- '---\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/noise/skills/tidy/SKILL.md"
+	printf 'finder\n' >"$CASE_DIR/noise/skills/.DS_Store"
+	printf 'finder\n' >"$CASE_DIR/noise/skills/.localized"
+	printf 'explorer\n' >"$CASE_DIR/noise/skills/Thumbs.db"
+	out=$(node "$VALIDATOR" "$CASE_DIR/noise" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "Finder metadata must be ignored: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+	printf 'stray\n' >"$CASE_DIR/noise/skills/notes.txt"
+	out=$(node "$VALIDATOR" "$CASE_DIR/noise" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 1 ]; then
+		fail "a stray regular file must still fail validation (exit $rc): $out"
+	fi
+	case "$out" in
+	*"skills/notes.txt: not a directory"*) ;;
+	*) fail "stray file not reported: $out" ;;
+	esac
+}
+
 # This harness must refuse to run when mktemp -d cannot create the temporary
 # root, and it must register no cleanup trap before that check. The failing
 # run starts from a throwaway working directory that holds a sentinel file and
@@ -1633,6 +1674,7 @@ main() {
 	run_case install_hooks_backups_never_overwritten
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
+	run_case validator_ignores_finder_metadata
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
