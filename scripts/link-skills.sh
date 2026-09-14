@@ -148,9 +148,9 @@ usage() {
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
 		'                  A settings file that already runs the hook is left' \
 		'                  byte for byte as it is. An entry that runs a' \
-		'                  link-skills.sh whose path no longer exists is' \
-		'                  repointed at this script; an entry that runs another' \
-		'                  script is left alone.' \
+		'                  link-skills.sh whose path no longer exists, or whose' \
+		'                  path is relative, is repointed at this script; an' \
+		'                  entry that runs another script is left alone.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
 		'  help            Print this text.' \
 		'' \
@@ -1019,7 +1019,18 @@ output_has() {
 # stop instead of going on unlocked. The reason is recorded, not printed: the
 # session hook steps aside in silence, the other commands report it.
 lock_path_usable() {
+	local parent
 	LOCK_PROBLEM=""
+	# mkdir fails on a missing parent for a reason that is neither contention
+	# nor a permission the assembly refuses, and a run that read that failure
+	# as "the assembly cannot be written, go on" would do its work with no
+	# lock at all. Every command that writes the assembly creates it first, so
+	# reaching this is a bug, not a state a user can be in.
+	parent=$(dirname "$LOCK_DIR")
+	if [ ! -d "$parent" ]; then
+		LOCK_PROBLEM="the lock directory $parent does not exist, so the lock $LOCK_DIR cannot be taken. Nothing was changed"
+		return 1
+	fi
 	# -L first: every other test below follows a symlink.
 	if [ -L "$LOCK_DIR" ]; then
 		LOCK_PROBLEM="the lock path $LOCK_DIR is a symlink; move it aside, then run the command again. Nothing was changed"
@@ -1892,6 +1903,13 @@ cmd_hook() {
 		return 0
 	fi
 	QUIET=1
+	# The hook links and prunes, so it writes the assembly and needs the lock
+	# that lives inside it. A first session on a machine finds no assembly at
+	# all, and a lock cannot be taken in a directory that is not there.
+	if ! mkdir -p "$ASSEMBLY_DIR"; then
+		hook_say "could not create the assembly directory $ASSEMBLY_DIR"
+		return 0
+	fi
 	# A session start must never wait on another run, and a notice it skips
 	# costs nothing: the next session prints it. A link or unlink run in
 	# progress is also about to make this run's reading of the assembly wrong.
@@ -2104,10 +2122,18 @@ run_hook_bounded() {
 		return 0
 	fi
 	set -m 2>/dev/null || true
+	# The body takes its own lock, and a subshell starts with the shell's
+	# default handlers, so the EXIT trap main registered never runs there.
+	# Without the trap below the hook leaves its lock directory in the assembly
+	# for the next run to clear as stale. TERM is trapped too: the deadline
+	# path below kills this job, and a killed shell runs no EXIT trap of its
+	# own.
+	#
 	# A host that forbids setpgid makes bash report it, and that report belongs
 	# to no one: it is dropped with the brace group's stderr. The body itself
 	# writes to the two files.
 	{ (
+		trap 'release_lock; exit 0' EXIT TERM
 		cmd_hook || true
 	) >"$out" 2>"$errs" & } 2>/dev/null
 	pid=$!
@@ -2246,7 +2272,12 @@ for group in groups:
         token = script_of(text)
         if token is None:
             continue
-        if os.path.isfile(token):
+        # A SessionStart hook runs from whatever directory the session opens
+        # in, so a relative script path names a different file in every
+        # project and usually no file at all. It is stale wherever this
+        # command happens to run from, even when the current directory holds
+        # a file of that name right now.
+        if os.path.isabs(token) and os.path.isfile(token):
             found = True
         else:
             stale.append(entry)
@@ -2292,9 +2323,11 @@ sys.stdout.write(status + "\n" + out + "\n")
 # The command string is compared exactly, and the last two tokens of any other
 # command are compared with the script name, so a group written by an older
 # version, by another clone, or with a quoted path is recognised instead of
-# duplicated. A matching command whose script path no longer exists is dead,
-# so it is rewritten to the current command instead of being kept. Prints the
-# status word, and the path of the merged temporary file when there is one.
+# duplicated. A matching command whose script path no longer exists, or whose
+# script path is relative and so names nothing from the directory a session
+# starts in, is dead: it is rewritten to the current command instead of being
+# kept. Prints the status word, and the path of the merged temporary file when
+# there is one.
 merge_hook_json() {
 	python3 -c "$PY_MERGE_HOOK" "$1" \
 		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS"
@@ -2422,6 +2455,14 @@ cmd_install_hooks() {
 cmd_unlink() {
 	local i name target entry cur stamp kept rc
 	rc=0
+	# The lock lives inside the assembly, so the directory has to be there
+	# before the lock can be taken. An assembly that was never created holds
+	# nothing to remove, and this leaves an empty directory behind, which the
+	# next link run fills.
+	if ! mkdir -p "$ASSEMBLY_DIR"; then
+		err "could not create the assembly directory $ASSEMBLY_DIR"
+		return 1
+	fi
 	take_lock wait || rc=$?
 	if [ "$rc" -eq 2 ]; then
 		err "$LOCK_PROBLEM"

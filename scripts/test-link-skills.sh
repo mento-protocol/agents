@@ -179,6 +179,18 @@ ls_run() {
 	LS_RC=$?
 }
 
+# The same run, started from another working directory. A SessionStart hook
+# runs from the directory of whatever project opens, so a case about relative
+# paths has to choose where the command starts. The subshell keeps the change
+# of directory out of the harness itself.
+ls_run_in() {
+	local dir
+	dir=$1
+	shift
+	LS_OUT=$(cd "$dir" && "$BASH_BIN" "$LS" "$@" 2>&1)
+	LS_RC=$?
+}
+
 # A bare repository, a seed clone that pushes commits, and the clone the
 # sources file points at. The script under test is committed into the repo so
 # that the clone looks exactly like a coworker's checkout.
@@ -1572,6 +1584,67 @@ install_hooks_replaces_dead_script_path() {
 	assert_out_has "already runs the hook" "the replacement is recognised"
 }
 
+# A hook entry whose script path is relative resolves against whatever
+# directory a session opens in, so it is dead wherever install-hooks itself is
+# run from. It is rewritten to the absolute path even while the command runs
+# from the clone root, where that relative path does name this very file.
+install_hooks_rewrites_relative_script_path() {
+	local clone file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	clone="$CASE_DIR/clone"
+	mkdir -p "$clone/scripts"
+	cp "$SOURCE_SCRIPT" "$clone/scripts/link-skills.sh"
+	chmod +x "$clone/scripts/link-skills.sh"
+	LS="$clone/scripts/link-skills.sh"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		'            "command": "bash scripts/link-skills.sh hook",' \
+		'            "timeout": 20' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$file"
+	# The relative path names a file that exists from here.
+	assert_exists "$clone/scripts/link-skills.sh" "the clone holds the script"
+	ls_run_in "$clone" install-hooks
+	assert_rc 0 "install-hooks from the clone root"
+	assert_out_has "replaced a stale hook" "replacement reported"
+	assert_file_has "$file" "$LS hook" "the absolute script path is installed"
+	assert_file_lacks "$file" '"bash scripts/link-skills.sh hook"' \
+		"the relative command is gone"
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	# The absolute entry is recognised, from the clone root and from elsewhere.
+	ls_run_in "$clone" install-hooks
+	assert_rc 0 "second install-hooks from the clone root"
+	assert_out_has "already runs the hook" "the replacement is recognised"
+	ls_run_in "$CASE_DIR" install-hooks
+	assert_rc 0 "install-hooks from another directory"
+	assert_out_has "already runs the hook" "the replacement is recognised anywhere"
+}
+
 # An assembly path that resolves to the filesystem root is refused, however it
 # is spelled: the check is on the physical path, not on the text.
 root_alias_assembly_refused() {
@@ -1701,6 +1774,86 @@ link_refuses_while_locked() {
 	assert_rc 0 "link once the lock is gone"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 	assert_absent "$lock" "the lock is released on exit"
+}
+
+# The lock lives inside the assembly, so the very first run on a machine, which
+# finds no assembly at all, must create the directory before it takes the lock
+# instead of going on unlocked. The post-condition is what a test can see: the
+# assembly and its manifest are there, no lock is left behind, and the lock a
+# later run takes in that directory is honoured by every command.
+lock_taken_on_first_run() {
+	local lock pid
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	assert_absent "$HOME/.agents/skills" "no assembly before the first run"
+
+	ls_run link
+	assert_rc 0 "first link"
+	assert_is_dir_not_link "$HOME/.agents/skills" "the first run created the assembly"
+	assert_exists "$HOME/.agents/skills/.skill-links" "the manifest is there"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	assert_absent "$lock" "no lock is left behind"
+
+	# The hook body runs as a background job of its own, and the lock it takes
+	# there is given back at the end of that job, not left for the next run to
+	# clear as stale.
+	ls_run hook
+	assert_rc 0 "hook on a linked assembly"
+	assert_absent "$lock" "the hook gave its lock back"
+
+	# The directory the first run created is where every later lock is taken.
+	mkdir "$lock"
+	sleep 60 &
+	pid=$!
+	printf '%s\n' "$pid" >"$lock/pid"
+	ls_run link
+	assert_rc 1 "link while the lock is held"
+	assert_out_has "holds the lock" "lock message"
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	rm -f "$lock/pid"
+	rmdir "$lock"
+
+	# unlink and the hook create the assembly the same way, and leave no lock.
+	ls_run unlink
+	assert_rc 0 "unlink"
+	rm -rf "$HOME/.agents/skills"
+	ls_run unlink
+	assert_rc 0 "unlink with no assembly"
+	assert_is_dir_not_link "$HOME/.agents/skills" "unlink created the assembly"
+	assert_absent "$lock" "unlink left no lock behind"
+	rm -rf "$HOME/.agents/skills"
+	ls_run hook
+	assert_rc 0 "hook with no assembly"
+	assert_is_dir_not_link "$HOME/.agents/skills" "the hook created the assembly"
+	# The hook reports drift, it does not link: that is the 'link' command's
+	# work. What matters here is that it held a real lock and gave it back.
+	assert_out_has "not linked" "the hook reports the unlinked skill"
+	assert_absent "$lock" "the hook left no lock behind"
+}
+
+# An assembly named below directories that do not exist yet is created whole,
+# and the lock inside it is taken and released like any other.
+nested_missing_assembly_is_created() {
+	local dir lock
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	dir="$CASE_DIR/a/b/skills"
+	lock="$dir/.skill-links.lock"
+
+	ls_run --assembly "$dir" link
+	assert_rc 0 "link into a nested assembly that does not exist"
+	assert_is_dir_not_link "$dir" "the nested assembly was created"
+	assert_exists "$dir/.skill-links" "the manifest is there"
+	assert_link "$dir/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "no lock is left behind"
+
+	ls_run --assembly "$dir" unlink
+	assert_rc 0 "unlink from the nested assembly"
+	assert_absent "$dir/alpha" "the link is gone"
+	assert_absent "$lock" "unlink left no lock behind"
 }
 
 # A lock left behind by a run that was killed must not block every later run.
@@ -3136,6 +3289,8 @@ main() {
 	run_case prune_failure_keeps_manifest_entry
 	run_case directory_at_manifest_path_refused
 	run_case link_refuses_while_locked
+	run_case lock_taken_on_first_run
+	run_case nested_missing_assembly_is_created
 	run_case stale_lock_is_removed
 	run_case aged_lock_with_live_owner_is_kept
 	run_case symlinked_lock_refused
@@ -3160,6 +3315,7 @@ main() {
 	run_case install_hooks_backups_never_overwritten
 	run_case install_hooks_leaves_minified_file_unchanged
 	run_case install_hooks_replaces_dead_script_path
+	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter

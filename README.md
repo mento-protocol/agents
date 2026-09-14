@@ -65,9 +65,13 @@ subcommand is `link`) re-links the assembly directory to match.
 One run at a time writes the assembly. `link` and `unlink` take the lock
 directory `~/.agents/skills/.skill-links.lock`, wait up to 10 seconds for a run
 already in progress, and then exit 1 having changed nothing; the session hook
-skips its own update silently instead of waiting. A lock left behind by a run
-that was killed is removed once its process is gone. A lock whose owner is
-still running is kept however old it is, and a lock that records no owner at
+skips its own update silently instead of waiting. The lock lives inside the
+assembly directory, so every command that writes the assembly creates that
+directory first: the very first run on a machine is locked like every other
+one. Each run gives its lock back when it ends, the session hook included. A
+lock left behind by a run that was killed is removed once its process is
+gone. A lock whose owner is still running is kept however old it is, and a
+lock that records no owner at
 all is removed after two minutes. A symlink or a file at the lock path is not a
 lock this script made: `link` and `unlink` report it and exit 1 without reading
 or removing anything below it, and the hook steps aside in silence.
@@ -144,9 +148,12 @@ runtime is in one of those states. A file that already runs the hook is left
 byte for byte as it is: it is neither reformatted nor backed up. A hook entry
 whose script file name is exactly `link-skills.sh` and whose path no longer
 exists is dead, so it is repointed at this script instead of being kept, and
-the run reports that it replaced a stale hook. An entry that runs a different
-script, such as `custom-link-skills.sh hook`, is another tool's, so it is kept
-as it is and this hook is added beside it. A file it creates itself gets mode
+the run reports that it replaced a stale hook. An entry whose script path is
+relative, such as `bash scripts/link-skills.sh hook`, is dead in the same way:
+a session start runs from the directory of the project it opens, where that
+path names another file or none, so it is repointed too. An entry that runs a
+different script, such as `custom-link-skills.sh hook`, is another tool's, so
+it is kept as it is and this hook is added beside it. A file it creates itself gets mode
 `0600` and no backup. A backup name already in use
 gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
 home directory does not exist yet is skipped and named in the output. The JSON
