@@ -1197,6 +1197,45 @@ sources_path_inside_assembly_refused() {
 	assert_link "$assembly/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
+# A final symlink component is left as it is spelled, so an alias to the
+# manifest passed every textual control-path test while naming the manifest
+# itself: the run then read the manifest's own records as missing sources and
+# pruned every link it describes.
+sources_symlink_to_manifest_refused() {
+	local manifest alias inside
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	manifest="$HOME/.agents/skills/.skill-links"
+	cp "$manifest" "$CASE_DIR/manifest.before"
+
+	alias="$CASE_DIR/alias"
+	ln -s "$manifest" "$alias"
+	ls_run --sources "$alias" link
+	assert_rc 2 "link through an alias to the manifest"
+	assert_out_has "must not be an assembly control file" "link names the refusal"
+	ls_run --sources "$alias" check
+	assert_rc 2 "check through the alias"
+	assert_out_has "must not be an assembly control file" "check names the refusal"
+	ls_run --sources "$alias" unlink
+	assert_rc 2 "unlink through the alias"
+	assert_out_has "must not be an assembly control file" "unlink names the refusal"
+	assert_same_bytes "$manifest" "$CASE_DIR/manifest.before" "the manifest is untouched"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link kept"
+
+	# A symlink in the assembly root is a control path by its own name,
+	# whatever it points at.
+	inside="$HOME/.agents/skills/.skill-links-alias"
+	ln -s "$HOME/.agents/skill-sources" "$inside"
+	ls_run --sources "$inside" link
+	assert_rc 2 "an alias inside the assembly"
+	assert_out_has "must not be an assembly control file" "the refusal is named"
+	assert_same_bytes "$manifest" "$CASE_DIR/manifest.before" "the manifest is still untouched"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link still kept"
+}
+
 unlink_leaves_foreign_entries() {
 	mkskill "$CASE_DIR/one" alpha
 	mkdir -p "$CASE_DIR/other/kept"
@@ -3438,12 +3477,67 @@ validator_rejects_mapping_indicator_in_plain_scalar() {
 }
 
 # A key with no inline value takes whatever the indented lines under it spell.
+# A plain value may not open with a reserved indicator. YAML reads "- ", "? "
+# and ": " as a sequence entry, a complex key and a mapping value, and refuses
+# ",", "@", "`" and "%" outright, so such a line is not the text it looks like
+# and no loader reads the document. The same characters followed by anything
+# else, and anywhere but at the head, are ordinary text.
+validator_rejects_reserved_leading_indicator() {
+	local out rc form n tick
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	# Octal 140 is the backtick, which a literal would hide in a quoting note.
+	tick=$(printf '\140cmd\140')
+	n=0
+	for form in '- item' '? key' '@handle' "$tick" '%tag' ',list' ': bar' '-' '?'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/reserved-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/reserved-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/reserved-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"frontmatter line 3 is not valid YAML"*) ;;
+		*) fail "description '$form' must be reported by line: $out" ;;
+		esac
+	done
+
+	n=0
+	for form in '-foo' '?x' ':bar' 'e-mail' 'a - b' '50% of it'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/reserved-ok-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/reserved-ok-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/reserved-ok-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "description '$form' must validate: $out"
+		fi
+	done
+}
+
 # Under "description:" a "foo: bar" line is a mapping and a "- item" line is a
 # list, so a runtime that reads either gets no text at all. Folding them into
 # a string hides that. Other keys may nest a collection, and a continuation
 # that is ordinary text is still the description it looks like. A continuation
-# line that is a quoted scalar is text as well, quotes and all, so only a
-# mapping indicator outside the quotes makes the value a mapping.
+# line that is a quoted scalar is a string as well, read from its quotes, so
+# only a mapping indicator outside the quotes makes the value a mapping.
 validator_rejects_nested_collection_value() {
 	local out rc
 	if ! have_node; then
@@ -3584,6 +3678,134 @@ validator_rejects_nested_collection_value() {
 	case "$out" in
 	'skills/noted: "description" must be a plain string') ;;
 	*) fail "the quoted key must be reported once as a plain string: $out" ;;
+	esac
+}
+
+# A key with no inline value may carry a quoted scalar on its first indented
+# line. Folding that line as plain text keeps the quote characters, so an
+# empty description measures as two characters and a description one over the
+# limit still fits.
+validator_decodes_quoted_continuation_value() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	fits=$(printf '%1024s' '' | tr ' ' 'a')
+	over=$(printf '%1025s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/cont-empty/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  ""\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-empty/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-empty" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an empty quoted continuation must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the empty description must name the length limit: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/cont-text/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "text"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-text/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-text" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted continuation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# The quotes are not part of the value, so 1024 characters between them
+	# fit and 1025 do not.
+	mkdir -p "$CASE_DIR/cont-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "%s"\n' "$fits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "1024 characters between the quotes must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/cont-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "%s"\n' "$over"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "1025 characters between the quotes must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the long continuation must name the length limit: $out" ;;
+	esac
+
+	# Text after the closing quote is malformed here as well.
+	mkdir -p "$CASE_DIR/cont-malformed/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf "  'a' b\n"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-malformed/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-malformed" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "text after a closing quote on a continuation must fail: $out"
+	fi
+	case "$out" in
+	*'"description" has an unterminated or malformed quoted scalar'*) ;;
+	*) fail "the trailing text must name the quoted scalar: $out" ;;
+	esac
+
+	# An escape the decoder refuses is reported on a continuation line too.
+	mkdir -p "$CASE_DIR/cont-escape/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "a\\qb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/cont-escape/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/cont-escape" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an invalid escape on a continuation must fail: $out"
+	fi
+	case "$out" in
+	*'invalid escape sequence "\q"'*) ;;
+	*) fail "the continuation escape must be named: $out" ;;
 	esac
 }
 
@@ -4880,6 +5102,226 @@ validator_rejects_underindented_block_line() {
 	esac
 }
 
+# YAML never reads a tab as indentation, and a loader refuses the document on
+# a line that indents with one. Counting the tab accepts a block body and a
+# plain continuation no runtime can load. A tab past the indentation is
+# content, and it is measured like any other character.
+validator_rejects_tab_indentation() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	# "head", a newline and the tab are 6 characters of the 1024.
+	fits=$(printf '%1018s' '' | tr ' ' 'a')
+	over=$(printf '%1019s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/tab-block/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '\ttext\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-block/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-block" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a tab-indented block body must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the tab-indented body line must be reported by number: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/tab-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: first\n'
+		printf '\tmore\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a tab-indented continuation must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the tab-indented continuation must be reported by number: $out" ;;
+	esac
+
+	# A tab after the block indentation is content, so the body is well formed.
+	mkdir -p "$CASE_DIR/tab-content/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  \ttabbed content\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-content/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-content" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a tab after the block indentation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# The same tab counts as one character of the value. The empty check trims
+	# a leading one, so it is measured on the second body line.
+	mkdir -p "$CASE_DIR/tab-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  head\n'
+		printf '  \t%s\n' "$fits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "1024 characters with the tab must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/tab-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  head\n'
+		printf '  \t%s\n' "$over"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "the tab must be measured as one character: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the long body must name the length limit: $out" ;;
+	esac
+
+	# A tab inside the indentation of a later body line is under-indented.
+	mkdir -p "$CASE_DIR/tab-under/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '    four spaces set the indentation\n'
+		printf '  \ttwo spaces and a tab do not reach it\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-under/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-under" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a tab inside the block indentation must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 5 is not valid YAML"*) ;;
+	*) fail "the tabbed indentation must be reported by number: $out" ;;
+	esac
+
+	# A body line that holds nothing but a tab is an empty line by its text and
+	# still sits inside the block indentation, so every loader stops on it.
+	mkdir -p "$CASE_DIR/tab-blank/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  head\n'
+		printf '\t\n'
+		printf '  tail\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-blank/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-blank" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a tab-only body line must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 5 is not valid YAML"*) ;;
+	*) fail "the tab-only body line must be reported by number: $out" ;;
+	esac
+
+	# The same line before the one that sets the indentation.
+	mkdir -p "$CASE_DIR/tab-blank-first/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '\t\n'
+		printf '  text\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-blank-first/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-blank-first" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a leading tab-only body line must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the leading tab-only line must be reported by number: $out" ;;
+	esac
+
+	# A tab past the block indentation is content on a line that carries
+	# nothing else, so the body stays well formed.
+	mkdir -p "$CASE_DIR/tab-blank-content/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  head\n'
+		printf '  \t\n'
+		printf '  tail\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-blank-content/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-blank-content" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a tab past the block indentation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A tab after the spaces of a plain continuation is text: YAML drops the
+	# leading whitespace of the line when it folds it in.
+	mkdir -p "$CASE_DIR/tab-folded/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: first\n'
+		printf '  \tmore\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/tab-folded/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/tab-folded" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a tab after the continuation indentation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A relink is a removal and a creation. When the creation fails, the removal
 # has already happened: the name carries nothing at all. The old link has to
 # come back, and the manifest has to keep recording the target it carries,
@@ -5040,6 +5482,95 @@ install_hooks_replaces_malformed_option_command() {
 	assert_out_has "already runs the hook" \
 		"the sources file of this run counts as installed"
 	assert_out_lacks "replaced a malformed" "the spelled-out entry is not rewritten"
+}
+
+# Two SessionStart groups, the first holding $2 and the second $3, both with
+# the type and the timeout this script installs.
+write_two_hook_groups() {
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"$2\"," \
+		'            "timeout": 60' \
+		'          }' \
+		'        ]' \
+		'      },' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"$3\"," \
+		'            "timeout": 60' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$1"
+}
+
+# A valid entry used to stop every repair branch, so a bad entry beside it
+# stayed active: "--sources hook" reads the word as the option operand and
+# runs link at every session start, whatever the good entry says.
+install_hooks_removes_bad_duplicate_beside_valid_entry() {
+	local file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	write_two_hook_groups "$file" "bash $LS hook" "bash $LS --sources hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a malformed duplicate"
+	assert_out_has "removed 1 duplicate hook entry in $file" "the removal is reported"
+	assert_file_has "$file" "bash $LS hook" "the valid entry is kept"
+	assert_file_lacks "$file" "--sources hook" "the malformed duplicate is gone"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+
+	ls_run install-hooks
+	assert_rc 0 "a rerun"
+	assert_out_has "already runs the hook" "the file is installed once it is deduplicated"
+	assert_out_lacks "duplicate hook entr" "nothing is removed twice"
+
+	# The same for a duplicate whose script path is gone. Without a valid
+	# entry beside it that one would be repointed instead of removed.
+	rm -f "$file" "$file".bak-*
+	write_two_hook_groups "$file" "bash $LS hook" \
+		"bash $CASE_DIR/gone/link-skills.sh hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a stale duplicate"
+	assert_out_has "removed 1 duplicate hook entry in $file" "the stale removal is reported"
+	assert_file_lacks "$file" "$CASE_DIR/gone" "the stale duplicate is gone"
+	assert_file_has "$file" "bash $LS hook" "the valid entry is kept beside it"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command after the stale duplicate, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup for the stale duplicate, found $n"
+	fi
 }
 
 # One field of the first SessionStart hook entry of a settings file, or
@@ -5418,6 +5949,73 @@ validator_rejects_unknown_escape() {
 	if [ "$rc" -ne 0 ]; then
 		fail "a valid \\x41 escape must validate: $out"
 	fi
+}
+
+# A surrogate code point is no scalar value: libyaml refuses the escape, and
+# the decoded text cannot even be encoded as UTF-8. It sits under U+10FFFF and
+# String.fromCodePoint takes it, so the range has to be refused by name.
+validator_rejects_surrogate_escape() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/surrogate-high/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\uD800b"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/surrogate-high/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/surrogate-high" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a high surrogate escape must fail: $out"
+	fi
+	case "$out" in
+	*'invalid escape sequence "\uD800"'*) ;;
+	*) fail "the failure must name the surrogate escape: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/surrogate-low/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\U0000DFFFb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/surrogate-low/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/surrogate-low" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a low surrogate escape must fail: $out"
+	fi
+	case "$out" in
+	*'invalid escape sequence "\U0000DFFF"'*) ;;
+	*) fail "the failure must name the eight digit escape: $out" ;;
+	esac
+
+	# The code points on both sides of the range, and one past the basic
+	# multilingual plane, are scalar values and stay valid.
+	mkdir -p "$CASE_DIR/surrogate-edges/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\uD7FF\\uE000\\U0001F600"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/surrogate-edges/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/surrogate-edges" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "the escapes around the surrogate range must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
 }
 
 # A quoted scalar does not end where its line ends: YAML reads on to the
@@ -5976,6 +6574,42 @@ candidate_containing_assembly_refused() {
 	assert_exists "$CASE_DIR/src/foo/SKILL.md" "the candidate directory is left alone"
 }
 
+# A candidate that resolves to a runtime home is a loop waiting to be walked:
+# the assembly would hold alpha -> $HOME/.claude while ensure_runtime_links
+# points $HOME/.claude/skills back at the assembly.
+candidate_containing_runtime_path_refused() {
+	mkdir -p "$HOME/.claude" "$CASE_DIR/src"
+	printf 'Body.\n' >"$HOME/.claude/SKILL.md"
+	ln -s "$HOME/.claude" "$CASE_DIR/src/alpha"
+	mkskill "$CASE_DIR/src" beta
+	write_sources
+	add_source "$CASE_DIR/src"
+
+	ls_run link
+	assert_rc 1 "link with a candidate on the Claude Code home"
+	assert_out_has "contains the runtime path $HOME/.claude/skills" \
+		"the refusal names the runtime path"
+	assert_out_has "errors 1" "the summary counts it"
+	assert_absent "$HOME/.agents/skills/alpha" "no link to the runtime home"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/src/beta" "the other skill is linked"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "the runtime link is created"
+	assert_exists "$HOME/.claude/SKILL.md" "the runtime home is left alone"
+
+	# A candidate on the home directory holds both runtime paths. The assembly
+	# here sits outside the home, so the runtime guard is what refuses it and
+	# not the guard on the assembly.
+	printf 'Body.\n' >"$HOME/SKILL.md"
+	rm "$CASE_DIR/src/alpha" "$HOME/.claude/skills"
+	ln -s "$HOME" "$CASE_DIR/src/alpha"
+	ls_run --assembly "$CASE_DIR/assembly" link
+	assert_rc 1 "link with a candidate on the home directory"
+	assert_out_has "contains the runtime path" "the refusal is reported"
+	assert_out_lacks "contains the assembly" "the runtime guard is the one that fires"
+	assert_absent "$CASE_DIR/assembly/alpha" "no link to the home directory"
+	assert_link "$CASE_DIR/assembly/beta" "$CASE_DIR/src/beta" "the other skill is linked again"
+	assert_link "$HOME/.claude/skills" "$CASE_DIR/assembly" "the runtime link is created again"
+}
+
 # A host that gives the hook no temporary file loses the output capture and
 # nothing else: the body still runs as a bounded job, so a git subcommand that
 # outlasts the deadline is still stopped and the session still starts.
@@ -6523,14 +7157,17 @@ main() {
 	run_case install_hooks_idempotent
 	run_case install_hooks_embeds_custom_paths
 	run_case sources_path_inside_assembly_refused
+	run_case sources_symlink_to_manifest_refused
 	run_case install_hooks_replaces_other_installation
 	run_case install_hooks_replaces_malformed_option_command
+	run_case install_hooks_removes_bad_duplicate_beside_valid_entry
 	run_case install_hooks_replacement_resets_timeout
 	run_case assembly_inside_runtime_home_refused
 	run_case relative_source_missing_keeps_links
 	run_case dangling_symlink_component_refused
 	run_case stale_lock_with_reused_pid_is_cleared
 	run_case candidate_containing_assembly_refused
+	run_case candidate_containing_runtime_path_refused
 	run_case hook_bounded_without_tmpdir
 	run_case install_hooks_normalizes_exact_command_entry
 	run_case relink_creation_failure_restores_old_link
@@ -6624,15 +7261,19 @@ main() {
 	run_case validator_folded_block_more_indented_boundary
 	run_case validator_block_keeps_overindented_space_line
 	run_case validator_rejects_underindented_block_line
+	run_case validator_rejects_tab_indentation
 	run_case validator_decodes_all_yaml_escapes
 	run_case validator_rejects_unknown_escape
+	run_case validator_rejects_surrogate_escape
 	run_case validator_multiline_quoted_scalar
 	run_case validator_rejects_non_string_name
 	run_case validator_rejects_malformed_frontmatter
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
+	run_case validator_rejects_reserved_leading_indicator
 	run_case validator_rejects_nested_collection_value
+	run_case validator_decodes_quoted_continuation_value
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_rejects_unterminated_quote
 	run_case validator_block_scalar_keeps_internal_spaces

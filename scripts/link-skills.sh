@@ -610,30 +610,59 @@ sources_path_usable() {
 	return 0
 }
 
-# True when the sources path names one of the paths this script keeps for its
-# own bookkeeping inside the assembly: the manifest, the lock directory, the
-# stamp directory or anything below it, and any entry in the assembly root
-# whose name starts with '.skill-links'. Reading one of those as a list of
-# sources, or writing a bootstrap sources file over one, would destroy the
-# record of what this script may remove later. Both paths are canonical here,
-# so a spelling that reaches the same file through a symlink is refused too.
-sources_is_control_path() {
-	local base dir
-	if [ -z "$ASSEMBLY_DIR" ]; then
-		return 1
-	fi
-	case "$SOURCES_FILE" in
+# True when a path names one of the paths this script keeps for its own
+# bookkeeping inside the assembly: the manifest, the lock directory, the stamp
+# directory or anything below it, and any entry in the assembly root whose
+# name starts with '.skill-links'. The comparison is textual, so the caller
+# decides which spelling of the sources path to hand in.
+control_path_matches() {
+	local p base dir
+	p=$1
+	case "$p" in
 	"$MANIFEST" | "$LOCK_DIR" | "$STAMP_DIR") return 0 ;;
 	"$STAMP_DIR"/*) return 0 ;;
 	esac
-	dir=$(dirname "$SOURCES_FILE")
+	dir=$(dirname "$p")
 	if [ "$dir" != "$ASSEMBLY_DIR" ]; then
 		return 1
 	fi
-	base=$(basename "$SOURCES_FILE")
+	base=$(basename "$p")
 	case "$base" in
 	.skill-links*) return 0 ;;
 	esac
+	return 1
+}
+
+# True when the sources path is one of those control paths. Reading one of
+# them as a list of sources, or writing a bootstrap sources file over one,
+# would destroy the record of what this script may remove later.
+#
+# The path is judged by text and by identity. canonical_path resolves every
+# directory it walks through but leaves a final symlink component as it is
+# spelled, so '--sources <alias>' with the alias pointing at the manifest
+# passes every textual test while naming the manifest itself: the run would
+# then read the manifest's records as missing sources and prune every link it
+# describes.
+sources_is_control_path() {
+	local real
+	if [ -z "$ASSEMBLY_DIR" ]; then
+		return 1
+	fi
+	if control_path_matches "$SOURCES_FILE"; then
+		return 0
+	fi
+	# Device and inode, so an alias to the manifest is caught whatever chain
+	# of links and directories reaches it.
+	if [ -e "$SOURCES_FILE" ] && [ -e "$MANIFEST" ] &&
+		[ "$SOURCES_FILE" -ef "$MANIFEST" ]; then
+		return 0
+	fi
+	# The other control paths need not exist yet, so the chain is followed by
+	# hand and the end of it is compared as text again.
+	real=$(resolve_symlink_path "$SOURCES_FILE")
+	if [ "$real" != "$SOURCES_FILE" ] && control_path_matches "$real"; then
+		return 0
+	fi
 	return 1
 }
 
@@ -1554,8 +1583,38 @@ candidate_contains_assembly() {
 	return 1
 }
 
+# The runtime skills destination a candidate directory is, or holds, printed
+# so the refusal can name it. Linking such a candidate would have the assembly
+# hold <candidate>/skills -> assembly while ensure_runtime_links points that
+# same runtime path at the assembly, and every walk through either one would
+# go round without end. The candidate is compared physically and the runtime
+# paths are resolved as far as they exist, so a candidate reached through a
+# symlink is caught as well as the plain spelling.
+candidate_runtime_path() {
+	local t link
+	if ! t=$(phys_dir "$1"); then
+		return 1
+	fi
+	t=${t%/}
+	for link in \
+		"$(runtime_link_path "$HOME/.claude")" \
+		"$(runtime_link_path "$HOME/.codex")"; do
+		if [ "$t" = "$link" ]; then
+			printf '%s\n' "$link"
+			return 0
+		fi
+		case "$link/" in
+		"$t"/*)
+			printf '%s\n' "$link"
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
 link_candidates() {
-	local i name target spelling oldspell entry cur
+	local i name target spelling oldspell entry cur runtime
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do
 		name=${CAND_NAME[$i]}
@@ -1574,6 +1633,10 @@ link_candidates() {
 		fi
 		if candidate_contains_assembly "$target"; then
 			err "candidate $name at $target contains the assembly; not linked"
+			continue
+		fi
+		if runtime=$(candidate_runtime_path "$target"); then
+			err "skill directory $target contains the runtime path $runtime; not linked"
 			continue
 		fi
 		entry="$ASSEMBLY_DIR/$name"
@@ -2667,6 +2730,8 @@ print_hook_snippet() {
 #                    an entry that ran this script with a tail that is not a
 #                    hook run now holds the hook
 #   replaced-other   an entry that ran another installation now holds the hook
+#   deduplicated <n> the hook was already installed and <n> other entries this
+#                    script owns were removed from the file
 # For every status but "unchanged" it writes the merged JSON to a temporary
 # file of its own next to the settings file and prints that path on the second
 # line, so the name is never predictable and never collides with a second run.
@@ -2831,13 +2896,16 @@ def same_installation(options):
     return True
 
 
-found = False
+valid = []
 stale = []
 other = []
 malformed = []
 wrong_shell = []
 gone_shell = []
 normalize = []
+# The list each collected entry sits in, so that an entry removed below is
+# removed from the group it was really read from.
+holder = {}
 for group in groups:
     if not isinstance(group, dict):
         continue
@@ -2847,6 +2915,7 @@ for group in groups:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
+        holder[id(entry)] = entries
         text = str(entry.get("command", ""))
         if text.strip() == command.strip():
             # The command is the one this run installs, and the rest of the
@@ -2858,7 +2927,7 @@ for group in groups:
             if entry.get("type") != "command" or entry.get("timeout") != timeout:
                 normalize.append(entry)
             else:
-                found = True
+                valid.append(entry)
             continue
         parsed = parse_command(text)
         if parsed is None:
@@ -2906,7 +2975,34 @@ for group in groups:
         if not same_installation(options):
             other.append(entry)
             continue
-        found = True
+        valid.append(entry)
+
+found = bool(valid)
+
+
+def drop_entries(victims):
+    # By identity: two entries can hold equal JSON and only the one collected
+    # above may go. A group whose entries this removal emptied would run
+    # nothing, so it goes with them; a group that was already empty is left
+    # where it is, because nothing here made it so.
+    touched = {}
+    for entry in victims:
+        entries = holder.get(id(entry))
+        if entries is None:
+            continue
+        for i in range(len(entries)):
+            if entries[i] is entry:
+                del entries[i]
+                break
+        touched[id(entries)] = entries
+    kept = []
+    for group in groups:
+        entries = group.get("hooks") if isinstance(group, dict) else None
+        if isinstance(entries, list) and not entries and id(entries) in touched:
+            continue
+        kept.append(group)
+    groups[:] = kept
+
 
 def take_over(entry):
     # The whole entry is rewritten for this installation, not its command
@@ -2920,7 +3016,19 @@ def take_over(entry):
 
 
 status = "unchanged"
-if not found and normalize:
+# A valid entry stops every repair branch below, so without this the bad
+# entries beside it would stay active: a malformed "--sources hook" duplicate
+# runs link at every session start whatever the good entry next to it says.
+# Only one entry may hold this hook, so the first valid one keeps it and every
+# other entry this script owns is removed, an exact duplicate included.
+if found:
+    duplicates = valid[1:] + normalize + stale + malformed + other
+    duplicates = duplicates + [pair[0] for pair in wrong_shell]
+    duplicates = duplicates + [pair[0] for pair in gone_shell]
+    if duplicates:
+        drop_entries(duplicates)
+        status = "deduplicated " + str(len(duplicates))
+elif not found and normalize:
     take_over(normalize[0])
     found = True
     status = "normalized"
@@ -2995,8 +3103,12 @@ sys.stdout.write(status + "\n" + out + "\n")
 # An entry that already carries this
 # exact command counts as installed only when the whole entry matches: a type
 # that is not "command" never runs, and another timeout runs the hook under a
-# budget this script never installed, so either one is normalized. Prints the
-# status word, and the path of the merged temporary file when there is one.
+# budget this script never installed, so either one is normalized. One entry
+# holds this hook and no more: when a valid entry is there, every other entry
+# this script owns is removed instead of left beside it, because a bad
+# duplicate keeps running at every session start whatever the good entry says.
+# Prints the status word, and the path of the merged temporary file when there
+# is one.
 merge_hook_json() {
 	python3 -c "$PY_MERGE_HOOK" "$1" \
 		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS" \
@@ -3030,7 +3142,7 @@ backup_path() {
 }
 
 install_hook_file() {
-	local parent file merged status tmp stamp real created bak snap
+	local parent file merged status tmp stamp real created bak snap n
 	parent=$1
 	file=$2
 	created=0
@@ -3156,6 +3268,14 @@ install_hook_file() {
 		;;
 	replaced-malformed) info "$PROG: replaced a malformed hook command in $file" ;;
 	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
+	"deduplicated "*)
+		n=${status#deduplicated }
+		if [ "$n" = "1" ]; then
+			info "$PROG: removed 1 duplicate hook entry in $file"
+		else
+			info "$PROG: removed $n duplicate hook entries in $file"
+		fi
+		;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;
 	esac
 	return 0

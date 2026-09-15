@@ -25,9 +25,12 @@
 //     scalar resolves the whole YAML escape set, including \N (U+0085),
 //     \_ (U+00A0), \L (U+2028) and \P (U+2029), and the empty check treats
 //     those four as whitespace as well. An escape outside that set, such as
-//     "\q" or a "\x4" with too few digits, fails the skill, because a YAML
-//     parser refuses the document. The indentation indicator of a block
-//     scalar header is one digit from 1 to 9, so "|0" is no header
+//     "\q", a "\x4" with too few digits, or a "\uD800" naming a surrogate
+//     code point, fails the skill, because a YAML parser refuses the
+//     document. The indentation indicator of a block scalar header is one
+//     digit from 1 to 9, so "|0" is no header. A key with no inline value
+//     whose first indented line is a quoted scalar carries that scalar, so
+//     "description:" over an indented '""' is empty, not two characters
 //   - name and description are plain strings. Any unquoted value that YAML
 //     reads as another type is refused: "[]", "{}", a flow sequence or mapping,
 //     a bare anchor or alias, an explicit tag such as "!!int 123" or
@@ -41,9 +44,11 @@
 // check, not a full YAML parser: a line must be blank, a comment, a top-level
 // "key: value" line, or an indented line that belongs to the value above it,
 // and a top-level value that opens a flow collection ("[" or "{") must close
-// it on the same logical scalar. Anything else is reported as
-// "frontmatter line N is not valid YAML". A file that passes this check can
-// still hold YAML the check does not model.
+// it on the same logical scalar. Indentation is spaces only, so a line
+// indented with a tab is refused, as is a plain value that starts with a
+// reserved indicator ("- ", "? ", ": ", ",", "@", "`" or "%"). Anything else
+// is reported as "frontmatter line N is not valid YAML". A file that passes
+// this check can still hold YAML the check does not model.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -111,6 +116,16 @@ const MAPPING_INDICATOR_RE = /:[ \t]|:$/;
  * opens a list.
  */
 const SEQUENCE_ENTRY_RE = /^-(?:[ \t]|$)/;
+
+/**
+ * A reserved indicator at the head of a plain scalar: "-", "?" or ":" that a
+ * space, a tab or the end of the value follows, and ",", "@", "`" or "%"
+ * anywhere at the head. YAML reads the first three as a sequence entry, a
+ * complex key and a mapping value, and refuses the other four outright, so
+ * none of these is the text it looks like. Followed by another character the
+ * first three are ordinary text, as in "-foo" or "?x".
+ */
+const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%])/;
 
 /**
  * Raw unquoted values that YAML reads as something other than a string: the
@@ -214,9 +229,14 @@ function isDelimiterLine(line) {
   return line.replace(/\r$/, "").replace(/[ \t]+$/, "") === "---";
 }
 
-/** The number of leading space and tab characters of a line. */
+/**
+ * The number of leading spaces of a line. A tab is never indentation in YAML,
+ * and a loader refuses a document that indents with one, so the count stops at
+ * the first tab and the callers read such a line as a line at column zero,
+ * which they report.
+ */
 function indentWidth(line) {
-  const match = /^[ \t]*/.exec(line);
+  const match = /^ */.exec(line);
   return match[0].length;
 }
 
@@ -227,9 +247,10 @@ function indentWidth(line) {
  *
  * Returns { value } when every escape is one of those. Returns { escape } with
  * the text of the first escape YAML refuses: an unknown escape character, a
- * \x \u \U escape with too few or non-hex digits, a code point above U+10FFFF,
- * and a lone trailing backslash. Dropping the backslash instead would let a
- * skill pass here that every YAML parser rejects.
+ * \x \u \U escape with too few or non-hex digits, a code point above U+10FFFF
+ * or in the surrogate range U+D800..U+DFFF, and a lone trailing backslash.
+ * Dropping the backslash instead would let a skill pass here that every YAML
+ * parser rejects.
  */
 function decodeDoubleQuoted(body) {
   const SIMPLE = new Map([
@@ -278,7 +299,12 @@ function decodeDoubleQuoted(body) {
       return { escape: "\\" + esc + digits };
     }
     const code = parseInt(digits, 16);
-    if (code > 0x10ffff) return { escape: "\\" + esc + digits };
+    // A surrogate code point is no scalar value. String.fromCodePoint takes
+    // one, but libyaml refuses the escape and the decoded text cannot even be
+    // encoded as UTF-8.
+    if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+      return { escape: "\\" + esc + digits };
+    }
     out += String.fromCodePoint(code);
     i += width;
   }
@@ -480,7 +506,8 @@ function foldBlockLines(content) {
  *
  * Returns { value, end, invalid }, where `end` is the index of the last line
  * consumed and `invalid` is the index of the first body line indented less
- * than the block, or -1 when every line is indented enough.
+ * than the block or holding a tab inside the block indentation, or -1 when
+ * every line is indented enough with spaces.
  */
 function readBlockScalar(header, lines, start) {
   const literal = header.startsWith("|");
@@ -510,8 +537,20 @@ function readBlockScalar(header, lines, start) {
   // A later non-blank line indented less than that is not part of the scalar:
   // YAML ends the block there and fails the document on the text it starts. A
   // line at column zero never reaches here, because it ended the body above.
+  //
+  // A tab inside the block indentation is not indentation either: the loader
+  // stops on that tab whatever follows it, so the line is under-indented the
+  // same way, and a whitespace-only line is no exception, even though it is
+  // otherwise an empty line of any width. When neither an indicator nor a
+  // non-blank line sets the indentation, the block still begins at column one
+  // at the earliest, so a tab in the first column sits inside it.
+  const indentColumns = indent > 0 ? indent : 1;
   let invalid = -1;
   for (let i = 0; i < bodyLines.length; i += 1) {
+    if (bodyLines[i].slice(0, indentColumns).includes("\t")) {
+      invalid = start + 1 + i;
+      break;
+    }
     if (bodyLines[i].trim() === "") continue;
     if (indentWidth(bodyLines[i]) < indent) {
       invalid = start + 1 + i;
@@ -659,21 +698,31 @@ function opensMappingEntry(text) {
   return rest === null ? false : MAPPING_INDICATOR_RE.test(rest);
 }
 
+/** What firstContinuation returns for a key with no continuation line. */
+const NO_CONTINUATION = { index: -1, raw: "", text: "" };
+
 /**
  * The first continuation line under a key with no inline value: the first
  * following line that is indented and holds something other than a comment.
  * Blank lines are skipped and a line at column zero ends the value, exactly as
- * readPlainScalar folds them. Returns "" when the key has no such line.
+ * readPlainScalar folds them.
+ *
+ * Returns { index, raw, text }: the line's index in `lines`, its text without
+ * the indentation, and that text with an inline comment stripped. The quoted
+ * form needs `raw` and the index, because a "#" inside quotes is text and the
+ * scalar may run on to a later line. Returns NO_CONTINUATION when the key has
+ * no such line.
  */
-function firstContinuationText(lines, start) {
+function firstContinuation(lines, start) {
   for (let i = start + 1; i < lines.length; i += 1) {
     const next = lines[i].replace(/\r$/, "");
     if (next.trim() === "") continue;
-    if (indentWidth(next) === 0) return "";
-    const part = stripInlineComment(next.trim());
-    if (part !== "") return part;
+    if (indentWidth(next) === 0) return NO_CONTINUATION;
+    const raw = next.trim();
+    const text = stripInlineComment(raw);
+    if (text !== "") return { index: i, raw, text };
   }
-  return "";
+  return NO_CONTINUATION;
 }
 
 /**
@@ -768,8 +817,52 @@ function parseFrontmatter(lines, firstLineNumber) {
       continue;
     }
 
+    const continuation =
+      rest === "" ? firstContinuation(lines, i) : NO_CONTINUATION;
+
+    // A key with no inline value whose first indented line opens a quoted
+    // scalar carries that scalar, not the text a plain scalar would fold in
+    // with its quote characters, so the empty check and the length check must
+    // see the decoded value. A quoted key is a mapping, which the collection
+    // check below reports instead.
+    if (
+      rest === "" &&
+      (continuation.raw.startsWith('"') || continuation.raw.startsWith("'")) &&
+      !opensMappingEntry(continuation.raw)
+    ) {
+      const nested = readQuotedScalar(
+        continuation.raw,
+        lines,
+        continuation.index,
+      );
+      if (nested === null) {
+        invalid.push(`"${key}" has an unterminated or malformed quoted scalar`);
+        fields.set(key, {
+          value: continuation.raw,
+          raw: continuation.raw,
+          quoted: true,
+          block: false,
+          collection: false,
+        });
+        continue;
+      }
+      i = nested.end;
+      if (nested.escape !== undefined) {
+        invalid.push(
+          `"${key}" has an invalid escape sequence "${nested.escape}" in a double-quoted scalar`,
+        );
+      }
+      fields.set(key, {
+        value: nested.value,
+        raw: continuation.raw,
+        quoted: true,
+        block: false,
+        collection: false,
+      });
+      continue;
+    }
+
     const plain = readPlainScalar(rest, lines, i);
-    const continuation = rest === "" ? firstContinuationText(lines, i) : "";
     i = plain.end;
     const flow = /^[[{]/.test(plain.value);
     if (flow && !flowCollectionCloses(plain.value)) {
@@ -778,6 +871,11 @@ function parseFrontmatter(lines, firstLineNumber) {
       // The block header pattern already took every header YAML accepts, so a
       // value that still starts with "|" or ">" is a malformed header such as
       // "|0". No plain scalar may start with an indicator character either.
+      invalid.push(lineNumber);
+    } else if (rest !== "" && RESERVED_LEADING_RE.test(plain.value)) {
+      // "- ", "? " and ": " open a sequence entry, a complex key and a mapping
+      // value here, and ",", "@", "`" and "%" are reserved, so YAML refuses
+      // the line instead of reading it as the text it looks like.
       invalid.push(lineNumber);
     } else if (rest !== "" && !flow && MAPPING_INDICATOR_RE.test(plain.value)) {
       // YAML reads ": " and a trailing ":" as a mapping indicator, so this
@@ -800,8 +898,8 @@ function parseFrontmatter(lines, firstLineNumber) {
       // nest a collection; the two string fields refuse one.
       collection:
         rest === "" &&
-        (SEQUENCE_ENTRY_RE.test(continuation) ||
-          opensMappingEntry(continuation)),
+        (SEQUENCE_ENTRY_RE.test(continuation.text) ||
+          opensMappingEntry(continuation.text)),
     });
   }
   return { fields, invalid };

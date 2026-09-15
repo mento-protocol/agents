@@ -251,7 +251,11 @@ read the way the script itself reads them, so an entry such as
 option operand, the subcommand falls back to `link`, and a session start would
 write a sources file named `hook`. That entry, and any other shape this script
 would refuse, is rewritten to the current command and the run reports that it
-replaced a malformed hook command. Every entry taken over this way
+replaced a malformed hook command. Only one entry holds this hook: when the
+hook is already installed, every other entry this script owns, whether it is
+an exact duplicate or one of the broken shapes above, is removed from the file
+instead of left running beside the good one, and the run reports how many
+duplicate hook entries it removed. Every entry taken over this way
 is rewritten whole: its type becomes `command`, its command the current one,
 and its timeout the one this script installs, so an entry written by hand or by
 an older version cannot leave the hook running under another budget. An entry
