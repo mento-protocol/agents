@@ -12,9 +12,11 @@
 //     between its quotes with the escapes resolved, and a plain scalar folds
 //     its indented continuation lines in with single spaces. A blank line
 //     inside a plain scalar or a folded (">") block is a paragraph break that
-//     folds to one newline, and the chomping indicator of a block scalar
-//     decides how many trailing newlines its value keeps. An unquoted value
-//     loses its inline comment, so "description: # TODO" reads as empty
+//     folds to one newline. A more-indented line inside a folded block also
+//     keeps the line break before it, so a blank line next to one yields two
+//     newlines. The chomping indicator of a block scalar decides how many
+//     trailing newlines its value keeps. An unquoted value loses its inline
+//     comment, so "description: # TODO" reads as empty
 //   - description is a plain string. Any unquoted value that YAML reads as
 //     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
 //     anchor or alias, an explicit tag such as "!!int 123" or "!custom y", the
@@ -273,11 +275,16 @@ function chompingOf(header) {
 /**
  * Fold the content lines of a ">" block into one value.
  *
- * Two ordinary lines join with a single space. One blank line between them is
- * a paragraph break that yields one newline, and n blank lines yield n
- * newlines. A line indented past the block's own indentation is not folded: it
- * keeps the newline before it and the newline after it, the way YAML preserves
- * a list or a code sample written inside a folded block.
+ * The separator between two consecutive content lines depends on both lines. A
+ * line indented past the block's own indentation is more-indented, and YAML
+ * folds no line break next to it: the separator is one newline for the break
+ * that ends the first line, plus one more newline for every blank line between
+ * the two. Between two ordinary lines the break itself folds away: the
+ * separator is a single space when no blank line separates them, and one
+ * newline per blank line when some do.
+ *
+ * So "a", "", "  b" yields "a\n\n  b", not "a\n  b": the more-indented line
+ * keeps the break before it as well as the paragraph break.
  */
 function foldBlockLines(content) {
   let value = "";
@@ -293,10 +300,10 @@ function foldBlockLines(content) {
     if (!started) {
       value = line;
       started = true;
+    } else if (moreIndented || previousMoreIndented) {
+      value += "\n".repeat(blanks + 1) + line;
     } else if (blanks > 0) {
       value += "\n".repeat(blanks) + line;
-    } else if (moreIndented || previousMoreIndented) {
-      value += "\n" + line;
     } else {
       value += " " + line;
     }

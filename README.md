@@ -144,9 +144,12 @@ into the command: `--sources` and `--assembly` are added when `--sources`,
 `--assembly`, `SKILL_SOURCES_FILE` or `SKILLS_ASSEMBLY_DIR` set a path that
 differs from the default for the `HOME` in effect. An installation on the
 default paths keeps the plain `bash <script> hook` command. A rerun of
-`install-hooks` recognises either form and reports the hook as already
-installed. Every command the hook prints for you to run carries the same
-options, so the advice names the installation it reported on.
+`install-hooks` for the same installation recognises either form and reports
+the hook as already installed. A rerun for another installation, with other
+`--sources` or `--assembly` paths, rewrites the stored command to the new
+paths instead of keeping the old one. Every command the hook prints for you to
+run carries the same options, so the advice names the installation it reported
+on.
 
 The hook fetches each source at most every 6 hours (override with
 `SKILL_SOURCES_FETCH_INTERVAL_HOURS`, `0` to fetch every time) and stops
@@ -173,7 +176,12 @@ exists is dead, so it is repointed at this script instead of being kept, and
 the run reports that it replaced a stale hook. An entry whose script path is
 relative, such as `bash scripts/link-skills.sh hook`, is dead in the same way:
 a session start runs from the directory of the project it opens, where that
-path names another file or none, so it is repointed too. An entry that runs a
+path names another file or none, so it is repointed too. An entry whose script
+file is there but whose `--sources` or `--assembly` names another installation
+runs an assembly this run is not for, so it is rewritten to the current
+command and the run reports that it replaced a hook for another installation;
+an omitted option is read as the default for the `HOME` in effect, and the two
+paths are compared after symlinks are resolved. An entry that runs a
 different script, such as `custom-link-skills.sh hook`, is another tool's, so
 it is kept as it is and this hook is added beside it. A file it creates itself gets mode
 `0600` and no backup. A backup name already in use

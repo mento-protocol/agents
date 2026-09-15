@@ -159,9 +159,11 @@ usage() {
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
 		'                  A settings file that already runs the hook is left' \
 		'                  byte for byte as it is. An entry that runs a' \
-		'                  link-skills.sh whose path no longer exists, or whose' \
-		'                  path is relative, is repointed at this script; an' \
-		'                  entry that runs another script is left alone.' \
+		'                  link-skills.sh whose path no longer exists, whose' \
+		'                  path is relative, or whose --sources or --assembly' \
+		'                  names another installation, is rewritten to the' \
+		'                  command this run is for; an entry that runs another' \
+		'                  script is left alone.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
 		'  help            Print this text.' \
 		'' \
@@ -1390,7 +1392,18 @@ link_candidates() {
 				# manifest write can put the old target back.
 				record_repointed_link "$name" "$cur"
 				if ! ln -s "$target" "$entry"; then
-					err "could not link $entry -> $target; $name is now unlinked"
+					# The old link is gone and the new one was never
+					# made. The name goes back to the target it
+					# carried, and the manifest keeps recording that
+					# target either way: an entry dropped here is a
+					# link no later run could ever prune, and the
+					# skill would be gone from every runtime.
+					if ln -s "$cur" "$entry"; then
+						err "could not link $entry -> $target; put the link to $cur back and kept its manifest entry"
+					else
+						err "could not link $entry -> $target, and could not put the link to $cur back; $name is now unlinked, and the manifest still records $cur"
+					fi
+					record_output "$name" "$cur"
 					continue
 				fi
 				info "$PROG: relinked $name -> $target"
@@ -2453,12 +2466,13 @@ print_hook_snippet() {
 
 # Passed to python3 with -c, so that no here document is needed. The program
 # must not contain a single quote. It prints a status word on the first line:
-#   unchanged  the hook is already installed; nothing is written
-#   added      a new SessionStart group holds the hook
-#   replaced   an entry whose script path is gone now holds the hook
-# For "added" and "replaced" it writes the merged JSON to a temporary file of
-# its own next to the settings file and prints that path on the second line,
-# so the name is never predictable and never collides with a second run.
+#   unchanged        the hook is already installed; nothing is written
+#   added            a new SessionStart group holds the hook
+#   replaced         an entry whose script path is gone now holds the hook
+#   replaced-other   an entry that ran another installation now holds the hook
+# For every status but "unchanged" it writes the merged JSON to a temporary
+# file of its own next to the settings file and prints that path on the second
+# line, so the name is never predictable and never collides with a second run.
 PY_MERGE_HOOK='
 import json
 import os
@@ -2469,6 +2483,11 @@ import tempfile
 
 path = sys.argv[1]
 command, marker, timeout = sys.argv[2], sys.argv[3], int(sys.argv[4])
+# The installation this run is for, and the two defaults for the HOME in
+# effect. A stored command that names neither option runs the defaults, so the
+# defaults are what an omitted option is compared against.
+run_sources, run_assembly = sys.argv[5], sys.argv[6]
+default_sources, default_assembly = sys.argv[7], sys.argv[8]
 
 with open(path) as fh:
     text = fh.read().strip()
@@ -2491,13 +2510,46 @@ if not isinstance(groups, list):
     sys.exit("link-skills: %s has a SessionStart key that is not a list" % path)
 
 
-def script_of(value):
+QUOTES = chr(34) + chr(39)
+
+
+def options_of(parts, index):
+    # The options this script writes, read from the tokens between the script
+    # and the final word. Both spellings the command line takes are read. An
+    # option this program does not know is skipped: the script path and these
+    # two paths are what name an installation.
+    sources = None
+    assembly = None
+    i = index + 1
+    last = len(parts) - 1
+    while i < last:
+        token = parts[i].strip(QUOTES)
+        if token == "--sources" and i + 1 < last:
+            sources = parts[i + 1].strip(QUOTES)
+            i += 2
+            continue
+        if token.startswith("--sources="):
+            sources = token[len("--sources=") :]
+            i += 1
+            continue
+        if token == "--assembly" and i + 1 < last:
+            assembly = parts[i + 1].strip(QUOTES)
+            i += 2
+            continue
+        if token.startswith("--assembly="):
+            assembly = token[len("--assembly=") :]
+            i += 1
+            continue
+        i += 1
+    return sources, assembly
+
+
+def parse_command(value):
     # The command is "bash <script> [options] hook": an installation on a
     # non-default sources file or assembly directory names those paths between
     # the script and the final word. The script position is read directly, so
     # that the argument of an option can never be mistaken for the script.
     text = str(value)
-    quotes = chr(34) + chr(39)
     try:
         parts = shlex.split(text)
     except ValueError:
@@ -2505,21 +2557,49 @@ def script_of(value):
     if len(parts) < 2 or parts[-1] != "hook":
         return None
     index = 0
-    if os.path.basename(parts[0].strip(quotes)) in ("bash", "sh"):
+    if os.path.basename(parts[0].strip(QUOTES)) in ("bash", "sh"):
         index = 1
     if index > len(parts) - 2:
         return None
-    token = parts[index].strip(quotes)
+    token = parts[index].strip(QUOTES)
     # The file name must be this script name, not merely end with it:
     # "custom-link-skills.sh hook" belongs to another tool, and rewriting
     # it or counting it as ours would break that session start.
-    if os.path.basename(token) == marker:
-        return token
-    return None
+    if os.path.basename(token) != marker:
+        return None
+    return token, options_of(parts, index)
+
+
+def canon(value):
+    # Both sides of every comparison come through here, so a spelling that
+    # differs only by a symlink, a "..", a "~" or a trailing slash is the same
+    # path. A relative path names a different file in every session, so it can
+    # never be judged the same as this run.
+    text = os.path.expanduser(str(value))
+    if not os.path.isabs(text):
+        return None
+    return os.path.realpath(text).rstrip("/") or "/"
+
+
+def same_installation(options):
+    # An omitted option means the default for the HOME in effect, which is the
+    # same defaulting the current run used.
+    sources, assembly = options
+    pairs = (
+        (default_sources if sources is None else sources, run_sources),
+        (default_assembly if assembly is None else assembly, run_assembly),
+    )
+    for stored, current in pairs:
+        left = canon(stored)
+        right = canon(current)
+        if left is None or right is None or left != right:
+            return False
+    return True
 
 
 found = False
 stale = []
+other = []
 for group in groups:
     if not isinstance(group, dict):
         continue
@@ -2533,24 +2613,36 @@ for group in groups:
         if text.strip() == command.strip():
             found = True
             continue
-        token = script_of(text)
-        if token is None:
+        parsed = parse_command(text)
+        if parsed is None:
             continue
+        token, options = parsed
         # A SessionStart hook runs from whatever directory the session opens
         # in, so a relative script path names a different file in every
         # project and usually no file at all. It is stale wherever this
         # command happens to run from, even when the current directory holds
         # a file of that name right now.
-        if os.path.isabs(token) and os.path.isfile(token):
-            found = True
-        else:
+        if not (os.path.isabs(token) and os.path.isfile(token)):
             stale.append(entry)
+            continue
+        # The script file is there, but the command runs another sources file
+        # or another assembly directory. Counting that as installed would
+        # leave the session hook reporting on an installation this run is not
+        # for, so it is rewritten to this one.
+        if not same_installation(options):
+            other.append(entry)
+            continue
+        found = True
 
 status = "unchanged"
 if not found and stale:
     stale[0]["command"] = command
     found = True
     status = "replaced"
+elif not found and other:
+    other[0]["command"] = command
+    found = True
+    status = "replaced-other"
 
 if not found:
     status = "added"
@@ -2584,17 +2676,20 @@ except Exception:
 sys.stdout.write(status + "\n" + out + "\n")
 '
 
-# The command string is compared exactly, and the last two tokens of any other
-# command are compared with the script name, so a group written by an older
+# The command string is compared exactly, and the script position of any other
+# command is compared with the script name, so a group written by an older
 # version, by another clone, or with a quoted path is recognised instead of
 # duplicated. A matching command whose script path no longer exists, or whose
 # script path is relative and so names nothing from the directory a session
 # starts in, is dead: it is rewritten to the current command instead of being
-# kept. Prints the status word, and the path of the merged temporary file when
-# there is one.
+# kept. A command whose script is there but whose --sources or --assembly
+# names another installation is rewritten too: it would have the session hook
+# report on an assembly this run is not for. Prints the status word, and the
+# path of the merged temporary file when there is one.
 merge_hook_json() {
 	python3 -c "$PY_MERGE_HOOK" "$1" \
-		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS"
+		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS" \
+		"$SOURCES_FILE" "$ASSEMBLY_DIR" "$DEFAULT_SOURCES_FILE" "$DEFAULT_ASSEMBLY_DIR"
 }
 
 # Never overwrite a backup. Two installs inside the same second share a
@@ -2694,11 +2789,11 @@ install_hook_file() {
 		err "could not write $file"
 		return 1
 	fi
-	if [ "$status" = "replaced" ]; then
-		info "$PROG: replaced a stale hook in $file"
-	else
-		info "$PROG: added the SessionStart hook to $file"
-	fi
+	case "$status" in
+	replaced) info "$PROG: replaced a stale hook in $file" ;;
+	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
+	*) info "$PROG: added the SessionStart hook to $file" ;;
+	esac
 	return 0
 }
 

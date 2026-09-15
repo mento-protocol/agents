@@ -312,6 +312,33 @@ make_fixed_date() {
 	chmod +x "$dir/date"
 }
 
+# An ln shim that refuses one call: the first call whose arguments name the
+# path in LS_TEST_LN_FAIL_TARGET, once only, recorded in the file named by
+# LS_TEST_LN_STATE. Every other call goes to the real ln, so the removal
+# before it and the restore after it both work. The single-quoted lines are
+# shim source, not expansions.
+# shellcheck disable=SC2016
+make_failing_ln() {
+	local dir real
+	dir=$1
+	real=$(command -v ln)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'if [ -n "${LS_TEST_LN_FAIL_TARGET:-}" ] && [ -n "${LS_TEST_LN_STATE:-}" ] &&' \
+		'	[ ! -e "$LS_TEST_LN_STATE" ]; then' \
+		'	for a in "$@"; do' \
+		'		if [ "$a" = "$LS_TEST_LN_FAIL_TARGET" ]; then' \
+		'			: >"$LS_TEST_LN_STATE"' \
+		'			echo "test shim: ln refused this call" >&2' \
+		'			exit 1' \
+		'		fi' \
+		'	done' \
+		'fi' \
+		"exec \"$real\" \"\$@\"" >"$dir/ln"
+	chmod +x "$dir/ln"
+}
+
 # A mktemp shim that hands back a real temporary file and then takes every
 # permission off it, so the write that follows fails while the file exists.
 # Only the manifest temporary file is touched, and only while the marker
@@ -3823,6 +3850,212 @@ unreadable_name_not_repointed() {
 	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest still records it"
 }
 
+# A folded block folds no line break next to a more-indented line, so a blank
+# line before such a line is worth two newlines: the break that ends the
+# previous line, plus the paragraph break. Counting only the paragraph break
+# measures a description shorter than the runtime sees, and a value one
+# character over the limit validates. 1020 "a", a blank line and a
+# more-indented "b" decode to 1025 characters; 1019 "a" decode to 1024. With
+# no blank line, "a" x 1016, a more-indented "y" and "z" decode to exactly
+# 1024, which pins the separator on both sides of a more-indented line.
+validator_folded_block_more_indented_boundary() {
+	local out rc fits over chainfits chainover
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	fits=$(printf '%1019s' '' | tr ' ' 'a')
+	over=$(printf '%1020s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/folded-more-indent-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$over"
+		printf '\n'
+		printf '    b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-more-indent-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025-character folded description must fail across a more-indented line: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/folded-more-indent-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$fits"
+		printf '\n'
+		printf '    b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-more-indent-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024-character folded description must validate across a more-indented line: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# No blank line here: the break before the more-indented line and the break
+	# after it are each worth one newline, so the value is
+	# "a" x 1016 + "\n" + "    y" + "\n" + "z".
+	chainfits=$(printf '%1016s' '' | tr ' ' 'a')
+	chainover=$(printf '%1017s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/folded-more-indent-chain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$chainfits"
+		printf '      y\n'
+		printf '  z\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-more-indent-chain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-chain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024-character folded description around a more-indented line must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/folded-more-indent-chain-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$chainover"
+		printf '      y\n'
+		printf '  z\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/folded-more-indent-chain-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-chain-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025-character folded description around a more-indented line must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
+# A relink is a removal and a creation. When the creation fails, the removal
+# has already happened: the name carries nothing at all. The old link has to
+# come back, and the manifest has to keep recording the target it carries,
+# because an entry dropped here is a link no later run could ever prune.
+relink_creation_failure_restores_old_link() {
+	local shims
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha points at the first source"
+	# The name comes from the other source now, so the recorded link has to be
+	# repointed. The shim lets the removal through and fails the creation.
+	write_sources
+	add_source "$CASE_DIR/two"
+	shims="$CASE_DIR/shims"
+	make_failing_ln "$shims"
+	LS_TEST_LN_FAIL_TARGET="$CASE_DIR/two/alpha"
+	LS_TEST_LN_STATE="$CASE_DIR/ln-refused"
+	export LS_TEST_LN_FAIL_TARGET LS_TEST_LN_STATE
+	use_shims "$shims"
+	ls_run link
+	drop_shims
+	unset LS_TEST_LN_FAIL_TARGET LS_TEST_LN_STATE
+	assert_rc 1 "link with a creation the shim refuses"
+	assert_exists "$CASE_DIR/ln-refused" "the shim refused one call"
+	assert_out_has "could not link" "the failure is reported"
+	assert_out_has "put the link to $CASE_DIR/one/alpha back" "the restore is reported"
+	assert_out_has "linked 0, unchanged 0, pruned 0, errors 1" "the failure is counted once"
+	assert_out_lacks "relinked alpha" "nothing claims the link was repointed"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha is a link to the old target again"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest records the old target"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "$CASE_DIR/two/alpha" "the manifest does not record the target that was never linked"
+
+	# The next run, with a working ln, does the relink it could not do.
+	ls_run link
+	assert_rc 0 "link once ln works again"
+	assert_out_has "relinked alpha" "the relink happens now"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/two/alpha" "alpha points at the new target"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/two/alpha" "the manifest records the new target"
+}
+
+# A hook entry whose script file is there still names the sources file and the
+# assembly directory it was installed for. Another installation is not this
+# one: counting it as installed would leave the session hook reporting on an
+# assembly nobody in this run uses.
+install_hooks_replaces_other_installation() {
+	local file sources assembly n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	sources="$CASE_DIR/custom-sources"
+	assembly="$CASE_DIR/custom-assembly"
+	printf '%s\n' "$CASE_DIR/one" >"$sources"
+	mkdir -p "$HOME/.claude" "$HOME/.codex"
+	file="$HOME/.claude/settings.json"
+	ls_run install-hooks
+	assert_rc 0 "the install on the default paths"
+	assert_file_has "$file" "$LS hook" "the default command is stored"
+
+	ls_run --sources "$sources" --assembly "$assembly" install-hooks
+	assert_rc 0 "install-hooks for another installation"
+	assert_out_has "replaced a hook for another installation" "the replacement is reported"
+	assert_out_lacks "already runs the hook" "the other installation is not counted as installed"
+	assert_file_has "$file" "--sources $sources" "the stored command names the custom sources file"
+	assert_file_has "$file" "--assembly $assembly" "the stored command names the custom assembly"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+
+	ls_run --sources "$sources" --assembly "$assembly" install-hooks
+	assert_rc 0 "a rerun for the same installation"
+	assert_out_has "already runs the hook" "the custom command is recognised"
+	assert_out_lacks "replaced" "nothing is rewritten"
+
+	ls_run install-hooks
+	assert_rc 0 "a rerun for the default installation"
+	assert_out_has "replaced a hook for another installation" "the default installation takes the entry back"
+	assert_file_lacks "$file" "--sources $sources" "the custom sources file is gone"
+	assert_file_lacks "$file" "--assembly $assembly" "the custom assembly is gone"
+	assert_file_has "$file" "$LS hook" "the default command is stored again"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command after the rerun, found $n"
+	fi
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -3885,6 +4118,8 @@ main() {
 	run_case install_hooks_idempotent
 	run_case install_hooks_embeds_custom_paths
 	run_case sources_path_inside_assembly_refused
+	run_case install_hooks_replaces_other_installation
+	run_case relink_creation_failure_restores_old_link
 	run_case unlink_leaves_foreign_entries
 	run_case personal_skill_untouched
 	run_case source_listed_twice
@@ -3962,6 +4197,7 @@ main() {
 	run_case validator_counts_code_points
 	run_case validator_folds_plain_scalar_across_blank_line
 	run_case validator_folded_block_paragraph_break
+	run_case validator_folded_block_more_indented_boundary
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces
