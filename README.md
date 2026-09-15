@@ -73,20 +73,30 @@ subcommand is `link`) re-links the assembly directory to match.
 One run at a time writes the assembly. `link` and `unlink` take the lock
 directory `~/.agents/skills/.skill-links.lock`, wait up to 10 seconds for a run
 already in progress, and then exit 1 having changed nothing; the session hook
-skips its own update silently instead of waiting. The lock lives inside the
-assembly directory, so every command that writes the assembly creates that
-directory first: the very first run on a machine is locked like every other
-one. A run holds the lock only when it created that directory itself: a lock
-another run gives back while this one is waiting is taken, not read as
-permission to go on without it. Each run gives its lock back when it ends, the
-session hook included. A lock left behind by a run that was killed is removed
+writes no link, so it takes no lock and reports whatever it finds. The lock
+lives inside the assembly directory, so every command that writes the
+assembly creates that directory first: the very first run on a machine is
+locked like every other one. A run holds the lock only when it created that
+directory itself: a lock another run gives back while this one is waiting is
+taken, not read as permission to go on without it. Each run gives its lock
+back when it ends. A lock left behind by a run that was killed is removed
 once its process is gone. A lock whose owner is still running is kept however
 old it is, and a lock that records no owner at all is removed after two
 minutes. A symlink or a file at the lock path is not a lock this script made:
 `link` and `unlink` report it and exit 1 without reading or removing anything
-below it, and the hook steps aside in silence.
+below it. The hook never looks at the lock path.
 
-The manifest `~/.agents/skills/.skill-links` is the only record of what the
+The manifest `~/.agents/skills/.skill-links` holds one line per link, with
+three tab-separated columns: the skill name, the target it points at, and the
+source directory the link came from, spelled as the sources file spells it
+once the path is absolute and normalized but before any symlink in it is
+resolved. That third column is what keeps the links of a source whose symlink
+alias has disappeared: nothing in the target names the alias, so without it a
+source that is listed and merely missing would look like a source nobody
+lists. A two-column line written by an older version is still read, and the
+next run rewrites it with three columns.
+
+The manifest is the only record of what the
 script may remove later, so every command that reads it refuses a manifest path
 that is a symlink or is not a regular file, and changes nothing. A manifest
 that is there but cannot be read is refused the same way: `link`, `check` and
@@ -95,10 +105,9 @@ aside. A run is one transaction: if the manifest cannot be written, the links
 that run created are removed again, the links it repointed carry their previous
 target again, the links it pruned are created again at the target the manifest
 still records, links it found already recorded stay, and the run exits 1. The
-session hook rolls its own re-link back the same way, and then reports the
-rollback instead of an `assembly updated` notice: nothing was linked or pruned
-once the work is undone. A
-recorded link that now has to point somewhere else and that the script cannot
+session hook has nothing to roll back: it creates and removes no link and
+writes no manifest. A recorded link that now has to point somewhere else and
+that the script cannot
 remove is reported, keeps the target it already had and its manifest entry,
 and makes `link` exit 1: no new link is created for it.
 
@@ -141,13 +150,33 @@ scripts/link-skills.sh install-hooks
 ```
 
 Adds a Claude Code and Codex `SessionStart` hook that runs
-`link-skills.sh hook` and prints a one-line notice when a source clone is
-behind. To let the hook fast-forward a clean clone on its default branch
-automatically instead of only notifying, add `auto-update` after that
-source's path in `~/.agents/skill-sources`. An `auto-update` source is left
-alone when the update would overwrite a file the clone ignores: git replaces
-an ignored file without a word, so the hook names the file and prints the
-manual `git pull --ff-only` command instead.
+`link-skills.sh hook`. The hook only notifies. It fetches each git source
+under the throttle below, then prints one line for each source clone that is
+behind, naming the clone, its branch, whether its work tree is clean or dirty,
+and the command that updates it:
+`cd <clone> && git pull --ff-only && <script> link`. It prints one more line
+when the assembly has drifted from the sources: how many skills are not
+linked, and how many links are stale, each with the `link` command that fixes
+them, and one more when a skill's name is taken by an entry this script did
+not create, with the `check` command that names the entry. It never changes a
+clone, never creates or removes a link, and takes no lock, so a `link` or
+`unlink` run in progress neither blocks it nor is disturbed by it. The only
+thing it writes is the fetch stamp below.
+
+A sources line names one path and nothing else: a second token after the path
+is refused, whatever it spells. An older sources file could put `auto-update`
+after a path, and the hook then fast-forwarded that clone, so a second token
+states an expectation this script no longer meets. Reading it as part of the
+path would answer that expectation with a source directory that does not
+exist, so every command refuses the line instead. `link`, `check`, `unlink`
+and `install-hooks` exit 2; the hook says the same thing in one line and exits 0.
+
+A source may live under a path that holds a space, so whitespace alone does
+not make a token: the whitespace is part of the path whenever the whole line
+names a directory. A line that names none, but whose text before the last
+whitespace does, carries a token after the path and is refused.
+`auto-update` is refused wherever it sits, whether or not the path before it
+is there.
 
 A session hook runs with none of the environment the person who installed it
 had, so `install-hooks` writes the paths of the installation it was run for
@@ -168,19 +197,12 @@ fetching once it has spent 20 seconds, so a notice can lag a teammate's push
 by that interval. Run `scripts/link-skills.sh check` to force a fresh look:
 that throttle is the hook's alone.
 
-The hook never blocks a session start. Its whole run, including fetches, the
-merge, any local git hook the merge runs, and the scan afterwards, is bounded
-by 25 seconds of wall clock: past that it stops the work it started, prints
+The hook never blocks a session start. Its whole run, including the fetches,
+the behind counts and the scan afterwards, is bounded by 25 seconds of wall
+clock: past that it stops the work it started, prints
 `hook timed out after 25s`, and exits 0. A path it cannot use, such as an
-unset `HOME` or a manifest that is not a regular file, is one line and exit 0
-too. The other commands keep exit 2 for the same refusal.
-
-The deadline never leaves a clone half updated. An `auto-update` fast-forward
-starts only with at least 10 seconds left; with less the hook prints the manual
-`git pull --ff-only` command and does not touch the clone. A fast-forward the
-deadline does stop is rolled back to the commit the clone sat on: an unfinished
-merge is aborted, and a finished one is reset, with ignored files left where
-they are. The hook says so in one line and the session starts.
+unset `HOME`, is one line and exit 0 too. The other commands keep exit 2 for
+the same refusal.
 
 `install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
 creating either file when it is missing, and copies the previous content of an
@@ -199,7 +221,14 @@ exists is dead, so it is repointed at this script instead of being kept, and
 the run reports that it replaced a stale hook. An entry whose script path is
 relative, such as `bash scripts/link-skills.sh hook`, is dead in the same way:
 a session start runs from the directory of the project it opens, where that
-path names another file or none, so it is repointed too. An entry whose script
+path names another file or none, so it is repointed too. An entry that runs the
+script through an interpreter other than `bash`, such as `sh
+/path/link-skills.sh hook`, is dead in the same way: `/bin/sh` is `dash` on
+many systems and the script fails there at its first bashism, at every session
+start, so it is repointed and the run reports that it replaced a hook that ran
+the script through that interpreter. `bash` spelled as an absolute path, and a
+command that runs the script directly with no interpreter at all, both count as
+this hook. An entry whose script
 file is there but whose `--sources` or `--assembly` names another installation
 runs an assembly this run is not for, so it is rewritten to the current
 command and the run reports that it replaced a hook for another installation;

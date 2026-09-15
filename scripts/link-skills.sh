@@ -17,16 +17,11 @@ PROG="link-skills"
 FETCH_TIMEOUT_SECONDS=15
 HOOK_FETCH_BUDGET_SECONDS=20
 HOOK_TIMEOUT_SECONDS=60
-# The whole hook, not just its fetches: git status, the merge, any local git
-# hook the merge runs, and the candidate scan all happen inside this budget.
-# It stays well below the timeout the installed hook entry carries, so a
-# session start ends on this script's own terms and with its own message.
+# The whole hook, not just its fetches: the behind count and the candidate
+# scan happen inside this budget too. It stays well below the timeout the
+# installed hook entry carries, so a session start ends on this script's own
+# terms and with its own message.
 HOOK_DEADLINE_SECONDS=25
-# The room a fast-forward needs before the deadline. A merge runs a local git
-# hook and rewrites the work tree, so one started with seconds to spare is a
-# merge the deadline can cut in half. With less than this left, the hook prints
-# the manual command instead and the clone is not touched.
-HOOK_MERGE_MIN_SECONDS=10
 
 # A stalled HTTP transfer must give up inside the fetch timeout, so that the
 # bash-native timeout below is a second line of defence, not the only one.
@@ -60,7 +55,8 @@ LOCK_WAIT_SECONDS=10
 LOCK_STALE_MINUTES=2
 LOCK_HELD=0
 # What is wrong with the lock path, set when take_lock returns 2. The caller
-# decides whether to print it: the session hook steps aside without a word.
+# decides whether to print it. The session hook never asks: it writes no link,
+# so it takes no lock and a lock another run holds does not silence it.
 LOCK_PROBLEM=""
 
 # -1 until the probe below has run: 1 on a filesystem that treats 'Foo' and
@@ -86,7 +82,11 @@ UNREAD_COUNT=0
 # Parallel arrays. bash 3.2 has no associative arrays, so every table is a set
 # of indexed arrays plus a count, and every loop is an index loop.
 SRC_PATH=()
-SRC_FLAG=()
+# The spelling a source line carries once it is a normalized absolute path,
+# before any symlink in it is resolved. It is what the manifest records, so a
+# source reached through a symlink alias can still be found by its line after
+# the alias is gone, when nothing in the recorded target names it any more.
+SRC_SPELLING=()
 SRC_RAW=()
 SRC_OK=()
 SRC_FOUND=()
@@ -95,12 +95,16 @@ UNREAD_NAME=()
 UNREAD_SRC=()
 RAW_NAME=()
 RAW_TARGET=()
+RAW_SRC_SPELLING=()
 CAND_NAME=()
 CAND_TARGET=()
+CAND_SRC_SPELLING=()
 MAN_NAME=()
 MAN_TARGET=()
+MAN_SRC_SPELLING=()
 OUT_NAME=()
 OUT_TARGET=()
+OUT_SRC_SPELLING=()
 NEW_NAME=()
 REPOINT_NAME=()
 REPOINT_OLD=()
@@ -158,9 +162,10 @@ usage() {
 		'                  no links. Fetches every git source every time it' \
 		'                  runs, and writes a fetch-* stamp in the' \
 		'                  .skill-links.d directory inside the assembly.' \
-		'  hook            SessionStart hook mode. Silent when current, never fails.' \
-		'                  Bounded by 25 seconds of wall clock, everything it' \
-		'                  starts included.' \
+		'  hook            SessionStart hook mode. Notifies only: it changes no' \
+		'                  clone and no link, and takes no lock. Silent when' \
+		'                  current, never fails. Bounded by 25 seconds of wall' \
+		'                  clock, everything it starts included.' \
 		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
 		'                  A settings file that already runs the hook is left' \
 		'                  byte for byte as it is. An entry that runs a' \
@@ -201,10 +206,12 @@ usage() {
 		'whose immediate children are skill directories holding a SKILL.md:' \
 		'  /absolute/path/to/skills' \
 		'  ~/code/my-skills/skills' \
-		'  ~/code/agents/skills auto-update' \
+		'  ~/code/agents/skills' \
 		'' \
 		"Lines that are empty or start with '#' are ignored. A relative path" \
-		'resolves against the directory that holds the sources file.'
+		'resolves against the directory that holds the sources file. A line' \
+		'names one path and nothing else, spaces in the path included: a' \
+		'second token after the path is refused.'
 }
 
 # ----------------------------------------------------------------- paths ----
@@ -628,8 +635,59 @@ sources_is_control_path() {
 	return 1
 }
 
+# The directory a sources line names, expanded the way load_sources expands it,
+# so that a line can be judged before the sources are loaded.
+source_line_dir() {
+	local path
+	path=$(expand_home "$1")
+	case "$path" in
+	/*) ;;
+	*) path="$(dirname "$SOURCES_FILE")/$path" ;;
+	esac
+	printf '%s\n' "$path"
+}
+
+# A sources line names one path and nothing else. An older sources file could
+# put 'auto-update' after a path, and the session hook then fast-forwarded that
+# clone. The hook only notifies now, so a second token states an expectation
+# this script no longer meets, and reading it as part of the path would answer
+# that expectation with a source directory that does not exist. The line is
+# refused instead, whatever the second token spells.
+#
+# A source may live under a path that holds a space, so whitespace alone does
+# not make a token: the whitespace belongs to the path whenever the whole line
+# names a directory. A line that does not name one, but whose text before the
+# last whitespace does, carries a token after the path. 'auto-update' is
+# refused wherever it sits, because it names the removed behavior outright.
+refuse_extra_source_token() {
+	local line trimmed head
+	if [ ! -f "$SOURCES_FILE" ]; then
+		return 0
+	fi
+	while IFS= read -r line || [ -n "$line" ]; do
+		trimmed=$(trim "$line")
+		case "$trimmed" in
+		"" | "#"*) continue ;;
+		*[[:space:]]auto-update)
+			die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
+			;;
+		*[[:space:]]*) ;;
+		*) continue ;;
+		esac
+		if [ -d "$(source_line_dir "$trimmed")" ]; then
+			continue
+		fi
+		head=$(trim "${trimmed%[[:space:]]*}")
+		if [ -z "$head" ] || [ ! -d "$(source_line_dir "$head")" ]; then
+			continue
+		fi
+		die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
+	done <"$SOURCES_FILE"
+	return 0
+}
+
 load_sources() {
-	local line trimmed path flag resolved dir j dupidx
+	local line trimmed path spelling resolved dir j dupidx
 	SRC_COUNT=0
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
@@ -640,17 +698,7 @@ load_sources() {
 		case "$trimmed" in
 		"" | "#"*) continue ;;
 		esac
-		case "$trimmed" in
-		*[[:space:]]auto-update)
-			flag="auto-update"
-			path=$(printf '%s' "$trimmed" | sed -e 's/[[:space:]][[:space:]]*auto-update$//')
-			path=$(trim "$path")
-			;;
-		*)
-			flag=""
-			path="$trimmed"
-			;;
-		esac
+		path="$trimmed"
 		path=$(expand_home "$path")
 		case "$path" in
 		/*) ;;
@@ -663,6 +711,20 @@ load_sources() {
 		# while it was there, which is the spelling its links carry in the
 		# manifest.
 		path=$(normalize_lexical "$path")
+		case "$path" in
+		/) ;;
+		*/) path=${path%/} ;;
+		esac
+		# The spelling before any symlink is resolved. A source reached
+		# through an alias records its links under the directory the alias
+		# points at, so after the alias is gone only this spelling still ties
+		# them to the line that is still listed.
+		spelling="$path"
+		# A spelling that cannot round-trip through the tab-separated manifest
+		# is recorded as none; the physical rule below still covers it.
+		if ! field_is_safe "$spelling"; then
+			spelling=""
+		fi
 		resolved=$(phys_prefix_path "$path")
 		if [ -n "$resolved" ]; then
 			path="$resolved"
@@ -689,14 +751,11 @@ load_sources() {
 			j=$((j + 1))
 		done
 		if [ "$dupidx" -ge 0 ]; then
-			if [ "$flag" = "auto-update" ]; then
-				SRC_FLAG[dupidx]="auto-update"
-			fi
 			continue
 		fi
 		SRC_RAW[SRC_COUNT]="$trimmed"
 		SRC_PATH[SRC_COUNT]="$path"
-		SRC_FLAG[SRC_COUNT]="$flag"
+		SRC_SPELLING[SRC_COUNT]="$spelling"
 		SRC_COUNT=$((SRC_COUNT + 1))
 	done <"$SOURCES_FILE"
 }
@@ -817,6 +876,7 @@ collect_candidates() {
 			fi
 			RAW_NAME[RAW_COUNT]="$name"
 			RAW_TARGET[RAW_COUNT]="$entry"
+			RAW_SRC_SPELLING[RAW_COUNT]="${SRC_SPELLING[$i]}"
 			RAW_COUNT=$((RAW_COUNT + 1))
 			found=$((found + 1))
 		done
@@ -872,6 +932,7 @@ collect_candidates() {
 		else
 			CAND_NAME[CAND_COUNT]="$name"
 			CAND_TARGET[CAND_COUNT]="${RAW_TARGET[$i]}"
+			CAND_SRC_SPELLING[CAND_COUNT]="${RAW_SRC_SPELLING[$i]}"
 			CAND_COUNT=$((CAND_COUNT + 1))
 		fi
 		i=$((i + 1))
@@ -896,8 +957,28 @@ dup_has() {
 # run: a missing or unreadable directory. That is a transient problem, so its
 # links must survive. A source that is readable is authoritative even when it
 # holds no skill at all, so its recorded links are pruned normally.
+#
+# Takes the recorded target and the source spelling the manifest recorded
+# beside it. The spelling decides first: a source reached through a symlink
+# alias records targets under the directory the alias points at, so once the
+# alias is gone nothing in the target names the line that is still listed, and
+# the path rule below would prune every one of its links. A line written by an
+# older version carries no spelling, and the path rule answers for it.
 target_source_unavailable() {
-	local d i
+	local d s i
+	s=${2-}
+	if [ -n "$s" ]; then
+		i=0
+		while [ "$i" -lt "$SRC_COUNT" ]; do
+			if [ "${SRC_SPELLING[$i]-}" = "$s" ]; then
+				if [ "${SRC_OK[$i]:-0}" != "1" ]; then
+					return 0
+				fi
+				return 1
+			fi
+			i=$((i + 1))
+		done
+	fi
 	d=$(dirname "$1")
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
@@ -977,7 +1058,7 @@ cand_index_of() {
 # command rather than act on a list it could not read. The message is left to
 # the caller, so that the session hook can step aside without a word.
 load_manifest() {
-	local n t
+	local n t src
 	MAN_COUNT=0
 	if [ ! -f "$MANIFEST" ]; then
 		return 0
@@ -987,7 +1068,11 @@ load_manifest() {
 	fi
 	n=""
 	t=""
-	while IFS=$'\t' read -r n t || [ -n "$n" ]; do
+	src=""
+	# Three columns since the source spelling was added. A line an older
+	# version wrote holds two, and its third field reads as the empty string,
+	# which is exactly 'no spelling recorded'.
+	while IFS=$'\t' read -r n t src || [ -n "$n" ]; do
 		if [ -z "$n" ]; then
 			continue
 		fi
@@ -1004,8 +1089,24 @@ load_manifest() {
 		fi
 		MAN_NAME[MAN_COUNT]="$n"
 		MAN_TARGET[MAN_COUNT]="$t"
+		MAN_SRC_SPELLING[MAN_COUNT]="$src"
 		MAN_COUNT=$((MAN_COUNT + 1))
 	done <"$MANIFEST"
+}
+
+# The recorded source spelling of a name. Empty when the name is not recorded,
+# and empty for a two-column line an older version wrote.
+manifest_src_of() {
+	local i
+	i=0
+	while [ "$i" -lt "$MAN_COUNT" ]; do
+		if names_equal "${MAN_NAME[$i]}" "$1"; then
+			printf '%s\n' "${MAN_SRC_SPELLING[$i]-}"
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 1
 }
 
 # The recorded target of a name, or failure when the name is not recorded.
@@ -1077,7 +1178,7 @@ write_manifest() {
 	body=""
 	i=0
 	while [ "$i" -lt "$OUT_COUNT" ]; do
-		body="${body}${OUT_NAME[$i]}"$'\t'"${OUT_TARGET[$i]}"$'\n'
+		body="${body}${OUT_NAME[$i]}"$'\t'"${OUT_TARGET[$i]}"$'\t'"${OUT_SRC_SPELLING[$i]-}"$'\n'
 		i=$((i + 1))
 	done
 	if ! printf '%s' "$body" >"$tmp" 2>/dev/null; then
@@ -1093,9 +1194,13 @@ write_manifest() {
 	return 0
 }
 
+# The third argument is the spelling of the source the target came from, empty
+# when this run has none for it: a line read from an older manifest, or an
+# entry this run only kept.
 record_output() {
 	OUT_NAME[OUT_COUNT]="$1"
 	OUT_TARGET[OUT_COUNT]="$2"
+	OUT_SRC_SPELLING[OUT_COUNT]="${3-}"
 	OUT_COUNT=$((OUT_COUNT + 1))
 }
 
@@ -1474,11 +1579,12 @@ candidate_contains_assembly() {
 }
 
 link_candidates() {
-	local i name target entry cur
+	local i name target spelling oldspell entry cur
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do
 		name=${CAND_NAME[$i]}
 		target=${CAND_TARGET[$i]}
+		spelling=${CAND_SRC_SPELLING[$i]-}
 		i=$((i + 1))
 		# A name or a target that cannot round-trip through the tab-separated
 		# manifest would be recorded wrong, so it is never linked.
@@ -1501,9 +1607,13 @@ link_candidates() {
 			# link someone else made stays theirs even when it happens to point
 			# at the same target.
 			if entry_is_recorded_link "$name" "$entry"; then
+				# The failures below leave the name pointing where it
+				# already pointed, so they keep the spelling recorded
+				# with that target rather than this candidate's.
+				oldspell=$(manifest_src_of "$name") || oldspell=""
 				if same_path "$cur" "$target"; then
 					UNCHANGED=$((UNCHANGED + 1))
-					record_output "$name" "$target"
+					record_output "$name" "$target" "$spelling"
 					continue
 				fi
 				# The old link goes first, and only a checked removal
@@ -1514,7 +1624,7 @@ link_candidates() {
 				# neither the assembly nor the manifest can see it.
 				if ! remove_link "$entry"; then
 					err "could not remove $entry to point $name at $target; kept the link to $cur and its manifest entry"
-					record_output "$name" "$cur"
+					record_output "$name" "$cur" "$oldspell"
 					continue
 				fi
 				# Recorded once the old link is gone, so a failed
@@ -1532,12 +1642,12 @@ link_candidates() {
 					else
 						err "could not link $entry -> $target, and could not put the link to $cur back; $name is now unlinked, and the manifest still records $cur"
 					fi
-					record_output "$name" "$cur"
+					record_output "$name" "$cur" "$oldspell"
 					continue
 				fi
 				info "$PROG: relinked $name -> $target"
 				LINKED=$((LINKED + 1))
-				record_output "$name" "$target"
+				record_output "$name" "$target" "$spelling"
 				continue
 			fi
 			if same_path "$cur" "$target"; then
@@ -1557,7 +1667,7 @@ link_candidates() {
 		fi
 		info "$PROG: linked $name -> $target"
 		LINKED=$((LINKED + 1))
-		record_output "$name" "$target"
+		record_output "$name" "$target" "$spelling"
 		record_new_link "$name"
 	done
 }
@@ -1566,12 +1676,13 @@ link_candidates() {
 # more. A name refused as a duplicate, and a name whose source could not be
 # read, keep their links and their manifest entries.
 prune_manifest() {
-	local i name target entry cur kept
+	local i name target spelling entry cur kept
 	kept=0
 	i=0
 	while [ "$i" -lt "$MAN_COUNT" ]; do
 		name=${MAN_NAME[$i]}
 		target=${MAN_TARGET[$i]}
+		spelling=${MAN_SRC_SPELLING[$i]-}
 		i=$((i + 1))
 		if output_has "$name"; then
 			continue
@@ -1582,18 +1693,18 @@ prune_manifest() {
 		fi
 		if dup_has "$name"; then
 			info "$PROG: duplicate '$name'; kept the existing link to $target"
-			record_output "$name" "$target"
+			record_output "$name" "$target" "$spelling"
 			continue
 		fi
 		# The skill directory is there and could not be read, so it
 		# produced no candidate. That is not a skill that was deleted.
 		if unreadable_has "$name"; then
-			record_output "$name" "$target"
+			record_output "$name" "$target" "$spelling"
 			kept=$((kept + 1))
 			continue
 		fi
-		if target_source_unavailable "$target"; then
-			record_output "$name" "$target"
+		if target_source_unavailable "$target" "$spelling"; then
+			record_output "$name" "$target" "$spelling"
 			kept=$((kept + 1))
 			continue
 		fi
@@ -1611,7 +1722,7 @@ prune_manifest() {
 					record_pruned_link "$name" "$target"
 				else
 					err "could not remove the dangling link $entry; kept its manifest entry"
-					record_output "$name" "$target"
+					record_output "$name" "$target" "$spelling"
 				fi
 			else
 				info "$PROG: $name is a foreign dangling link to $cur; left alone"
@@ -1627,7 +1738,7 @@ prune_manifest() {
 				record_pruned_link "$name" "$cur"
 			else
 				err "could not remove $entry; kept its manifest entry"
-				record_output "$name" "$target"
+				record_output "$name" "$target" "$spelling"
 			fi
 		fi
 	done
@@ -1873,85 +1984,6 @@ git_upstream() {
 	return 1
 }
 
-# git refuses to overwrite an untracked file, but it overwrites an ignored one
-# without a word. A clone that keeps local notes, a local settings file or a
-# build directory under .gitignore would lose them the moment the upstream
-# commit starts tracking that path. --no-overwrite-ignore makes git refuse
-# too, on the versions that have it.
-#
-# 'git merge -h' prints its options and exits; 'git merge --help' opens the
-# manual page, which must never happen inside a session start.
-#
-# The help text is captured before it is searched. 'git merge -h' exits 129,
-# and this script runs with 'set -o pipefail', so the status of a pipeline
-# through git would be that 129 and never the grep's answer.
-#
-# git prints the option as '--[no-]overwrite-ignore', and older versions print
-# '--no-overwrite-ignore', so both spellings count.
-git_merge_keeps_ignored() {
-	local help
-	help=$(git -C "$1" merge -h 2>&1) || true
-	printf '%s\n' "$help" | grep -q -E -- '--(\[no-\])?overwrite-ignore'
-}
-
-# Every path the work tree ignores, one per line. '-z' is what makes the paths
-# comparable with the ls-tree listing below: without it git quotes a path that
-# holds a space or a non-ASCII byte, and 'my notes.txt' would then never match
-# the tracked path of the same name. awk drops the '!! ' status prefix: bash
-# 3.2 misparses a quoted prefix in a parameter expansion inside a command
-# substitution, and this list is read inside one.
-#
-# A path that holds a newline is out of scope: it survives the NUL-separated
-# transfer but not the line-by-line reading below, and git can neither ignore
-# nor track it on the platforms this script runs on without the same caveat.
-ignored_paths() {
-	git -C "$1" status --porcelain=v1 -z --ignored 2>/dev/null |
-		tr '\0' '\n' |
-		awk '/^!! / { print substr($0, 4) }'
-}
-
-# The first ignored path in the work tree that the upstream commit tracks, or
-# nothing. A 'path/' entry names a whole ignored directory, so any tracked
-# path below it counts; every other entry is one file and must match exactly.
-first_ignored_path_taken_over() {
-	local root up tracked hit
-	root=$1
-	up=$2
-	# '-z' for the same reason as in ignored_paths: both listings must spell a
-	# path with a space the one way, or the comparison below never matches.
-	tracked=$(git -C "$root" ls-tree -r --name-only -z "$up" 2>/dev/null | tr '\0' '\n') || return 1
-	if [ -z "$tracked" ]; then
-		return 1
-	fi
-	# The loop runs in the subshell of a pipeline, so the name it finds leaves
-	# it as output, not as a variable.
-	hit=$(ignored_paths "$root" |
-		while IFS= read -r path; do
-			if [ -z "$path" ]; then
-				continue
-			fi
-			# awk decides the directory case too. bash 3.2 misparses a case
-			# statement inside a command substitution, and this loop is one.
-			if printf '%s\n' "$tracked" | awk -v p="$path" '
-				BEGIN { dir = (substr(p, length(p)) == "/") }
-				{
-					if (dir) {
-						if (index($0, p) == 1) { found = 1; exit }
-					} else if ($0 == p) { found = 1; exit }
-				}
-				END { exit found ? 0 : 1 }
-			'; then
-				printf '%s\n' "$path"
-				break
-			fi
-		done)
-	if [ -n "$hit" ]; then
-		printf '%s\n' "$hit"
-		return 0
-	fi
-	return 1
-}
-
 git_behind_count() {
 	local root up
 	root=$1
@@ -1986,71 +2018,6 @@ stamp_file() {
 	local h
 	h=$(printf '%s' "$1" | cksum | awk '{print $1}')
 	printf '%s/fetch-%s\n' "$STAMP_DIR" "$h"
-}
-
-# The record of a fast-forward in progress: the clone on the first line, the
-# commit it sat on before the merge on the second. It exists only between the
-# moment the hook starts a merge and the moment that merge returns, and it is
-# what licenses the restore below. One hook runs at a time, because the hook
-# holds the assembly lock, so one marker is enough.
-merge_marker_path() {
-	printf '%s/merge-in-progress\n' "$STAMP_DIR"
-}
-
-write_merge_marker() {
-	local marker
-	if ! ensure_stamp_dir; then
-		return 1
-	fi
-	marker=$(merge_marker_path)
-	if [ -L "$marker" ]; then
-		return 1
-	fi
-	if [ -e "$marker" ] && [ ! -f "$marker" ]; then
-		return 1
-	fi
-	if ! printf '%s\n%s\n' "$1" "$2" >"$marker" 2>/dev/null; then
-		return 1
-	fi
-	return 0
-}
-
-clear_merge_marker() {
-	if [ -z "$STAMP_DIR" ]; then
-		return 0
-	fi
-	rm -f "$(merge_marker_path)" 2>/dev/null || true
-	return 0
-}
-
-# Put a clone back where it was when the deadline stopped the merge that was
-# changing it. A marker this script wrote is the only thing that starts this,
-# and the hook writes one only for a clone it has already found clean, so
-# nothing of the user's own can be discarded here. 'git clean' runs without
-# -x, so an ignored file stays whatever else goes.
-rollback_interrupted_merge() {
-	local marker root head
-	if [ -z "$STAMP_DIR" ]; then
-		return 0
-	fi
-	marker=$(merge_marker_path)
-	if [ -L "$marker" ] || [ ! -f "$marker" ]; then
-		return 0
-	fi
-	root=$(sed -n '1p' "$marker" 2>/dev/null) || root=""
-	head=$(sed -n '2p' "$marker" 2>/dev/null) || head=""
-	rm -f "$marker" 2>/dev/null || true
-	if [ -z "$root" ] || [ -z "$head" ] || [ ! -d "$root" ]; then
-		return 0
-	fi
-	if git -C "$root" rev-parse --verify --quiet MERGE_HEAD >/dev/null 2>&1; then
-		git -C "$root" merge --abort >/dev/null 2>&1 || true
-	else
-		git -C "$root" reset -q --hard "$head" >/dev/null 2>&1 || true
-		git -C "$root" clean -q -f -d >/dev/null 2>&1 || true
-	fi
-	hook_say "the update of $root did not finish in time; the clone was rolled back to $head"
-	return 0
 }
 
 # Hard links to a path, as a number. BSD stat and GNU stat spell the field
@@ -2235,7 +2202,7 @@ check_runtime_link() {
 }
 
 cmd_check() {
-	local i name target entry cur src root branch state behind fetch_note
+	local i name target spelling entry cur src root branch state behind fetch_note
 
 	# No sources file is no source to work from, which is exit 2 everywhere
 	# else in this script.
@@ -2332,6 +2299,7 @@ cmd_check() {
 	while [ "$i" -lt "$MAN_COUNT" ]; do
 		name=${MAN_NAME[$i]}
 		target=${MAN_TARGET[$i]}
+		spelling=${MAN_SRC_SPELLING[$i]-}
 		i=$((i + 1))
 		if cand_index_of "$name" >/dev/null; then
 			continue
@@ -2340,7 +2308,7 @@ cmd_check() {
 		# A source that is missing or unreadable this run produces no candidate,
 		# and 'link' keeps its links rather than pruning them. Say that, instead
 		# of promising a prune that will not happen.
-		if target_source_unavailable "$target"; then
+		if target_source_unavailable "$target" "$spelling"; then
 			if [ -L "$entry" ]; then
 				info "  link kept: $name; its source cannot be read now"
 			fi
@@ -2381,39 +2349,22 @@ cmd_check() {
 # ------------------------------------------------------------------ hook ----
 
 cmd_hook() {
-	local i src flag root branch behind def note_fetch changed missing name entry rem up taken merge_ok premerge
+	local i src root behind branch state missing stale collided name entry target cur rem
 
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
 	QUIET=1
-	# The hook links and prunes, so it writes the assembly and needs the lock
-	# that lives inside it. A first session on a machine finds no assembly at
-	# all, and a lock cannot be taken in a directory that is not there.
+	# The hook notifies and nothing else: the only thing it writes is a fetch
+	# stamp, and those live in a directory inside the assembly. A first session
+	# on a machine finds no assembly at all, so the stamps get a home here. No
+	# link is created, no manifest is written, and no lock is taken: a run that
+	# holds the lock is writing the assembly, and this run only reads it.
 	if ! mkdir -p "$ASSEMBLY_DIR"; then
 		hook_say "could not create the assembly directory $ASSEMBLY_DIR"
 		return 0
 	fi
-	# A session start must never wait on another run, and a notice it skips
-	# costs nothing: the next session prints it. A link or unlink run in
-	# progress is also about to make this run's reading of the assembly wrong.
-	if ! take_lock try; then
-		return 0
-	fi
-	# The hook links and prunes below, so it needs the same record every other
-	# command needs. A symlink or a directory at that path is refused here in
-	# the hook's own voice: one line, and a session that still starts.
-	if ! manifest_path_usable 2>/dev/null; then
-		ERRORS=0
-		hook_say "the manifest $MANIFEST is not a regular file this script can replace; run: $(script_command_prefix) link"
-		return 0
-	fi
 	SECONDS=0
-	# A marker left by a run that ended some other way than on the deadline
-	# describes a clone this run knows nothing about. It is dropped here, with
-	# the lock held, so that a later deadline can never restore a clone to a
-	# commit an older run recorded.
-	clear_merge_marker
 	detect_case_insensitive
 	# A session start never fails and never shouts. A manifest it cannot read
 	# is left to the next 'link' run, which says so in its own words.
@@ -2425,12 +2376,10 @@ cmd_hook() {
 		return 0
 	fi
 	collect_candidates
-	changed=0
 
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		src=${SRC_PATH[$i]}
-		flag=${SRC_FLAG[$i]}
 		i=$((i + 1))
 		if [ ! -d "$src" ]; then
 			hook_say "source directory is missing: $src"
@@ -2441,10 +2390,11 @@ cmd_hook() {
 		fi
 		# The budget bounds the total time spent fetching, not just the moment
 		# a fetch starts: the hook must finish inside its installed timeout.
-		note_fetch="skipped"
+		# A fetch writes the refs inside the clone's own .git and the stamp it
+		# leaves behind, and nothing else: the work tree is never touched.
 		rem=$((HOOK_FETCH_BUDGET_SECONDS - SECONDS))
 		if [ "$rem" -gt 1 ]; then
-			note_fetch=$(maybe_fetch "$root" "$rem")
+			maybe_fetch "$root" "$rem" >/dev/null
 		fi
 		behind=$(git_behind_count "$root")
 		case "$behind" in
@@ -2453,112 +2403,60 @@ cmd_hook() {
 		if [ "$behind" -eq 0 ]; then
 			continue
 		fi
+		# The branch and the work tree state go in the notice because the
+		# command it prints is a manual fast-forward: a clone on another
+		# branch, or one with local edits, tells the reader why that pull may
+		# not be the whole answer. Both are read, never changed.
 		branch=$(git_branch "$root")
-		def=$(git_default_branch "$root")
-		# Never "git pull" here: pull fetches again, so a session start would
-		# reach the network a second time outside the throttle and outside the
-		# timeout above. The merge below is local only; the refs it merges come
-		# from the throttled fetch.
-		if [ "$flag" = "auto-update" ] && [ "$branch" = "$def" ] && [ "$note_fetch" != "failed" ] && ! git_is_dirty "$root"; then
-			up=""
-			up=$(git_upstream "$root") || up=""
-			taken=""
-			if [ -n "$up" ]; then
-				taken=$(first_ignored_path_taken_over "$root" "$up") || taken=""
-			fi
-			if [ -n "$taken" ]; then
-				# Named, not just refused: the file is the user's own, and
-				# only the user can decide what to do with it.
-				hook_say "did not update $root: the update would overwrite the ignored file $taken; move that file aside first"
-				up=""
-			fi
-			# A merge rewrites the work tree and runs whatever local git hook
-			# the clone carries, so one started with seconds left is a merge
-			# the deadline can cut in half. It runs only with room to finish,
-			# and only once the marker that licenses the restore is on disk.
-			# Without either, the manual command below is printed instead and
-			# the clone is not touched at all.
-			if [ -n "$up" ] && [ "$((HOOK_DEADLINE_SECONDS - SECONDS))" -lt "$HOOK_MERGE_MIN_SECONDS" ]; then
-				up=""
-			fi
-			if [ -n "$up" ]; then
-				premerge=""
-				premerge=$(git -C "$root" rev-parse HEAD 2>/dev/null) || premerge=""
-				if [ -z "$premerge" ] || ! write_merge_marker "$root" "$premerge"; then
-					up=""
-				fi
-			fi
-			if [ -n "$up" ]; then
-				if git_merge_keeps_ignored "$root"; then
-					merge_ok=0
-					git -C "$root" merge --ff-only --no-overwrite-ignore --quiet "$up" >/dev/null 2>&1 || merge_ok=1
-				else
-					merge_ok=0
-					git -C "$root" merge --ff-only --quiet "$up" >/dev/null 2>&1 || merge_ok=1
-				fi
-				# The merge is over, however it ended: there is nothing left
-				# for a deadline to interrupt and nothing to restore.
-				clear_merge_marker
-				if [ "$merge_ok" -eq 0 ]; then
-					hook_say "updated $root ($behind commit(s) fast-forwarded on $branch)"
-					changed=1
-					continue
-				fi
-			fi
+		if git_is_dirty "$root"; then
+			state="dirty"
+		else
+			state="clean"
 		fi
-		hook_say "$root is $behind commit(s) behind; run: cd $(shell_quote "$root") && git pull --ff-only && $(script_command_prefix) link"
+		hook_say "$root is $behind commit(s) behind on branch $branch ($state); run: cd $(shell_quote "$root") && git pull --ff-only && $(script_command_prefix) link"
 	done
 
-	if [ "$changed" -eq 1 ]; then
-		ERRORS=0
-		LINKED=0
-		UNCHANGED=0
-		PRUNED=0
-		if ! load_manifest; then
-			return 0
-		fi
-		collect_candidates
-		mkdir -p "$ASSEMBLY_DIR" 2>/dev/null || true
-		OUT_COUNT=0
-		NEW_COUNT=0
-		REPOINT_COUNT=0
-		PRUNEBACK_COUNT=0
-		link_candidates
-		prune_manifest
-		if ! write_manifest; then
-			restore_repointed_links
-			restore_pruned_links
-			rollback_new_links
-			# The assembly is back to what the manifest on disk describes, so
-			# this run linked and pruned nothing. The counters must say so, or
-			# the notice below would announce an update that was undone.
-			LINKED=0
-			UNCHANGED=0
-			PRUNED=0
-		fi
-		ensure_runtime_links
-		if [ "$LINKED" -gt 0 ] || [ "$PRUNED" -gt 0 ]; then
-			hook_say "assembly updated: linked $LINKED, pruned $PRUNED"
-		fi
-		return 0
-	fi
-
+	# Drift, sorted by what fixes it. A missing or stale link is one 'link'
+	# run away. A collision, an entry at a skill's name that this script did
+	# not create, is the one drift 'link' refuses to fix on its own, so the
+	# notice sends the person to 'check', which names the entry. An orphan is
+	# a prune the next 'link' run makes by itself, so it is not a session
+	# start's business.
 	missing=0
+	stale=0
+	collided=0
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do
 		name=${CAND_NAME[$i]}
+		target=${CAND_TARGET[$i]}
 		i=$((i + 1))
 		entry="$ASSEMBLY_DIR/$name"
-		if [ -L "$entry" ] && [ -e "$entry" ]; then
+		if [ -L "$entry" ]; then
+			cur=$(link_target_abs "$entry")
+			if same_path "$cur" "$target"; then
+				continue
+			fi
+			if entry_is_recorded_link "$name" "$entry"; then
+				stale=$((stale + 1))
+			else
+				collided=$((collided + 1))
+			fi
 			continue
 		fi
 		if [ -e "$entry" ]; then
+			collided=$((collided + 1))
 			continue
 		fi
 		missing=$((missing + 1))
 	done
 	if [ "$missing" -gt 0 ]; then
 		hook_say "$missing skill(s) are not linked; run: $(script_command_prefix) link"
+	fi
+	if [ "$stale" -gt 0 ]; then
+		hook_say "$stale link(s) are stale; run: $(script_command_prefix) link"
+	fi
+	if [ "$collided" -gt 0 ]; then
+		hook_say "$collided skill(s) collide with entries this script did not create; run: $(script_command_prefix) check"
 	fi
 	return 0
 }
@@ -2612,8 +2510,8 @@ kill_job() {
 }
 
 # The session hook, bounded by HOOK_DEADLINE_SECONDS of wall clock. The fetch
-# budget covers the fetches only; a slow git status, a merge, a local git hook
-# the merge runs and the scan afterwards all count against this one. The body
+# budget covers the fetches only; a slow git status, the behind counts and the
+# scan afterwards all count against this one. The body
 # runs as one background job, in a process group of its own where the host
 # allows it, so nothing it started outlives the deadline. bash 3.2 gives a
 # background job its own process group only in monitor mode, and macOS has no
@@ -2649,19 +2547,17 @@ run_hook_bounded() {
 		errs=""
 	fi
 	set -m 2>/dev/null || true
-	# The body takes its own lock, and a subshell starts with the shell's
-	# default handlers, so the EXIT trap main registered never runs there.
-	# Without the trap below the hook leaves its lock directory in the assembly
-	# for the next run to clear as stale. TERM is trapped too: the deadline
-	# path below kills this job, and a killed shell runs no EXIT trap of its
-	# own.
+	# The body never returns non-zero, however it ends: a session start reads
+	# the status of the hook it runs. TERM is trapped as well as EXIT, because
+	# the deadline path below kills this job and a killed shell runs no EXIT
+	# trap of its own.
 	#
 	# A host that forbids setpgid makes bash report it, and that report belongs
 	# to no one: it is dropped with the brace group's stderr. The body itself
 	# writes to the two files.
 	if [ -n "$out" ]; then
 		{ (
-			trap 'release_lock; exit 0' EXIT TERM
+			trap 'exit 0' EXIT TERM
 			cmd_hook || true
 		) >"$out" 2>"$errs" & } 2>/dev/null
 	else
@@ -2669,7 +2565,7 @@ run_hook_bounded() {
 		# past the brace group's own redirection, which is there for the
 		# setpgid report and nothing else.
 		{ (
-			trap 'release_lock; exit 0' EXIT TERM
+			trap 'exit 0' EXIT TERM
 			cmd_hook || true
 		) 2>&3 & } 3>&2 2>/dev/null
 	fi
@@ -2686,9 +2582,6 @@ run_hook_bounded() {
 			kill_job KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			replay_hook_output "$out" "$errs"
-			# The body is gone. A merge it had started is half done, and
-			# the clone is put back before the session goes on.
-			rollback_interrupted_merge
 			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(script_command_prefix) check'"
 			return 0
 		fi
@@ -2756,6 +2649,9 @@ print_hook_snippet() {
 #   normalized       an entry that already ran this command carried another
 #                    type or another timeout, and now carries both of this one
 #   replaced         an entry whose script path is gone now holds the hook
+#   replaced-interpreter <name>
+#                    an entry that ran the script through something other than
+#                    bash now holds the hook; the interpreter follows the word
 #   replaced-other   an entry that ran another installation now holds the hook
 # For every status but "unchanged" it writes the merged JSON to a temporary
 # file of its own next to the settings file and prints that path on the second
@@ -2831,6 +2727,15 @@ def options_of(parts, index):
     return sources, assembly
 
 
+def interpreter_name(text):
+    # What the first word is called in the report. A spelling with whitespace
+    # in it would break the line protocol below, so it is not repeated back.
+    name = text.strip()
+    if not name or len(name.split()) != 1:
+        return "another interpreter"
+    return name
+
+
 def parse_command(value):
     # The command is "bash <script> [options] hook": an installation on a
     # non-default sources file or assembly directory names those paths between
@@ -2844,8 +2749,15 @@ def parse_command(value):
     if len(parts) < 2 or parts[-1] != "hook":
         return None
     index = 0
-    if os.path.basename(parts[0].strip(QUOTES)) in ("bash", "sh"):
+    interpreter = ""
+    first = parts[0].strip(QUOTES)
+    # A first word that is not the script itself runs the script, so the
+    # script sits one position later. Which interpreter it is decides below:
+    # the script is bash, and dash or another shell would fail at the first
+    # bashism, silently, at every session start.
+    if os.path.basename(first) != marker:
         index = 1
+        interpreter = interpreter_name(first)
     if index > len(parts) - 2:
         return None
     token = parts[index].strip(QUOTES)
@@ -2854,7 +2766,7 @@ def parse_command(value):
     # it or counting it as ours would break that session start.
     if os.path.basename(token) != marker:
         return None
-    return token, options_of(parts, index)
+    return token, options_of(parts, index), interpreter
 
 
 def canon(value):
@@ -2887,6 +2799,7 @@ def same_installation(options):
 found = False
 stale = []
 other = []
+wrong_shell = []
 normalize = []
 for group in groups:
     if not isinstance(group, dict):
@@ -2913,7 +2826,7 @@ for group in groups:
         parsed = parse_command(text)
         if parsed is None:
             continue
-        token, options = parsed
+        token, options, interpreter = parsed
         # A SessionStart hook runs from whatever directory the session opens
         # in, so a relative script path names a different file in every
         # project and usually no file at all. It is stale wherever this
@@ -2921,6 +2834,12 @@ for group in groups:
         # a file of that name right now.
         if not (os.path.isabs(token) and os.path.isfile(token)):
             stale.append(entry)
+            continue
+        # The script is bash, and /bin/sh is dash on many systems. An entry
+        # that runs it through anything but bash is ours and dead: it fails at
+        # the first bashism, at every session start, where nobody reads it.
+        if interpreter and os.path.basename(interpreter) != "bash":
+            wrong_shell.append((entry, interpreter))
             continue
         # The script file is there, but the command runs another sources file
         # or another assembly directory. Counting that as installed would
@@ -2951,6 +2870,10 @@ elif not found and stale:
     take_over(stale[0])
     found = True
     status = "replaced"
+elif not found and wrong_shell:
+    take_over(wrong_shell[0][0])
+    found = True
+    status = "replaced-interpreter " + wrong_shell[0][1]
 elif not found and other:
     take_over(other[0])
     found = True
@@ -2994,9 +2917,11 @@ sys.stdout.write(status + "\n" + out + "\n")
 # duplicated. A matching command whose script path no longer exists, or whose
 # script path is relative and so names nothing from the directory a session
 # starts in, is dead: it is rewritten to the current command instead of being
-# kept. A command whose script is there but whose --sources or --assembly
-# names another installation is rewritten too: it would have the session hook
-# report on an assembly this run is not for. An entry that already carries this
+# kept. So is a command that runs the script through an interpreter other than
+# bash: the script is bash, and under dash it dies at the first bashism at
+# every session start. A command whose script is there but whose --sources or
+# --assembly names another installation is rewritten too: it would have the
+# session hook report on an assembly this run is not for. An entry that already carries this
 # exact command counts as installed only when the whole entry matches: a type
 # that is not "command" never runs, and another timeout runs the hook under a
 # budget this script never installed, so either one is normalized. Prints the
@@ -3107,6 +3032,9 @@ install_hook_file() {
 	case "$status" in
 	normalized) info "$PROG: normalized the hook entry in $file" ;;
 	replaced) info "$PROG: replaced a stale hook in $file" ;;
+	"replaced-interpreter "*)
+		info "$PROG: replaced a hook that ran the script through ${status#replaced-interpreter } in $file"
+		;;
 	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;
 	esac
@@ -3128,7 +3056,7 @@ cmd_install_hooks() {
 # ---------------------------------------------------------------- unlink ----
 
 cmd_unlink() {
-	local i name target entry cur stamp kept rc
+	local i name target spelling entry cur stamp kept rc
 	rc=0
 	# The lock lives inside the assembly, so the directory has to be there
 	# before the lock can be taken. An assembly that was never created holds
@@ -3166,6 +3094,7 @@ cmd_unlink() {
 	while [ "$i" -lt "$MAN_COUNT" ]; do
 		name=${MAN_NAME[$i]}
 		target=${MAN_TARGET[$i]}
+		spelling=${MAN_SRC_SPELLING[$i]-}
 		i=$((i + 1))
 		entry="$ASSEMBLY_DIR/$name"
 		if [ ! -L "$entry" ]; then
@@ -3185,7 +3114,7 @@ cmd_unlink() {
 				info "$PROG: removed dangling $name"
 			else
 				err "could not remove the dangling link $entry; kept its manifest entry"
-				record_output "$name" "$target"
+				record_output "$name" "$target" "$spelling"
 				kept=$((kept + 1))
 			fi
 			continue
@@ -3195,7 +3124,7 @@ cmd_unlink() {
 				info "$PROG: removed $name"
 			else
 				err "could not remove $entry; kept its manifest entry"
-				record_output "$name" "$target"
+				record_output "$name" "$target" "$spelling"
 				kept=$((kept + 1))
 			fi
 		fi
@@ -3438,6 +3367,9 @@ main() {
 	if ! sources_path_usable; then
 		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
 	fi
+	# Judged here too, so that every command refuses the line in its own
+	# voice, including the two that never read the sources file themselves.
+	refuse_extra_source_token
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
 	case "$FETCH_INTERVAL_HOURS" in
@@ -3445,14 +3377,6 @@ main() {
 	esac
 	# '08' is a number of hours, never an octal literal, so the base is stated.
 	FETCH_INTERVAL_HOURS=$((10#$FETCH_INTERVAL_HOURS))
-
-	# Test hook, never set outside the harness: shorten the wall-clock budget
-	# of the session hook, so that a case can reach the near-deadline path in
-	# seconds instead of waiting out the real budget.
-	case "${LINK_SKILLS_TEST_DEADLINE_SECONDS-}" in
-	'' | *[!0-9]*) ;;
-	*) HOOK_DEADLINE_SECONDS=$((10#$LINK_SKILLS_TEST_DEADLINE_SECONDS)) ;;
-	esac
 
 	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
 	# it is registered once, here, for every command below.

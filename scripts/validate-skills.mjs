@@ -3,7 +3,8 @@
 //
 // Checks per skills/<name>/SKILL.md:
 //   - the file exists and its frontmatter is the first thing in it,
-//     delimited by "---" lines
+//     delimited by "---" lines at column zero; an indented "---" is content,
+//     and inside a block scalar it belongs to the scalar
 //   - name is present, equals the directory name, 1-64 characters, [a-z0-9-]
 //     only, no leading/trailing hyphen, no "--"
 //   - description is present and non-empty after trimming, 1-1024 characters.
@@ -12,17 +13,18 @@
 //     between its quotes with the escapes resolved, and a plain scalar folds
 //     its indented continuation lines in with single spaces. A quoted scalar
 //     may span several lines: the scan runs to the closing quote, one line
-//     break folds to a space, n blank lines fold to n newlines, and a "#"
-//     between the quotes is text, never a comment. A blank line
-//     inside a plain scalar or a folded (">") block is a paragraph break that
-//     folds to one newline. A more-indented line inside a folded block also
-//     keeps the line break before it, so a blank line next to one yields two
-//     newlines. The chomping indicator of a block scalar decides how many
-//     trailing newlines its value keeps. An unquoted value loses its inline
-//     comment, so "description: # TODO" reads as empty. A double-quoted scalar
-//     resolves the whole YAML escape set, including \N (U+0085), \_ (U+00A0),
-//     \L (U+2028) and \P (U+2029), and the empty check treats those four as
-//     whitespace as well
+//     break folds to a space, n blank lines fold to n newlines, a backslash at
+//     the end of a double-quoted line escapes the break so that nothing takes
+//     its place, and a "#" between the quotes is text, never a comment. A
+//     blank line inside a plain scalar or a folded (">") block is a paragraph
+//     break that folds to one newline. A more-indented line inside a folded
+//     block also keeps the line break before it, so a blank line next to one
+//     yields two newlines. The chomping indicator of a block scalar decides
+//     how many trailing newlines its value keeps. An unquoted value loses its
+//     inline comment, so "description: # TODO" reads as empty. A double-quoted
+//     scalar resolves the whole YAML escape set, including \N (U+0085),
+//     \_ (U+00A0), \L (U+2028) and \P (U+2029), and the empty check treats
+//     those four as whitespace as well
 //   - name and description are plain strings. Any unquoted value that YAML
 //     reads as another type is refused: "[]", "{}", a flow sequence or mapping,
 //     a bare anchor or alias, an explicit tag such as "!!int 123" or
@@ -175,6 +177,17 @@ function trimYamlSpace(value) {
   return value.replace(YAML_SPACE_RE, "");
 }
 
+/**
+ * True when a line is a frontmatter delimiter. Only "---" at column zero is
+ * one: a trailing carriage return and trailing whitespace are ignored, so a
+ * CRLF checkout and a padded delimiter still count, but leading whitespace is
+ * not, because an indented "---" is content and inside a block scalar it is
+ * part of the scalar.
+ */
+function isDelimiterLine(line) {
+  return line.replace(/\r$/, "").replace(/[ \t]+$/, "") === "---";
+}
+
 /** The number of leading space and tab characters of a line. */
 function indentWidth(line) {
   const match = /^[ \t]*/.exec(line);
@@ -275,6 +288,17 @@ function findClosingQuote(text, quote) {
 }
 
 /**
+ * True when a physical line of a double-quoted scalar ends in a backslash that
+ * escapes its line break. Only an odd run of trailing backslashes does: in an
+ * even run every backslash is itself escaped, so the last one is text and the
+ * break folds as usual.
+ */
+function escapesLineBreak(segment) {
+  const run = /\\+$/.exec(segment);
+  return run !== null && run[0].length % 2 === 1;
+}
+
+/**
  * Read a quoted scalar that starts on line `start` of `lines`, where `text` is
  * that line from the opening quote on. The scan runs to the closing quote,
  * which may sit on a later line, and it runs before any comment is stripped,
@@ -285,6 +309,13 @@ function findClosingQuote(text, quote) {
  * whitespace at the end of a line and at the start of the next one is dropped,
  * a single line break folds to one space, and n blank lines fold to n
  * newlines. The folded text is decoded once, so an escape never spans a break.
+ *
+ * A double-quoted line that ends in a backslash is the exception: the
+ * backslash escapes the break, so the break and the next line's leading
+ * whitespace go away and nothing takes their place. Blank lines after an
+ * escaped break still fold to one newline each, as libyaml reads them. The
+ * backslash itself is dropped here, before the decoding pass, so it never
+ * escapes the first character of the next line.
  *
  * Returns { value, end } for a well formed quoted scalar, where `end` is the
  * index of the last line consumed. Returns null when the text is not quoted,
@@ -301,6 +332,7 @@ function readQuotedScalar(text, lines, start) {
   let closed = false;
   let blanks = 0;
   let first = true;
+  let escapedBreak = false;
 
   for (let i = start; i < lines.length; i += 1) {
     const raw = i === start ? text.slice(1) : lines[i].replace(/\r$/, "");
@@ -311,13 +343,24 @@ function readQuotedScalar(text, lines, start) {
       continue;
     }
     const piece = first ? segment : segment.replace(/^[ \t]+/, "");
+    const escapes = at === -1 && quote === '"' && escapesLineBreak(piece);
+    let part;
+    if (at !== -1) {
+      part = piece;
+    } else if (escapes) {
+      part = piece.slice(0, -1);
+    } else {
+      part = piece.replace(/[ \t]+$/, "");
+    }
     if (first) {
-      body = at === -1 ? piece.replace(/[ \t]+$/, "") : piece;
+      body = part;
       first = false;
     } else {
-      body += blanks === 0 ? " " : "\n".repeat(blanks);
-      body += at === -1 ? piece.replace(/[ \t]+$/, "") : piece;
+      if (blanks > 0) body += "\n".repeat(blanks);
+      else if (!escapedBreak) body += " ";
+      body += part;
     }
+    escapedBreak = escapes;
     blanks = 0;
     if (at !== -1) {
       const trailing = raw.slice(at + 1);
@@ -646,17 +689,15 @@ function validateSkill(name) {
   const raw = readFileSync(skillMdPath, "utf8");
   const lines = raw.split("\n");
 
-  if (lines[0].trim() !== "---") {
+  if (!isDelimiterLine(lines[0])) {
     problems.push(
       `skills/${name}: frontmatter must start with "---" on the first line`,
     );
     return;
   }
-  // Trim before comparing, so a CRLF checkout or a padded delimiter still
-  // closes the frontmatter.
   let closeIndex = -1;
   for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === "---") {
+    if (isDelimiterLine(lines[i])) {
       closeIndex = i;
       break;
     }

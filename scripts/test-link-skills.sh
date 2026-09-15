@@ -274,8 +274,15 @@ file_mode() {
 
 # The shims below sit in one directory that is prepended to PATH for the run
 # under test only. The single-quoted lines are shim source, not expansions.
+#
+# A git whose behind count never returns: 'rev-list' sleeps well past the
+# hook's deadline and every other subcommand is the real git. The hang is the
+# behind count and not the fetch, because the hook bounds its own fetches to
+# 20 seconds: a hanging fetch is stopped by that budget and never reaches the
+# 25 second deadline. The sleep records its pid in the file named by
+# LS_TEST_SLEEP_PID, so a case can see whether anything survived the deadline.
 # shellcheck disable=SC2016
-make_no_pull_git() {
+make_hanging_git() {
 	local dir real
 	dir=$1
 	real=$(command -v git)
@@ -283,9 +290,13 @@ make_no_pull_git() {
 	printf '%s\n' \
 		'#!/bin/sh' \
 		'for a in "$@"; do' \
-		'	if [ "$a" = "pull" ]; then' \
-		'		echo "test shim: git pull is not allowed here" >&2' \
-		'		exit 97' \
+		'	if [ "$a" = "rev-list" ]; then' \
+		'		sleep 40 &' \
+		'		if [ -n "${LS_TEST_SLEEP_PID:-}" ]; then' \
+		'			echo "$!" >"$LS_TEST_SLEEP_PID"' \
+		'		fi' \
+		'		wait' \
+		'		exit 0' \
 		'	fi' \
 		'done' \
 		"exec \"$real\" \"\$@\"" >"$dir/git"
@@ -654,73 +665,237 @@ check_fetches_despite_fresh_stamp() {
 	assert_out_has "behind 1" "the new commit is seen"
 }
 
-hook_auto_update_when_clean() {
-	local before after
+# The hook notifies and changes nothing. A source clone one commit behind gets
+# one line naming the clone, its branch, its work tree state and the command
+# that updates it by hand; the clone and the assembly come back exactly as they
+# were.
+hook_notifies_when_behind() {
+	local before after dirty lines manifest
 	fixture_company
 	write_sources
-	add_source "$COMPANY/skills auto-update"
+	add_source "$COMPANY/skills"
 	ls_run link
 	assert_rc 0 "link"
+	manifest="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$manifest"
 	before=$(head_of "$COMPANY")
 	push_beta
-	# The shim fails the run if the hook reaches for "git pull": the
-	# fast-forward must be a local merge of the ref the throttled fetch got.
-	make_no_pull_git "$CASE_DIR/bin"
-	use_shims "$CASE_DIR/bin"
-	ls_run hook
-	assert_rc 0 "hook"
-	assert_out_lacks "git pull is not allowed" "the hook never runs git pull"
-	assert_out_has "[link-skills]" "hook prefix"
-	assert_out_has "updated $COMPANY" "update message"
-	after=$(head_of "$COMPANY")
-	if [ "$before" = "$after" ]; then
-		fail "the clone was not fast-forwarded"
-	fi
-	assert_link "$HOME/.agents/skills/beta" "$COMPANY/skills/beta" "beta linked by the hook"
-	ls_run hook
-	assert_rc 0 "second hook"
-	assert_out_empty "second hook is silent"
-	drop_shims
-}
 
-hook_refused_when_dirty() {
-	local before after
-	fixture_company
-	write_sources
-	add_source "$COMPANY/skills auto-update"
-	ls_run link
-	assert_rc 0 "link"
-	printf 'local edit\n' >>"$COMPANY/skills/alpha/SKILL.md"
-	before=$(head_of "$COMPANY")
-	push_beta
 	ls_run hook
 	assert_rc 0 "hook"
-	assert_out_has "git pull --ff-only" "manual command"
+	assert_out_has "$COMPANY is 1 commit(s) behind" "the behind count is reported"
+	assert_out_has "on branch main (clean)" "the branch and the clean work tree are reported"
+	assert_out_has "git pull --ff-only" "the manual command is printed"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+
+	# A local edit does not stop the notice; it changes the state it reports,
+	# because the fast-forward it prints may not apply cleanly then.
+	printf 'local\n' >"$COMPANY/skills/alpha/NOTES.md"
+	ls_run hook
+	assert_rc 0 "hook with a dirty clone"
+	assert_out_has "on branch main (dirty)" "the dirty work tree is reported"
+	rm -f "$COMPANY/skills/alpha/NOTES.md"
+
 	after=$(head_of "$COMPANY")
 	if [ "$before" != "$after" ]; then
-		fail "a dirty clone must not be pulled"
+		fail "the hook moved HEAD from $before to $after"
 	fi
-	assert_absent "$HOME/.agents/skills/beta" "beta not linked"
+	dirty=$(git -C "$COMPANY" status --porcelain 2>/dev/null)
+	if [ -n "$dirty" ]; then
+		fail "the hook left the work tree dirty: $dirty"
+	fi
+	assert_absent "$HOME/.agents/skills/beta" "the hook links nothing"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$manifest" \
+		"the manifest is byte for byte what it was"
 }
 
-hook_refused_off_default_branch() {
-	local before after
+# A candidate the assembly does not hold is drift. The hook names it and
+# leaves the fix to the 'link' run it points at.
+hook_notifies_drift() {
+	local lines manifest
 	fixture_company
 	write_sources
-	add_source "$COMPANY/skills auto-update"
+	add_source "$COMPANY/skills"
 	ls_run link
 	assert_rc 0 "link"
-	git -C "$COMPANY" checkout -q -b other
-	before=$(head_of "$COMPANY")
-	push_beta
+	manifest="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$manifest"
+	mkskill "$COMPANY/skills" gamma
+
 	ls_run hook
 	assert_rc 0 "hook"
-	assert_out_has "git pull --ff-only" "manual command"
-	after=$(head_of "$COMPANY")
-	if [ "$before" != "$after" ]; then
-		fail "a clone off the default branch must not be pulled"
+	assert_out_has "1 skill(s) are not linked" "the drift is reported"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
 	fi
-	assert_absent "$HOME/.agents/skills/beta" "beta not linked"
+	assert_absent "$HOME/.agents/skills/gamma" "the hook links nothing"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$manifest" \
+		"the manifest is byte for byte what it was"
+}
+
+# A skill whose name is taken by an entry this script did not create is the
+# one drift 'link' will not fix, so the hook says so and points at 'check'.
+# The entry is left exactly as it was found.
+hook_notifies_collision() {
+	local lines manifest
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	manifest="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$manifest"
+	mkskill "$COMPANY/skills" gamma
+	mkdir "$HOME/.agents/skills/gamma"
+	printf 'mine\n' >"$HOME/.agents/skills/gamma/note"
+
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_has "1 skill(s) collide with entries this script did not create" \
+		"the collision is reported"
+	assert_out_has "check" "the notice points at check"
+	assert_out_lacks "not linked" "a collision is not counted as missing"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+	assert_is_dir_not_link "$HOME/.agents/skills/gamma" "the entry is left alone"
+	assert_file_has "$HOME/.agents/skills/gamma/note" "mine" "its content is untouched"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$manifest" \
+		"the manifest is byte for byte what it was"
+}
+
+# A link repointed by hand no longer names the skill directory the sources
+# produce. The hook counts it as stale and repoints nothing.
+hook_notifies_stale_link() {
+	local lines
+	# Stale the way check means it: the link still points where the manifest
+	# recorded, and the sources now produce that name from somewhere else. A
+	# link repointed by hand is a foreign symlink, which is a collision.
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	mkskill "$CASE_DIR/two" alpha
+	write_sources
+	add_source "$CASE_DIR/two"
+
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_has "1 link(s) are stale" "the stale link is reported"
+	assert_out_lacks "collide" "a stale link is not a collision"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"the hook leaves the link where it found it"
+
+	# The hand-repointed link is the other case, and the notice says so.
+	rm -f "$HOME/.agents/skills/alpha"
+	mkskill "$CASE_DIR/other" alpha
+	ln -s "$CASE_DIR/other/alpha" "$HOME/.agents/skills/alpha"
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_has "1 skill(s) collide" "a foreign symlink is a collision"
+	assert_out_lacks "stale" "a foreign symlink is not stale"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/other/alpha" \
+		"the hook leaves the foreign link where it found it"
+}
+
+# The hook writes no link and no manifest, so it takes no lock. A lock another
+# run holds must not silence its notices, and must come back untouched.
+hook_never_takes_lock() {
+	local lock owner
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	mkdir "$lock"
+	# This harness is the owner, so the lock is live and not stale.
+	printf '%s\n' "$$" >"$lock/pid"
+	owner=$(cat "$lock/pid")
+
+	ls_run hook
+	assert_rc 0 "hook while another run holds the lock"
+	assert_out_has "commit(s) behind" "the notice is printed anyway"
+	assert_is_dir_not_link "$lock" "the lock directory survives"
+	if [ "$(cat "$lock/pid" 2>/dev/null)" != "$owner" ]; then
+		fail "the hook changed the lock owner file"
+	fi
+	rm -f "$lock/pid"
+	rmdir "$lock"
+}
+
+# The token an older sources file carried after a path asked the hook to
+# update that clone. The hook only notifies now, so the token is refused
+# instead of being read as part of the path.
+sources_auto_update_token_refused() {
+	local lines
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one auto-update"
+
+	ls_run link
+	assert_rc 2 "link with the auto-update token"
+	assert_out_has "unexpected token after the path" "the refusal is named"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+
+	ls_run hook
+	assert_rc 0 "hook with the auto-update token"
+	assert_out_has "unexpected token after the path" "the hook says the same"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one line from the hook, got $lines: $LS_OUT"
+	fi
+}
+
+# The rule is the format, not one spelling: a second token after the path is
+# refused, so a token this script never knew is not folded into the path and
+# reported later as a source directory that does not exist. A path that holds
+# a space is still one path, and still works.
+sources_line_with_extra_token_refused() {
+	local lines
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one bogus-token"
+
+	ls_run link
+	assert_rc 2 "link with a second token"
+	assert_out_has "unexpected token after the path" "the refusal is named"
+	assert_out_lacks "source directory does not exist" "the token is not folded into the path"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+
+	ls_run check
+	assert_rc 2 "check with a second token"
+	assert_out_has "unexpected token after the path" "check says the same"
+	assert_out_lacks "missing" "check does not report a missing source"
+
+	ls_run hook
+	assert_rc 0 "hook with a second token"
+	assert_out_has "unexpected token after the path" "the hook says the same"
+	assert_out_lacks "source directory is missing" "the hook does not report a missing source"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one line from the hook, got $lines: $LS_OUT"
+	fi
+
+	# The whitespace belongs to the path when the whole line names a
+	# directory, so a source under a path with a space is not a second token.
+	mkskill "$CASE_DIR/my repos/two" beta
+	write_sources
+	add_source "$CASE_DIR/my repos/two"
+	ls_run link
+	assert_rc 0 "link with a space in the source path"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/my repos/two/beta" "beta link"
 }
 
 install_hooks_missing_file() {
@@ -909,7 +1084,7 @@ personal_skill_untouched() {
 	mkdir -p "$HOME/.agents/skills/personal"
 	printf 'personal\n' >"$HOME/.agents/skills/personal/SKILL.md"
 	write_sources
-	add_source "$COMPANY/skills auto-update"
+	add_source "$COMPANY/skills"
 	mkdir -p "$HOME/.claude" "$HOME/.codex"
 
 	ls_run link
@@ -1885,9 +2060,12 @@ link_refuses_while_locked() {
 	assert_out_has "holds the lock" "lock message"
 	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
 	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+	# The hook takes no lock: it only reads, so it reports the drift a held
+	# lock does not change.
 	ls_run hook
 	assert_rc 0 "hook while locked"
-	assert_out_empty "the hook is silent while locked"
+	assert_out_has "1 skill(s) are not linked" "the hook reports drift while locked"
+	assert_absent "$HOME/.agents/skills/alpha" "the hook linked nothing"
 	ls_run unlink
 	assert_rc 1 "unlink while locked"
 	assert_out_has "holds the lock" "lock message"
@@ -2069,9 +2247,11 @@ symlinked_lock_refused() {
 	assert_out_has "is a symlink" "refusal message"
 	assert_exists "$foreign/pid" "the foreign pid file is left alone by unlink"
 
+	# The hook never reaches for the lock, so an unusable lock path neither
+	# stops its notices nor gives it anything to refuse.
 	ls_run hook
 	assert_rc 0 "hook over a symlinked lock"
-	assert_out_empty "the hook steps aside in silence"
+	assert_out_has "1 skill(s) are not linked" "the hook reports drift anyway"
 	assert_exists "$foreign/pid" "the foreign pid file is left alone by the hook"
 
 	if [ ! -L "$lock" ]; then
@@ -2103,9 +2283,11 @@ regular_file_at_lock_path_refused() {
 	assert_out_has "is not a directory" "refusal message"
 	assert_file_has "$lock" "not a lock" "the file is left alone by unlink"
 
+	# The hook never reaches for the lock, so a file at that path neither
+	# stops its notices nor gives it anything to refuse.
 	ls_run hook
 	assert_rc 0 "hook with a file at the lock path"
-	assert_out_empty "the hook steps aside in silence"
+	assert_out_has "1 skill(s) are not linked" "the hook reports drift anyway"
 	assert_file_has "$lock" "not a lock" "the file is left alone by the hook"
 }
 
@@ -3204,89 +3386,6 @@ manifest_write_failure_restores_pruned_links() {
 	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
 }
 
-# git refuses to overwrite an untracked file and overwrites an ignored one
-# without a word. A commit that starts tracking an ignored path must not be
-# fast-forwarded over the user's copy.
-hook_refuses_update_over_ignored_file() {
-	local before after body probe rc mentions help
-	fixture_company
-	write_sources
-	add_source "$COMPANY/skills auto-update"
-	ls_run link
-	assert_rc 0 "link"
-	printf 'notes.txt\n' >"$COMPANY/.git/info/exclude"
-	printf 'USER DATA\n' >"$COMPANY/notes.txt"
-	printf 'FROM UPSTREAM\n' >"$SEED/notes.txt"
-	gitc "$SEED" add -A
-	gitc "$SEED" commit -q -m "start tracking notes.txt"
-	git -C "$SEED" push -q origin main
-	before=$(head_of "$COMPANY")
-	ls_run hook
-	assert_rc 0 "hook"
-	assert_out_has "did not update $COMPANY" "the skip is reported"
-	assert_out_has "notes.txt" "the notice names the file"
-	after=$(head_of "$COMPANY")
-	if [ "$before" != "$after" ]; then
-		fail "a clone that would lose an ignored file must not be fast-forwarded"
-	fi
-	assert_file_has "$COMPANY/notes.txt" "USER DATA" "the ignored file keeps its content"
-
-	# A path with a space in it. git quotes such a path in its status output
-	# and not in its tree listing, so a guard that compares the two spellings
-	# as they come would let this one through.
-	rm -f "$COMPANY/notes.txt"
-	printf 'notes.txt\nmy notes.txt\n' >"$COMPANY/.git/info/exclude"
-	printf 'USER DATA\n' >"$COMPANY/my notes.txt"
-	printf 'FROM UPSTREAM\n' >"$SEED/my notes.txt"
-	gitc "$SEED" add -A
-	gitc "$SEED" commit -q -m "start tracking my notes.txt"
-	git -C "$SEED" push -q origin main
-	before=$(head_of "$COMPANY")
-	ls_run hook
-	assert_rc 0 "hook with a spaced ignored path"
-	assert_out_has "did not update $COMPANY" "the skip is reported"
-	assert_out_has "my notes.txt" "the notice names the spaced file"
-	after=$(head_of "$COMPANY")
-	if [ "$before" != "$after" ]; then
-		fail "a clone that would lose a spaced ignored file must not be fast-forwarded"
-	fi
-	assert_file_has "$COMPANY/my notes.txt" "USER DATA" "the spaced ignored file keeps its content"
-
-	# The capability detection, on this machine's git. The function is lifted
-	# out of the script under test and run on its own, so the assertion is on
-	# the real pattern and not on a copy of it. git spells the option
-	# '--[no-]overwrite-ignore' in its help text and older versions spell it
-	# '--no-overwrite-ignore'; either one means the merge can keep an ignored
-	# file, and the detection has to say so.
-	body=$(sed -n '/^git_merge_keeps_ignored() {$/,/^}$/p' "$SOURCE_SCRIPT")
-	if [ -z "$body" ]; then
-		fail "could not read git_merge_keeps_ignored from $SOURCE_SCRIPT"
-		return
-	fi
-	probe="$CASE_DIR/capability-probe.sh"
-	# The last line is probe source, not an expansion for this shell.
-	# shellcheck disable=SC2016
-	{
-		printf 'set -o pipefail\n'
-		printf '%s\n' "$body"
-		printf 'git_merge_keeps_ignored "$1"\n'
-	} >"$probe"
-	rc=0
-	"$BASH_BIN" "$probe" "$COMPANY" >/dev/null 2>&1 || rc=$?
-	# 'git merge -h' exits 129, and this harness runs with 'set -o pipefail',
-	# so the help text is captured before it is searched here too.
-	help=$(git -C "$COMPANY" merge -h 2>&1) || true
-	mentions=1
-	printf '%s\n' "$help" |
-		grep -q -E -- '--(\[no-\])?overwrite-ignore' || mentions=0
-	if [ "$mentions" = "1" ] && [ "$rc" != "0" ]; then
-		fail "git merge -h names overwrite-ignore, but the detection answered no"
-	fi
-	if [ "$mentions" = "0" ] && [ "$rc" = "0" ]; then
-		fail "git merge -h does not name overwrite-ignore, but the detection answered yes"
-	fi
-}
-
 # A stamp carries no content, but truncating one writes through every name its
 # inode has. A file hard-linked to the stamp path must survive a fetch.
 hardlinked_stamp_not_truncated() {
@@ -3314,29 +3413,27 @@ hardlinked_stamp_not_truncated() {
 	assert_file_has "$stamp" "KEEP ME" "the stamp path was not truncated"
 }
 
-# The hook must end the session start it runs in, whatever it started. A local
-# git hook that outlasts the deadline is stopped with everything below it.
+# The hook must end the session start it runs in, whatever it started. A git
+# subcommand that outlasts the deadline is stopped with everything below it.
 hook_bounded_by_deadline() {
 	local started elapsed childpid
 	fixture_company
 	write_sources
-	add_source "$COMPANY/skills auto-update"
+	add_source "$COMPANY/skills"
 	ls_run link
 	assert_rc 0 "link"
 	push_beta
-	# The merge below runs this hook, which records the pid of the sleep it
-	# starts so the case can see whether anything survived the deadline.
-	# The single-quoted lines are hook source, not expansions.
-	# shellcheck disable=SC2016
-	printf '%s\n' \
-		'#!/bin/sh' \
-		'sleep 40 &' \
-		"printf '%s\\n' \"\$!\" >\"$CASE_DIR/sleep.pid\"" \
-		'wait' >"$COMPANY/.git/hooks/post-merge"
-	chmod +x "$COMPANY/.git/hooks/post-merge"
+	# SKILL_SOURCES_FETCH_INTERVAL_HOURS is 0 for every case, so the hook does
+	# fetch here; the shim hangs on the behind count that follows the fetch.
+	make_hanging_git "$CASE_DIR/bin"
+	use_shims "$CASE_DIR/bin"
+	LS_TEST_SLEEP_PID="$CASE_DIR/sleep.pid"
+	export LS_TEST_SLEEP_PID
 	started=$(date +%s)
 	ls_run hook
 	elapsed=$(($(date +%s) - started))
+	unset LS_TEST_SLEEP_PID
+	drop_shims
 	assert_rc 0 "hook"
 	assert_out_has "hook timed out after 25s" "the deadline is reported"
 	if [ "$elapsed" -gt 30 ]; then
@@ -3344,11 +3441,12 @@ hook_bounded_by_deadline() {
 	fi
 	childpid=$(cat "$CASE_DIR/sleep.pid" 2>/dev/null || printf '')
 	if [ -z "$childpid" ]; then
-		fail "the git hook did not record the pid of its sleep"
+		fail "the git shim did not record the pid of its sleep"
 	elif pid_is_live "$childpid"; then
 		fail "the sleep the hook started outlived the deadline"
 		kill -9 "$childpid" 2>/dev/null || true
 	fi
+	assert_absent "$HOME/.agents/skills/beta" "the hook links nothing"
 }
 
 # A path the script cannot use fails every other command with exit 2 and ends
@@ -3801,21 +3899,35 @@ lock_vanish_is_retried() {
 	LS_TEST_LOCK_MARKER="$CASE_DIR/lock-race-lost"
 	LS_TEST_LOCK_DIR="$lock"
 	export LS_TEST_LOCK_MARKER LS_TEST_LOCK_DIR
-	# The run under test holds its lock for two seconds before it does any
+	# The run under test holds its lock for three seconds before it does any
 	# work, so the pid file can be read while that run is still going.
-	LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS=2
+	LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS=3
 	export LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS
 
 	out="$CASE_DIR/link.out"
 	use_shims "$shims"
 	"$BASH_BIN" "$LS" link >"$out" 2>&1 &
 	pid=$!
-	sleep 1
+	# Polled, not read after a fixed second: on a loaded host the run under
+	# test can take longer than that to start, and a read before it wrote
+	# its pid would blame the lock for the host. The file still holds the
+	# sleeping owner until the shim takes the first race, so the poll goes on
+	# until another pid is there or four seconds are gone.
 	got=""
-	if [ -f "$lock/pid" ]; then
-		# The pid file records the owner as a pid, a tab and its start time.
-		got=$(head -n 1 "$lock/pid" | cut -f1)
-	fi
+	waited=0
+	while [ "$waited" -lt 40 ]; do
+		if [ -f "$lock/pid" ]; then
+			# The pid file records the owner as a pid, a tab and its start
+			# time.
+			got=$(head -n 1 "$lock/pid" 2>/dev/null | cut -f1)
+			if [ -n "$got" ] && [ "$got" != "$held" ]; then
+				break
+			fi
+			got=""
+		fi
+		sleep 0.1
+		waited=$((waited + 1))
+	done
 	if [ -z "$got" ]; then
 		fail "the waiting run went on with no lock of its own"
 	elif [ "$got" != "$pid" ]; then
@@ -4174,43 +4286,6 @@ install_hooks_replacement_resets_timeout() {
 	if [ "$got" != "command" ]; then
 		fail "the rewritten entry carries type $got, expected command"
 	fi
-}
-
-# The hook re-links after it fast-forwards a source, and that re-link is one
-# transaction like every other. A run whose manifest write fails puts the
-# assembly back, so it linked and pruned nothing: the notice must report the
-# rollback and never claim an update that was undone.
-hook_rollback_prints_no_success_notice() {
-	local shims before
-	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
-	fi
-	fixture_company
-	write_sources
-	add_source "$COMPANY/skills auto-update"
-	ls_run link
-	assert_rc 0 "link"
-	before="$CASE_DIR/manifest.before"
-	cp "$HOME/.agents/skills/.skill-links" "$before"
-	push_beta
-
-	shims="$CASE_DIR/shims"
-	make_breaking_mktemp "$shims"
-	use_shims "$shims"
-	LS_TEST_UNWRITABLE_TMP=1
-	export LS_TEST_UNWRITABLE_TMP
-	ls_run hook
-	unset LS_TEST_UNWRITABLE_TMP
-	drop_shims
-
-	assert_rc 0 "hook"
-	assert_out_has "updated $COMPANY" "the clone is fast-forwarded"
-	assert_out_has "could not write the manifest" "the failed write is reported"
-	assert_out_has "link(s) this run created were removed" "the rollback is reported"
-	assert_out_lacks "assembly updated" "no success notice after a rollback"
-	assert_absent "$HOME/.agents/skills/beta" "the link the hook created is rolled back"
-	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
 }
 
 # The runtime skills paths become links into the assembly, so an assembly that
@@ -4770,6 +4845,113 @@ validator_folded_block_leading_blank() {
 	fi
 }
 
+# A backslash at the end of a double-quoted line escapes the line break: the
+# break and the next line's leading whitespace go away and nothing takes their
+# place. Folding a space in there instead measures a value the runtime never
+# sees, and a description at the limit reads as one character over it.
+validator_quoted_escaped_line_break() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# 1023 "a", the escaped break and "b" are exactly 1024 characters.
+	fits=$(printf '%1023s' '' | tr ' ' 'a')
+	over=$(printf '%1024s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/esc-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\\n' "$fits"
+		printf '  b"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "an escaped line break must join the two lines with nothing: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/esc-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\\n' "$over"
+		printf '  b"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "1025 characters over an escaped line break must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	# A blank line after the escaped break is still one newline of content,
+	# as libyaml reads it: 1023 "a", the newline and "b" are 1025 characters.
+	mkdir -p "$CASE_DIR/esc-blank/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\\n' "$fits"
+		printf '\n'
+		printf '  b"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-blank/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-blank" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a blank line after an escaped break must still count: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
+# Only "---" at column zero closes the frontmatter. An indented "---" is
+# content, and inside a block scalar it belongs to the scalar, so the block
+# runs on to the real delimiter and the whole description is measured.
+validator_indented_delimiter_is_content() {
+	local out rc long
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	long=$(printf '%1100s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/indented-delim/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  short\n'
+		printf '  ---\n'
+		printf '  %s\n' "$long"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/indented-delim/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/indented-delim" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an indented delimiter must not close the frontmatter: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
 # A source line with a '..' names one directory whether or not that directory
 # is there at the moment it is read. A source that is renamed away is
 # unavailable, not deleted, so its links and its manifest entries stay and the
@@ -4885,89 +5067,19 @@ candidate_containing_assembly_refused() {
 	assert_exists "$CASE_DIR/src/foo/SKILL.md" "the candidate directory is left alone"
 }
 
-# The deadline must never leave a clone half updated. A merge whose local git
-# hook outlasts the deadline is stopped, and the clone goes back to the commit
-# it sat on, with no change left in the work tree.
-hook_timeout_during_merge_restores_clone() {
-	local pre post dirty
-	fixture_company
-	write_sources
-	add_source "$COMPANY/skills auto-update"
-	ls_run link
-	assert_rc 0 "link"
-	push_beta
-	pre=$(head_of "$COMPANY")
-	# The single-quoted lines are hook source, not expansions.
-	# shellcheck disable=SC2016
-	printf '%s\n' \
-		'#!/bin/sh' \
-		'sleep 40' >"$COMPANY/.git/hooks/post-merge"
-	chmod +x "$COMPANY/.git/hooks/post-merge"
-
-	ls_run hook
-	assert_rc 0 "hook"
-	assert_out_has "hook timed out" "the deadline is reported"
-	dirty=$(git -C "$COMPANY" status --porcelain 2>/dev/null)
-	if [ -n "$dirty" ]; then
-		fail "the clone is not clean after the deadline: $dirty"
-	fi
-	# The hook the merge runs sleeps well past the deadline, so the merge
-	# cannot have finished: whatever state the clone is left in is a state the
-	# deadline made.
-	post=$(head_of "$COMPANY")
-	if [ "$post" != "$pre" ]; then
-		fail "the clone was left at $post, expected the pre-merge commit $pre"
-	fi
-	assert_out_has "rolled back to" "the restore is reported"
-	assert_absent "$HOME/.agents/skills/.skill-links.d/merge-in-progress" \
-		"no merge marker is left behind"
-}
-
-# A merge rewrites the work tree and runs whatever local git hook the clone
-# carries, so it is never started with seconds left on the deadline. The hook
-# prints the manual command instead and the clone is not touched.
-hook_skips_merge_near_deadline() {
-	local pre post
-	fixture_company
-	write_sources
-	add_source "$COMPANY/skills auto-update"
-	ls_run link
-	assert_rc 0 "link"
-	push_beta
-	pre=$(head_of "$COMPANY")
-
-	LINK_SKILLS_TEST_DEADLINE_SECONDS=9
-	export LINK_SKILLS_TEST_DEADLINE_SECONDS
-	ls_run hook
-	unset LINK_SKILLS_TEST_DEADLINE_SECONDS
-	assert_rc 0 "hook with a deadline the merge does not fit in"
-	assert_out_has "commit(s) behind" "the manual command is printed"
-	assert_out_lacks "fast-forwarded" "nothing was merged"
-	post=$(head_of "$COMPANY")
-	if [ "$post" != "$pre" ]; then
-		fail "the clone was updated inside the short deadline: $pre -> $post"
-	fi
-	assert_absent "$HOME/.agents/skills/.skill-links.d/merge-in-progress" \
-		"no merge marker is left behind"
-}
-
 # A host that gives the hook no temporary file loses the output capture and
-# nothing else: the body still runs as a bounded job, so a local git hook that
+# nothing else: the body still runs as a bounded job, so a git subcommand that
 # outlasts the deadline is still stopped and the session still starts.
 hook_bounded_without_tmpdir() {
 	local started elapsed saved
 	fixture_company
 	write_sources
-	add_source "$COMPANY/skills auto-update"
+	add_source "$COMPANY/skills"
 	ls_run link
 	assert_rc 0 "link"
 	push_beta
-	# The single-quoted lines are hook source, not expansions.
-	# shellcheck disable=SC2016
-	printf '%s\n' \
-		'#!/bin/sh' \
-		'sleep 40' >"$COMPANY/.git/hooks/post-merge"
-	chmod +x "$COMPANY/.git/hooks/post-merge"
+	make_hanging_git "$CASE_DIR/bin"
+	use_shims "$CASE_DIR/bin"
 
 	saved=${TMPDIR-}
 	TMPDIR="$CASE_DIR/no-such-tmp/"
@@ -4981,6 +5093,7 @@ hook_bounded_without_tmpdir() {
 	else
 		unset TMPDIR
 	fi
+	drop_shims
 
 	assert_rc 0 "hook with no temporary directory"
 	assert_out_has "hook timed out" "the deadline is reported"
@@ -5052,6 +5165,154 @@ install_hooks_normalizes_exact_command_entry() {
 	fi
 }
 
+# A settings file whose only SessionStart entry runs the command given.
+write_session_hook_settings() {
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"$2\"," \
+		'            "timeout": 20' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$1"
+}
+
+# The script is bash. /bin/sh is dash on many systems, where the script dies at
+# its first bashism at every session start and nobody reads the message, so an
+# entry that runs it through any interpreter but bash is stale even though its
+# script path is right there. An entry with no interpreter at all runs the
+# script directly and is ours.
+install_hooks_replaces_sh_invocation() {
+	local file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	write_session_hook_settings "$file" "sh $LS hook"
+
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	assert_out_has "replaced a hook that ran the script through sh" \
+		"the interpreter is named in the replacement"
+	assert_file_has "$file" "bash $LS hook" "the generated bash command is installed"
+	assert_file_lacks "$file" "\"sh $LS hook\"" "the sh command is gone"
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the replacement is recognised"
+
+	# The interpreter is reported as the command spells it.
+	write_session_hook_settings "$file" "/bin/sh $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an absolute sh"
+	assert_out_has "replaced a hook that ran the script through /bin/sh" \
+		"the absolute interpreter is named"
+	assert_file_has "$file" "bash $LS hook" "the generated bash command is installed again"
+
+	# bash spelled as an absolute path is still bash, and so is the script run
+	# with no interpreter at all.
+	write_session_hook_settings "$file" "/bin/bash $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an absolute bash"
+	assert_out_has "already runs the hook" "an absolute bash counts as ours"
+
+	write_session_hook_settings "$file" "$LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a direct invocation"
+	assert_out_has "already runs the hook" "a direct invocation counts as ours"
+}
+
+# A source reached through a symlink alias records its links under the
+# directory the alias points at, so once the alias is gone nothing in a
+# recorded target names the line that is still listed. The source spelling the
+# manifest records is what keeps those links.
+source_alias_missing_keeps_links() {
+	local manifest
+	mkskill "$CASE_DIR/real" alpha
+	ln -s "$CASE_DIR/real" "$CASE_DIR/alias"
+	write_sources
+	add_source "$CASE_DIR/alias"
+	manifest="$HOME/.agents/skills/.skill-links"
+
+	ls_run link
+	assert_rc 0 "link through the alias"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" "alpha link"
+	assert_file_has "$manifest" "$CASE_DIR/alias" \
+		"the manifest records the source as the line spells it"
+
+	rm "$CASE_DIR/alias"
+	ls_run link
+	assert_rc 1 "link while the alias is gone"
+	assert_out_has "source directory does not exist" "the missing source is reported"
+	assert_out_has "kept 1 link(s)" "the kept link is reported"
+	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" \
+		"the link is kept while the alias is gone"
+	assert_file_has "$manifest" "$CASE_DIR/real/alpha" \
+		"the manifest entry is kept while the alias is gone"
+
+	ln -s "$CASE_DIR/real" "$CASE_DIR/alias"
+	ls_run link
+	assert_rc 0 "link once the alias is back"
+	assert_out_has "unchanged 1" "the link is recognised again"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" "alpha link again"
+}
+
+# A manifest an older version wrote holds two columns. Those lines still say
+# what they said, the links they record are kept, and the run rewrites them
+# with the source spelling in a third column.
+manifest_two_column_lines_still_parse() {
+	local manifest line fields src
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	manifest="$HOME/.agents/skills/.skill-links"
+
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	# Exactly what an older version left behind: name and target, nothing else.
+	printf '%s\t%s\n' alpha "$CASE_DIR/one/alpha" >"$manifest"
+
+	ls_run link
+	assert_rc 0 "link over a two-column manifest"
+	assert_out_has "unchanged 1" "the two-column line is read as a recorded link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link kept"
+	line=$(sed -n '1p' "$manifest")
+	fields=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+	if [ "$fields" != "3" ]; then
+		fail "expected three columns in the rewritten manifest, found $fields"
+	fi
+	src=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
+	if [ "$src" != "$CASE_DIR/one" ]; then
+		fail "expected the source spelling in the third column, found '$src'"
+	fi
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -5102,10 +5363,13 @@ main() {
 	run_case check_fetches_despite_fresh_stamp
 	run_case check_reports_stale_link_as_error
 	run_case check_without_sources_file_exits_2
-	run_case hook_auto_update_when_clean
-	run_case hook_refused_when_dirty
-	run_case hook_refused_off_default_branch
-	run_case hook_refuses_update_over_ignored_file
+	run_case hook_notifies_when_behind
+	run_case hook_notifies_drift
+	run_case hook_notifies_collision
+	run_case hook_notifies_stale_link
+	run_case hook_never_takes_lock
+	run_case sources_auto_update_token_refused
+	run_case sources_line_with_extra_token_refused
 	run_case hook_bounded_by_deadline
 	run_case hook_exits_zero_on_init_failure
 	run_case hardlinked_stamp_not_truncated
@@ -5116,14 +5380,11 @@ main() {
 	run_case sources_path_inside_assembly_refused
 	run_case install_hooks_replaces_other_installation
 	run_case install_hooks_replacement_resets_timeout
-	run_case hook_rollback_prints_no_success_notice
 	run_case assembly_inside_runtime_home_refused
 	run_case relative_source_missing_keeps_links
 	run_case dangling_symlink_component_refused
 	run_case stale_lock_with_reused_pid_is_cleared
 	run_case candidate_containing_assembly_refused
-	run_case hook_timeout_during_merge_restores_clone
-	run_case hook_skips_merge_near_deadline
 	run_case hook_bounded_without_tmpdir
 	run_case install_hooks_normalizes_exact_command_entry
 	run_case relink_creation_failure_restores_old_link
@@ -5192,6 +5453,9 @@ main() {
 	run_case install_hooks_replaces_dead_script_path
 	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
+	run_case install_hooks_replaces_sh_invocation
+	run_case source_alias_missing_keeps_links
+	run_case manifest_two_column_lines_still_parse
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
 	run_case validator_ignores_finder_metadata
@@ -5213,6 +5477,8 @@ main() {
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces
+	run_case validator_quoted_escaped_line_break
+	run_case validator_indented_delimiter_is_content
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
