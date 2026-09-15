@@ -10,7 +10,10 @@
 //     The value is decoded before it is measured: a block scalar keeps the
 //     whitespace inside its lines, a quoted scalar keeps every character
 //     between its quotes with the escapes resolved, and a plain scalar folds
-//     its indented continuation lines in with single spaces. A blank line
+//     its indented continuation lines in with single spaces. A quoted scalar
+//     may span several lines: the scan runs to the closing quote, one line
+//     break folds to a space, n blank lines fold to n newlines, and a "#"
+//     between the quotes is text, never a comment. A blank line
 //     inside a plain scalar or a folded (">") block is a paragraph break that
 //     folds to one newline. A more-indented line inside a folded block also
 //     keeps the line break before it, so a blank line next to one yields two
@@ -20,14 +23,22 @@
 //     resolves the whole YAML escape set, including \N (U+0085), \_ (U+00A0),
 //     \L (U+2028) and \P (U+2029), and the empty check treats those four as
 //     whitespace as well
-//   - description is a plain string. Any unquoted value that YAML reads as
-//     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
-//     anchor or alias, an explicit tag such as "!!int 123" or "!custom y", the
-//     null spellings, the boolean spellings, a number in any YAML form, and a
-//     timestamp. Quoting them makes them text again
+//   - name and description are plain strings. Any unquoted value that YAML
+//     reads as another type is refused: "[]", "{}", a flow sequence or mapping,
+//     a bare anchor or alias, an explicit tag such as "!!int 123" or
+//     "!custom y", the null spellings, the boolean spellings, a number in any
+//     YAML form, and a timestamp. Quoting them makes them text again
 //
 // Both lengths count Unicode code points, not UTF-16 code units, so an emoji
 // or any other character outside the basic multilingual plane counts once.
+//
+// Every frontmatter line is also checked for shape. This is a structural
+// check, not a full YAML parser: a line must be blank, a comment, a top-level
+// "key: value" line, or an indented line that belongs to the value above it,
+// and a top-level value that opens a flow collection ("[" or "{") must close
+// it on the same logical scalar. Anything else is reported as
+// "frontmatter line N is not valid YAML". A file that passes this check can
+// still hold YAML the check does not model.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -242,47 +253,85 @@ function decodeDoubleQuoted(body) {
 }
 
 /**
- * Read a quoted scalar from the start of `text`, up to its closing quote. The
- * scan runs before any comment is stripped, so a "#" inside the quotes stays
- * in the value and a comment after the closing quote is dropped.
- *
- * Returns { value } for a well formed quoted scalar, or null when the text is
- * not quoted, the quote never closes, or something other than a comment
- * follows the closing quote. The caller then reads the line as a plain scalar.
+ * The index of the closing quote in `text`, or -1 when the text holds none. A
+ * backslash escapes the next character inside double quotes, and a doubled
+ * quote stands for one quote inside single quotes, so neither closes the
+ * scalar.
  */
-function readQuotedScalar(text) {
+function findClosingQuote(text, quote) {
+  for (let i = 0; i < text.length; i += 1) {
+    if (quote === '"' && text[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (text[i] !== quote) continue;
+    if (quote === "'" && text[i + 1] === "'") {
+      i += 1;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * Read a quoted scalar that starts on line `start` of `lines`, where `text` is
+ * that line from the opening quote on. The scan runs to the closing quote,
+ * which may sit on a later line, and it runs before any comment is stripped,
+ * so a "#" between the quotes stays in the value and a comment after the
+ * closing quote is dropped.
+ *
+ * A quoted scalar that spans lines folds like any YAML flow scalar: the
+ * whitespace at the end of a line and at the start of the next one is dropped,
+ * a single line break folds to one space, and n blank lines fold to n
+ * newlines. The folded text is decoded once, so an escape never spans a break.
+ *
+ * Returns { value, end } for a well formed quoted scalar, where `end` is the
+ * index of the last line consumed. Returns null when the text is not quoted,
+ * the quote never closes before the end of the frontmatter, or something other
+ * than a comment follows the closing quote. The caller then reads the line as
+ * a plain scalar.
+ */
+function readQuotedScalar(text, lines, start) {
   const quote = text[0];
   if (quote !== '"' && quote !== "'") return null;
+
+  let body = "";
   let end = -1;
-  if (quote === '"') {
-    for (let i = 1; i < text.length; i += 1) {
-      if (text[i] === "\\") {
-        i += 1;
-        continue;
-      }
-      if (text[i] === '"') {
-        end = i;
-        break;
-      }
+  let closed = false;
+  let blanks = 0;
+  let first = true;
+
+  for (let i = start; i < lines.length; i += 1) {
+    const raw = i === start ? text.slice(1) : lines[i].replace(/\r$/, "");
+    const at = findClosingQuote(raw, quote);
+    const segment = at === -1 ? raw : raw.slice(0, at);
+    if (at === -1 && segment.trim() === "" && !first) {
+      blanks += 1;
+      continue;
     }
-  } else {
-    for (let i = 1; i < text.length; i += 1) {
-      if (text[i] !== "'") continue;
-      if (text[i + 1] === "'") {
-        i += 1;
-        continue;
-      }
+    const piece = first ? segment : segment.replace(/^[ \t]+/, "");
+    if (first) {
+      body = at === -1 ? piece.replace(/[ \t]+$/, "") : piece;
+      first = false;
+    } else {
+      body += blanks === 0 ? " " : "\n".repeat(blanks);
+      body += at === -1 ? piece.replace(/[ \t]+$/, "") : piece;
+    }
+    blanks = 0;
+    if (at !== -1) {
+      const trailing = raw.slice(at + 1);
+      if (!/^[ \t]*(?:#.*)?$/.test(trailing)) return null;
+      closed = true;
       end = i;
       break;
     }
   }
-  if (end === -1) return null;
-  const trailing = text.slice(end + 1);
-  if (!/^[ \t]*(?:#.*)?$/.test(trailing)) return null;
-  const body = text.slice(1, end);
+  if (!closed) return null;
+
   const value =
     quote === '"' ? decodeDoubleQuoted(body) : body.replace(/''/g, "'");
-  return { value };
+  return { value, end };
 }
 
 /**
@@ -309,6 +358,9 @@ function chompingOf(header) {
  *
  * So "a", "", "  b" yields "a\n\n  b", not "a\n  b": the more-indented line
  * keeps the break before it as well as the paragraph break.
+ *
+ * Blank lines before the first content line count the same way: each of them
+ * puts one newline at the head of the value.
  */
 function foldBlockLines(content) {
   let value = "";
@@ -322,7 +374,9 @@ function foldBlockLines(content) {
     }
     const moreIndented = /^[ \t]/.test(line);
     if (!started) {
-      value = line;
+      // A blank line before the first content line is content too: YAML keeps
+      // one newline for each of them at the head of the value.
+      value = "\n".repeat(blanks) + line;
       started = true;
     } else if (moreIndented || previousMoreIndented) {
       value += "\n".repeat(blanks + 1) + line;
@@ -434,20 +488,71 @@ function readPlainScalar(first, lines, start) {
 }
 
 /**
- * Parse top-level "key: value" frontmatter lines from the lines between the
- * two "---" delimiters.
- *
- * Returns a Map of key -> { value, raw, quoted, block }. `value` is the
- * decoded text. `raw` is the significant text of a plain scalar, which the
- * caller needs to tell an unquoted YAML non-string form apart from the same
- * characters inside quotes; the two flags say which form the value took.
+ * True when every flow collection the text opens is closed in it. Quoted
+ * sections are skipped, so a bracket between quotes is text. An unquoted value
+ * that opens "[" or "{" and never closes it is not the scalar it looks like:
+ * real YAML reads on into the next lines and fails somewhere else.
  */
-function parseFrontmatter(lines) {
+function flowCollectionCloses(text) {
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote === '"') {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') quote = "";
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'" && text[i + 1] === "'") i += 1;
+      else if (ch === "'") quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[" || ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth < 0) return false;
+    }
+  }
+  return quote === "" && depth === 0;
+}
+
+/**
+ * Parse top-level "key: value" frontmatter lines from the lines between the
+ * two "---" delimiters. `firstLineNumber` is the line number of `lines[0]` in
+ * the file, so a malformed line can be reported by its own number.
+ *
+ * Returns { fields, invalid }. `fields` is a Map of
+ * key -> { value, raw, quoted, block }: `value` is the decoded text, and `raw`
+ * is the significant text of a plain scalar, which the caller needs to tell an
+ * unquoted YAML non-string form apart from the same characters inside quotes;
+ * the two flags say which form the value took. `invalid` holds the line number
+ * of every line this structural check refuses.
+ */
+function parseFrontmatter(lines, firstLineNumber) {
   const fields = new Map();
+  const invalid = [];
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].replace(/\r$/, "");
+    const lineNumber = firstLineNumber + i;
     const match = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line);
-    if (!match) continue;
+    if (!match) {
+      // A blank line, a comment and an indented line are all part of the value
+      // above them or of nothing at all. A line at column zero that is none of
+      // those cannot be read as YAML here.
+      const text = line.trim();
+      if (text !== "" && !text.startsWith("#") && indentWidth(line) === 0) {
+        invalid.push(lineNumber);
+      }
+      continue;
+    }
     const key = match[1];
     const rest = match[2].trim();
 
@@ -468,8 +573,9 @@ function parseFrontmatter(lines) {
       continue;
     }
 
-    const quoted = readQuotedScalar(rest);
+    const quoted = readQuotedScalar(rest, lines, i);
     if (quoted !== null) {
+      i = quoted.end;
       fields.set(key, {
         value: quoted.value,
         raw: rest,
@@ -481,6 +587,9 @@ function parseFrontmatter(lines) {
 
     const plain = readPlainScalar(rest, lines, i);
     i = plain.end;
+    if (/^[[{]/.test(plain.value) && !flowCollectionCloses(plain.value)) {
+      invalid.push(lineNumber);
+    }
     fields.set(key, {
       value: plain.value,
       raw: plain.value,
@@ -488,7 +597,7 @@ function parseFrontmatter(lines) {
       block: false,
     });
   }
-  return fields;
+  return { fields, invalid };
 }
 
 function findNestedSkillMd(dir, baseDir) {
@@ -559,12 +668,27 @@ function validateSkill(name) {
     return;
   }
 
-  const fields = parseFrontmatter(lines.slice(1, closeIndex));
+  // The frontmatter starts on line 2 of the file, right after the opening
+  // "---", so that is the number of the first line handed to the parser.
+  const { fields, invalid } = parseFrontmatter(lines.slice(1, closeIndex), 2);
+  for (const lineNumber of invalid) {
+    problems.push(
+      `skills/${name}: frontmatter line ${lineNumber} is not valid YAML`,
+    );
+  }
 
   const nameField = fields.get("name");
   const nameValue = nameField === undefined ? undefined : nameField.value;
   if (nameValue === undefined || nameValue === "") {
     problems.push(`skills/${name}: frontmatter "name" is required`);
+  } else if (
+    !nameField.quoted &&
+    !nameField.block &&
+    isNonStringScalar(nameField.raw)
+  ) {
+    // A directory called "true" or "123" takes a quoted name. Unquoted, YAML
+    // hands the runtime a boolean or a number, and the skill has no name.
+    problems.push(`skills/${name}: "name" must be a plain string`);
   } else {
     if (nameValue !== name) {
       problems.push(

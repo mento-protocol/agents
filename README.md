@@ -175,13 +175,25 @@ by 25 seconds of wall clock: past that it stops the work it started, prints
 unset `HOME` or a manifest that is not a regular file, is one line and exit 0
 too. The other commands keep exit 2 for the same refusal.
 
+The deadline never leaves a clone half updated. An `auto-update` fast-forward
+starts only with at least 10 seconds left; with less the hook prints the manual
+`git pull --ff-only` command and does not touch the clone. A fast-forward the
+deadline does stop is rolled back to the commit the clone sat on: an unfinished
+merge is aborted, and a finished one is reset, with ignored files left where
+they are. The hook says so in one line and the session starts.
+
 `install-hooks` edits `~/.claude/settings.json` and `~/.codex/hooks.json`,
 creating either file when it is missing, and copies the previous content of an
 existing file to `<file>.bak-<UTC timestamp>` before it changes anything. It
 reports each runtime as installed once the hook is added and as already
 installed once the hook is already there, and exits 0 once every reachable
-runtime is in one of those states. A file that already runs the hook is left
-byte for byte as it is: it is neither reformatted nor backed up. A hook entry
+runtime is in one of those states. A file whose entry already matches this
+installation whole, in its command, its `type` and its `timeout`, is left byte
+for byte as it is: it is neither reformatted nor backed up. An entry that
+carries the right command under another `type` or another `timeout` runs the
+hook under a budget this script never installed, or does not run it at all, so
+its `type` and `timeout` are rewritten, the file is backed up, and the run
+reports that it normalized the hook entry. A hook entry
 whose script file name is exactly `link-skills.sh` and whose path no longer
 exists is dead, so it is repointed at this script instead of being kept, and
 the run reports that it replaced a stale hook. An entry whose script path is

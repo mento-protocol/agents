@@ -22,6 +22,11 @@ HOOK_TIMEOUT_SECONDS=60
 # It stays well below the timeout the installed hook entry carries, so a
 # session start ends on this script's own terms and with its own message.
 HOOK_DEADLINE_SECONDS=25
+# The room a fast-forward needs before the deadline. A merge runs a local git
+# hook and rewrites the work tree, so one started with seconds to spare is a
+# merge the deadline can cut in half. With less than this left, the hook prints
+# the manual command instead and the clone is not touched.
+HOOK_MERGE_MIN_SECONDS=10
 
 # A stalled HTTP transfer must give up inside the fetch timeout, so that the
 # bash-native timeout below is a second line of defence, not the only one.
@@ -285,6 +290,33 @@ phys_dir() {
 	(cd "$1" && pwd -P)
 }
 
+# The physical spelling of an absolute path whose tail may not exist: the
+# longest prefix that is a directory is resolved with pwd -P, and what is left
+# is appended as text.
+#
+# The answer does not change when the tail appears or disappears, and that is
+# the point. A source directory is recorded in the manifest through the path
+# this returns, and the same source must still answer with the same spelling
+# after it is renamed away, or the run would read its recorded links as links
+# to a source nobody lists and prune every one of them.
+phys_prefix_path() {
+	local p tail d
+	p=$1
+	tail=""
+	while :; do
+		if d=$(phys_dir "$p"); then
+			printf '%s%s\n' "${d%/}" "$tail"
+			return 0
+		fi
+		case "$p" in
+		"" | /) break ;;
+		esac
+		tail="/$(basename "$p")$tail"
+		p=$(dirname "$p")
+	done
+	printf '%s\n' "$tail"
+}
+
 # Normalize an absolute path by text alone: drop empty and '.' segments, and
 # pop the previous segment for every '..'. A '..' at the top stays at the root,
 # so no spelling can climb above /. Nothing here touches the filesystem, so a
@@ -396,8 +428,12 @@ canonical_path() {
 			continue
 		fi
 		# A regular file, a FIFO, a socket, or a symlink to one of those. The
-		# path may end here; it may not continue through it.
-		if [ -e "$next" ]; then
+		# path may end here; it may not continue through it. -L answers first,
+		# because -e follows the link: a symlink whose target is missing is a
+		# component that exists, and popping a '..' through it would answer
+		# with the directory that holds the link, which the spelling never
+		# names.
+		if [ -e "$next" ] || [ -L "$next" ]; then
 			nondir=1
 		fi
 		rest="/$seg"
@@ -620,7 +656,15 @@ load_sources() {
 		/*) ;;
 		*) path="$dir/$path" ;;
 		esac
-		if resolved=$(phys_dir "$path"); then
+		# Normalized by text first, so that a '..' in the line is collapsed
+		# whether or not the directory it names is there right now, and only
+		# then resolved against the filesystem as far as the filesystem
+		# reaches. A source that is renamed away keeps the spelling it had
+		# while it was there, which is the spelling its links carry in the
+		# manifest.
+		path=$(normalize_lexical "$path")
+		resolved=$(phys_prefix_path "$path")
+		if [ -n "$resolved" ]; then
 			path="$resolved"
 		fi
 		case "$path" in
@@ -1225,6 +1269,58 @@ lock_path_usable() {
 	return 0
 }
 
+# The identity of a process, as the pid file records it: the pid, a tab, and
+# the start time the system reports for that pid. A pid alone is not an
+# identity. Pid numbers are reused, so after the owner of a lock dies an
+# unrelated process can carry its number and keep every later run out of the
+# assembly for as long as it lives. The start time tells the two apart.
+#
+# 'ps -o lstart=' prints the same field on macOS and on Linux. Its spacing
+# differs between the two, so the text is squeezed to single spaces and
+# trimmed: what matters is that the two readings of one process match, and
+# that the line holds no tab and no newline of its own.
+proc_start_time() {
+	ps -o lstart= -p "$1" 2>/dev/null |
+		tr -s '[:space:]' ' ' |
+		sed -e 's/^ //' -e 's/ $//'
+}
+
+lock_recorded_pid() {
+	head -n 1 "$1" 2>/dev/null | cut -f1 | tr -dc '0-9'
+}
+
+# The start time a pid file records, or nothing when it holds only a pid. A
+# file with no tab is the format an older version wrote; 'cut -s' answers with
+# nothing for it, and the caller then judges by pid alone.
+lock_recorded_start() {
+	head -n 1 "$1" 2>/dev/null | cut -s -f2-
+}
+
+# True when the recorded owner of a lock is still running. A pid that answers
+# kill -0 but whose start time is not the recorded one is another process that
+# was given the same number, so the lock it seems to hold is stale. A pid the
+# process table will not describe is left alone: the process is there, and a
+# reading that cannot be made is no reason to take a lock away.
+lock_owner_alive() {
+	local pid start now
+	pid=$1
+	start=$2
+	if [ -z "$pid" ]; then
+		return 1
+	fi
+	if ! kill -0 "$pid" 2>/dev/null; then
+		return 1
+	fi
+	if [ -z "$start" ]; then
+		return 0
+	fi
+	now=$(proc_start_time "$pid")
+	if [ -z "$now" ] || [ "$now" = "$start" ]; then
+		return 0
+	fi
+	return 1
+}
+
 release_lock() {
 	local pid
 	if [ "$LOCK_HELD" -ne 1 ] || [ -z "$LOCK_DIR" ]; then
@@ -1237,7 +1333,7 @@ release_lock() {
 	fi
 	pid=""
 	if [ -f "$LOCK_DIR/pid" ]; then
-		pid=$(head -n 1 "$LOCK_DIR/pid" 2>/dev/null | tr -dc '0-9')
+		pid=$(lock_recorded_pid "$LOCK_DIR/pid")
 	fi
 	# The lock this run took can have been cleared as stale and taken again by
 	# another run while this one worked. Removing it then would strand that
@@ -1254,10 +1350,12 @@ release_lock() {
 # A lock left over from a run that was killed must not block every later run.
 # The owner decides first, the age only when there is no owner to ask:
 #
-#   pid alive            keep the lock, however old it is. A long run is still
+#   owner alive          keep the lock, however old it is. A long run is still
 #                        a run, and taking its lock away would let two runs
-#                        write the assembly at once.
-#   pid dead or unreadable  remove the lock. Its owner cannot come back.
+#                        write the assembly at once. The owner is the pid and
+#                        the start time the pid file records, so a process that
+#                        merely inherited the number is not the owner.
+#   owner dead or unreadable  remove the lock. Its owner cannot come back.
 #   no pid file          a run that has just taken the lock, or one that died
 #                        before writing its pid. Only age separates the two, so
 #                        a lock older than LOCK_STALE_MINUTES is removed.
@@ -1265,13 +1363,14 @@ release_lock() {
 # Nothing below the lock path is read or removed unless that path is a real
 # directory: a symlink there names someone else's files.
 clear_stale_lock() {
-	local pid
+	local pid start
 	if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ]; then
 		return 0
 	fi
 	if [ -f "$LOCK_DIR/pid" ]; then
-		pid=$(head -n 1 "$LOCK_DIR/pid" 2>/dev/null | tr -dc '0-9')
-		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		pid=$(lock_recorded_pid "$LOCK_DIR/pid")
+		start=$(lock_recorded_start "$LOCK_DIR/pid")
+		if lock_owner_alive "$pid" "$start"; then
 			return 0
 		fi
 		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
@@ -1313,7 +1412,8 @@ take_lock() {
 		fi
 		if mkdir "$LOCK_DIR" 2>/dev/null; then
 			LOCK_HELD=1
-			printf '%s\n' "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
+			printf '%s\t%s\n' "$$" "$(proc_start_time "$$")" \
+				>"$LOCK_DIR/pid" 2>/dev/null || true
 			# Test hook, never set outside the harness: hold the lock this
 			# long before the work starts, so that a test can read the pid
 			# file while the run that took it is still running.
@@ -1353,6 +1453,26 @@ take_lock() {
 
 # ------------------------------------------------------------------ link ----
 
+# True when a candidate directory is the assembly itself, or a directory the
+# assembly sits below. Linking it would put a link to an ancestor inside the
+# assembly, and every walk into the assembly would then find the assembly
+# again, one level down, without end. The comparison is on physical paths, so
+# a source reached through a symlink is caught as well as the plain spelling.
+candidate_contains_assembly() {
+	local t
+	if ! t=$(phys_dir "$1"); then
+		return 1
+	fi
+	t=${t%/}
+	if [ "$t" = "$ASSEMBLY_DIR" ]; then
+		return 0
+	fi
+	case "$ASSEMBLY_DIR" in
+	"$t"/*) return 0 ;;
+	esac
+	return 1
+}
+
 link_candidates() {
 	local i name target entry cur
 	i=0
@@ -1368,6 +1488,10 @@ link_candidates() {
 		fi
 		if ! field_is_safe "$target"; then
 			err "skill path $target holds a tab or a newline and cannot be recorded in the manifest; skipped it"
+			continue
+		fi
+		if candidate_contains_assembly "$target"; then
+			err "candidate $name at $target contains the assembly; not linked"
 			continue
 		fi
 		entry="$ASSEMBLY_DIR/$name"
@@ -1864,6 +1988,71 @@ stamp_file() {
 	printf '%s/fetch-%s\n' "$STAMP_DIR" "$h"
 }
 
+# The record of a fast-forward in progress: the clone on the first line, the
+# commit it sat on before the merge on the second. It exists only between the
+# moment the hook starts a merge and the moment that merge returns, and it is
+# what licenses the restore below. One hook runs at a time, because the hook
+# holds the assembly lock, so one marker is enough.
+merge_marker_path() {
+	printf '%s/merge-in-progress\n' "$STAMP_DIR"
+}
+
+write_merge_marker() {
+	local marker
+	if ! ensure_stamp_dir; then
+		return 1
+	fi
+	marker=$(merge_marker_path)
+	if [ -L "$marker" ]; then
+		return 1
+	fi
+	if [ -e "$marker" ] && [ ! -f "$marker" ]; then
+		return 1
+	fi
+	if ! printf '%s\n%s\n' "$1" "$2" >"$marker" 2>/dev/null; then
+		return 1
+	fi
+	return 0
+}
+
+clear_merge_marker() {
+	if [ -z "$STAMP_DIR" ]; then
+		return 0
+	fi
+	rm -f "$(merge_marker_path)" 2>/dev/null || true
+	return 0
+}
+
+# Put a clone back where it was when the deadline stopped the merge that was
+# changing it. A marker this script wrote is the only thing that starts this,
+# and the hook writes one only for a clone it has already found clean, so
+# nothing of the user's own can be discarded here. 'git clean' runs without
+# -x, so an ignored file stays whatever else goes.
+rollback_interrupted_merge() {
+	local marker root head
+	if [ -z "$STAMP_DIR" ]; then
+		return 0
+	fi
+	marker=$(merge_marker_path)
+	if [ -L "$marker" ] || [ ! -f "$marker" ]; then
+		return 0
+	fi
+	root=$(sed -n '1p' "$marker" 2>/dev/null) || root=""
+	head=$(sed -n '2p' "$marker" 2>/dev/null) || head=""
+	rm -f "$marker" 2>/dev/null || true
+	if [ -z "$root" ] || [ -z "$head" ] || [ ! -d "$root" ]; then
+		return 0
+	fi
+	if git -C "$root" rev-parse --verify --quiet MERGE_HEAD >/dev/null 2>&1; then
+		git -C "$root" merge --abort >/dev/null 2>&1 || true
+	else
+		git -C "$root" reset -q --hard "$head" >/dev/null 2>&1 || true
+		git -C "$root" clean -q -f -d >/dev/null 2>&1 || true
+	fi
+	hook_say "the update of $root did not finish in time; the clone was rolled back to $head"
+	return 0
+}
+
 # Hard links to a path, as a number. BSD stat and GNU stat spell the field
 # differently, so the one that answers decides. An unreadable path answers 0.
 link_count() {
@@ -2192,7 +2381,7 @@ cmd_check() {
 # ------------------------------------------------------------------ hook ----
 
 cmd_hook() {
-	local i src flag root branch behind def note_fetch changed missing name entry rem up taken merge_ok
+	local i src flag root branch behind def note_fetch changed missing name entry rem up taken merge_ok premerge
 
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
@@ -2220,6 +2409,11 @@ cmd_hook() {
 		return 0
 	fi
 	SECONDS=0
+	# A marker left by a run that ended some other way than on the deadline
+	# describes a clone this run knows nothing about. It is dropped here, with
+	# the lock held, so that a later deadline can never restore a clone to a
+	# commit an older run recorded.
+	clear_merge_marker
 	detect_case_insensitive
 	# A session start never fails and never shouts. A manifest it cannot read
 	# is left to the next 'link' run, which says so in its own words.
@@ -2278,6 +2472,22 @@ cmd_hook() {
 				hook_say "did not update $root: the update would overwrite the ignored file $taken; move that file aside first"
 				up=""
 			fi
+			# A merge rewrites the work tree and runs whatever local git hook
+			# the clone carries, so one started with seconds left is a merge
+			# the deadline can cut in half. It runs only with room to finish,
+			# and only once the marker that licenses the restore is on disk.
+			# Without either, the manual command below is printed instead and
+			# the clone is not touched at all.
+			if [ -n "$up" ] && [ "$((HOOK_DEADLINE_SECONDS - SECONDS))" -lt "$HOOK_MERGE_MIN_SECONDS" ]; then
+				up=""
+			fi
+			if [ -n "$up" ]; then
+				premerge=""
+				premerge=$(git -C "$root" rev-parse HEAD 2>/dev/null) || premerge=""
+				if [ -z "$premerge" ] || ! write_merge_marker "$root" "$premerge"; then
+					up=""
+				fi
+			fi
 			if [ -n "$up" ]; then
 				if git_merge_keeps_ignored "$root"; then
 					merge_ok=0
@@ -2286,6 +2496,9 @@ cmd_hook() {
 					merge_ok=0
 					git -C "$root" merge --ff-only --quiet "$up" >/dev/null 2>&1 || merge_ok=1
 				fi
+				# The merge is over, however it ended: there is nothing left
+				# for a deadline to interrupt and nothing to restore.
+				clear_merge_marker
 				if [ "$merge_ok" -eq 0 ]; then
 					hook_say "updated $root ($behind commit(s) fast-forwarded on $branch)"
 					changed=1
@@ -2411,6 +2624,8 @@ kill_job() {
 # a process the deadline missed cannot hold the session's pipe open past the
 # deadline, so the caller gets its answer on time whatever survived. The
 # files are replayed to stdout and stderr once the body is done or stopped.
+# A host that gives no temporary file loses that protection and nothing else:
+# the body keeps the caller's descriptors, and the deadline still bounds it.
 #
 # The session always starts: an expired deadline prints one line and exits 0.
 run_hook_bounded() {
@@ -2418,11 +2633,20 @@ run_hook_bounded() {
 	tmpdir=${TMPDIR:-/tmp}
 	out=$(mktemp "$tmpdir/link-skills-hook-out.XXXXXX" 2>/dev/null) || out=""
 	errs=$(mktemp "$tmpdir/link-skills-hook-err.XXXXXX" 2>/dev/null) || errs=""
+	# A temporary directory this host will not write costs the capture, not the
+	# deadline: the body still runs as a bounded background job, and only its
+	# output goes straight to the caller's stdout and stderr. Running it here
+	# instead would put a session start at the mercy of whatever the body
+	# waits for.
 	if [ -z "$out" ] || [ -z "$errs" ]; then
-		[ -n "$out" ] && rm -f "$out"
-		[ -n "$errs" ] && rm -f "$errs"
-		cmd_hook || true
-		return 0
+		if [ -n "$out" ]; then
+			rm -f "$out"
+		fi
+		if [ -n "$errs" ]; then
+			rm -f "$errs"
+		fi
+		out=""
+		errs=""
 	fi
 	set -m 2>/dev/null || true
 	# The body takes its own lock, and a subshell starts with the shell's
@@ -2435,10 +2659,20 @@ run_hook_bounded() {
 	# A host that forbids setpgid makes bash report it, and that report belongs
 	# to no one: it is dropped with the brace group's stderr. The body itself
 	# writes to the two files.
-	{ (
-		trap 'release_lock; exit 0' EXIT TERM
-		cmd_hook || true
-	) >"$out" 2>"$errs" & } 2>/dev/null
+	if [ -n "$out" ]; then
+		{ (
+			trap 'release_lock; exit 0' EXIT TERM
+			cmd_hook || true
+		) >"$out" 2>"$errs" & } 2>/dev/null
+	else
+		# No capture. fd 3 carries the caller's real stderr into the job,
+		# past the brace group's own redirection, which is there for the
+		# setpgid report and nothing else.
+		{ (
+			trap 'release_lock; exit 0' EXIT TERM
+			cmd_hook || true
+		) 2>&3 & } 3>&2 2>/dev/null
+	fi
 	pid=$!
 	set +m 2>/dev/null || true
 	# The deadline is wall clock, not a count of polls: each poll spawns a
@@ -2452,6 +2686,9 @@ run_hook_bounded() {
 			kill_job KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			replay_hook_output "$out" "$errs"
+			# The body is gone. A merge it had started is half done, and
+			# the clone is put back before the session goes on.
+			rollback_interrupted_merge
 			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(script_command_prefix) check'"
 			return 0
 		fi
@@ -2468,6 +2705,10 @@ replay_hook_output() {
 	local out errs
 	out=$1
 	errs=$2
+	# Nothing was captured: the body wrote to the caller's own descriptors.
+	if [ -z "$out" ] || [ -z "$errs" ]; then
+		return 0
+	fi
 	if [ -s "$out" ]; then
 		cat "$out"
 	fi
@@ -2512,6 +2753,8 @@ print_hook_snippet() {
 # must not contain a single quote. It prints a status word on the first line:
 #   unchanged        the hook is already installed; nothing is written
 #   added            a new SessionStart group holds the hook
+#   normalized       an entry that already ran this command carried another
+#                    type or another timeout, and now carries both of this one
 #   replaced         an entry whose script path is gone now holds the hook
 #   replaced-other   an entry that ran another installation now holds the hook
 # For every status but "unchanged" it writes the merged JSON to a temporary
@@ -2644,6 +2887,7 @@ def same_installation(options):
 found = False
 stale = []
 other = []
+normalize = []
 for group in groups:
     if not isinstance(group, dict):
         continue
@@ -2655,7 +2899,16 @@ for group in groups:
             continue
         text = str(entry.get("command", ""))
         if text.strip() == command.strip():
-            found = True
+            # The command is the one this run installs, and the rest of the
+            # entry decides.
+            # A type that is not "command" never runs at all, and another
+            # timeout runs the hook under a budget this script never
+            # installed, so an entry like that is normalized rather than
+            # counted as installed.
+            if entry.get("type") != "command" or entry.get("timeout") != timeout:
+                normalize.append(entry)
+            else:
+                found = True
             continue
         parsed = parse_command(text)
         if parsed is None:
@@ -2690,7 +2943,11 @@ def take_over(entry):
 
 
 status = "unchanged"
-if not found and stale:
+if not found and normalize:
+    take_over(normalize[0])
+    found = True
+    status = "normalized"
+elif not found and stale:
     take_over(stale[0])
     found = True
     status = "replaced"
@@ -2739,8 +2996,11 @@ sys.stdout.write(status + "\n" + out + "\n")
 # starts in, is dead: it is rewritten to the current command instead of being
 # kept. A command whose script is there but whose --sources or --assembly
 # names another installation is rewritten too: it would have the session hook
-# report on an assembly this run is not for. Prints the status word, and the
-# path of the merged temporary file when there is one.
+# report on an assembly this run is not for. An entry that already carries this
+# exact command counts as installed only when the whole entry matches: a type
+# that is not "command" never runs, and another timeout runs the hook under a
+# budget this script never installed, so either one is normalized. Prints the
+# status word, and the path of the merged temporary file when there is one.
 merge_hook_json() {
 	python3 -c "$PY_MERGE_HOOK" "$1" \
 		"$(hook_command_string)" "$(basename "$SCRIPT_PATH")" "$HOOK_TIMEOUT_SECONDS" \
@@ -2845,6 +3105,7 @@ install_hook_file() {
 		return 1
 	fi
 	case "$status" in
+	normalized) info "$PROG: normalized the hook entry in $file" ;;
 	replaced) info "$PROG: replaced a stale hook in $file" ;;
 	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;
@@ -3184,6 +3445,14 @@ main() {
 	esac
 	# '08' is a number of hours, never an octal literal, so the base is stated.
 	FETCH_INTERVAL_HOURS=$((10#$FETCH_INTERVAL_HOURS))
+
+	# Test hook, never set outside the harness: shorten the wall-clock budget
+	# of the session hook, so that a case can reach the near-deadline path in
+	# seconds instead of waiting out the real budget.
+	case "${LINK_SKILLS_TEST_DEADLINE_SECONDS-}" in
+	'' | *[!0-9]*) ;;
+	*) HOOK_DEADLINE_SECONDS=$((10#$LINK_SKILLS_TEST_DEADLINE_SECONDS)) ;;
+	esac
 
 	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
 	# it is registered once, here, for every command below.

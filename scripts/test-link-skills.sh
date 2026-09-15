@@ -381,6 +381,32 @@ drop_shims() {
 	fi
 }
 
+# True when a pid names a process that is still running. kill -0 succeeds on a
+# zombie, which is a process that has already exited and waits only to be
+# reaped, so a case that asks whether something outlived a deadline must read
+# the process state as well. A state starting with Z is gone; a pid the
+# process table will not describe is judged by kill -0 alone.
+pid_is_live() {
+	local state
+	if ! kill -0 "$1" 2>/dev/null; then
+		return 1
+	fi
+	state=$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')
+	case "$state" in
+	Z*) return 1 ;;
+	esac
+	return 0
+}
+
+# True when ps reports a process start time here. A host or a sandbox that
+# refuses to run ps leaves the lock owner check with the pid alone, which is
+# the fallback, not the behaviour a case about start times can exercise.
+ps_reports_start_time() {
+	local out
+	out=$(ps -o lstart= -p "$$" 2>/dev/null | tr -d '[:space:]')
+	[ -n "$out" ]
+}
+
 # macOS formats APFS and HFS+ case-insensitive by default; Linux ext4 does not.
 # The cases that depend on it print a skip note and still pass elsewhere.
 fs_case_insensitive() {
@@ -1616,7 +1642,10 @@ install_hooks_leaves_minified_file_unchanged() {
 	mkdir -p "$HOME/.claude"
 	file="$HOME/.claude/settings.json"
 	before="$CASE_DIR/before.json"
-	printf '%s\n' "{\"model\":\"sonnet\",\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bash $LS hook\",\"timeout\":20}]}]}}" >"$file"
+	# The whole entry is what this run installs: the command, the type and the
+	# timeout. An entry that carried another timeout would be normalized, and
+	# normalizing rewrites the file, so the entry here is the installed one.
+	printf '%s\n' "{\"model\":\"sonnet\",\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"bash $LS hook\",\"timeout\":60}]}]}}" >"$file"
 	cp "$file" "$before"
 	ls_run install-hooks
 	assert_rc 0 "install-hooks"
@@ -3316,7 +3345,7 @@ hook_bounded_by_deadline() {
 	childpid=$(cat "$CASE_DIR/sleep.pid" 2>/dev/null || printf '')
 	if [ -z "$childpid" ]; then
 		fail "the git hook did not record the pid of its sleep"
-	elif kill -0 "$childpid" 2>/dev/null; then
+	elif pid_is_live "$childpid"; then
 		fail "the sleep the hook started outlived the deadline"
 		kill -9 "$childpid" 2>/dev/null || true
 	fi
@@ -3784,7 +3813,8 @@ lock_vanish_is_retried() {
 	sleep 1
 	got=""
 	if [ -f "$lock/pid" ]; then
-		got=$(cat "$lock/pid")
+		# The pid file records the owner as a pid, a tab and its start time.
+		got=$(head -n 1 "$lock/pid" | cut -f1)
 	fi
 	if [ -z "$got" ]; then
 		fail "the waiting run went on with no lock of its own"
@@ -4406,6 +4436,622 @@ validator_decodes_all_yaml_escapes() {
 	esac
 }
 
+# A quoted scalar does not end where its line ends: YAML reads on to the
+# closing quote. A parser that stops at the line break reads the value as a
+# plain scalar instead, so a continuation line that starts with "#" reads as a
+# comment and everything on it leaves the length check.
+validator_multiline_quoted_scalar() {
+	local out rc long lead fits over sqfits sqover
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# The second line starts with "#", which is text inside the quotes, and the
+	# 1100 characters after it are part of the description.
+	long=$(printf '%1100s' '' | tr ' ' 'A')
+	mkdir -p "$CASE_DIR/ml-long/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "short\n'
+		printf '  #%s"\n' "$long"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ml-long/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ml-long" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a multi-line quoted description must be measured whole: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	# The line break folds to one space, and the quotes are not part of the
+	# value: 1000 + 1 + 23 is exactly 1024 characters, and one more is over.
+	lead=$(printf '%1000s' '' | tr ' ' 'A')
+	fits=$(printf '%23s' '' | tr ' ' 'B')
+	over=$(printf '%24s' '' | tr ' ' 'B')
+	mkdir -p "$CASE_DIR/ml-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\n' "$lead"
+		printf '  %s"\n' "$fits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ml-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ml-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024 character multi-line quoted description must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/ml-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\n' "$lead"
+		printf '  %s"\n' "$over"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ml-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ml-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025 character multi-line quoted description must fail: $out"
+	fi
+
+	# A single-quoted scalar spans lines the same way, and "''" inside it is
+	# one quote: 1021 "a", that quote, the folded space and "b" are 1024.
+	sqfits=$(printf '%1021s' '' | tr ' ' 'a')
+	sqover=$(printf '%1022s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/sq-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf "description: '%s''\n" "$sqfits"
+		printf "  b'\n"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/sq-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/sq-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024 character two-line single-quoted description must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/sq-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf "description: '%s''\n" "$sqover"
+		printf "  b'\n"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/sq-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/sq-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025 character two-line single-quoted description must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the single-quoted failure must name the length limit: $out" ;;
+	esac
+}
+
+# A directory called "true" or "123" needs a quoted name: unquoted, YAML hands
+# the runtime a boolean or a number and the skill has no name at all. The
+# description refuses those forms already, and the name must refuse them too.
+validator_rejects_non_string_name() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/name-bool/skills/true"
+	{
+		printf -- '---\n'
+		printf 'name: true\n'
+		printf 'description: a skill whose directory is called true\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/name-bool/skills/true/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/name-bool" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an unquoted boolean name must fail: $out"
+	fi
+	case "$out" in
+	*'"name" must be a plain string'*) ;;
+	*) fail "the failure must report the name as a non-string: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/name-number/skills/123"
+	{
+		printf -- '---\n'
+		printf 'name: 123\n'
+		printf 'description: a skill whose directory is called 123\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/name-number/skills/123/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/name-number" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an unquoted numeric name must fail: $out"
+	fi
+
+	# Quoted, the same characters are text again, and the name matches the
+	# directory.
+	mkdir -p "$CASE_DIR/name-quoted/skills/true"
+	{
+		printf -- '---\n'
+		printf 'name: %s\n' "'true'"
+		printf 'description: a skill whose directory is called true\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/name-quoted/skills/true/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/name-quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted name must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# The parser reads the fields it knows and used to ignore every other line, so
+# a frontmatter that no YAML reader accepts still validated. A line that is
+# neither blank, a comment, a "key: value" line nor part of the value above it
+# is reported by its own line number, and so is a flow collection that never
+# closes.
+validator_rejects_malformed_frontmatter() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/flow-open/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'allowed-tools: [Read\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-open/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-open" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an unclosed flow sequence must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the failure must name line 4: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/flow-closed/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'allowed-tools: [Read, Bash]\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-closed/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-closed" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a closed flow sequence must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/stray/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'oops\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/stray/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/stray" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a stray frontmatter line must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the stray line must be reported by number: $out" ;;
+	esac
+
+	# An indented mapping under a key is ordinary YAML and stays accepted.
+	mkdir -p "$CASE_DIR/mapping/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  team: platform\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/mapping/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/mapping" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "an indented mapping must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# A blank line before the first content line of a folded block is content: the
+# value starts with one newline for each of them. Dropping those newlines
+# measures a value the runtime never sees. The description length cannot show
+# it, because the empty check trims a leading newline away before it measures,
+# so the name proves it instead: with the leading blank line the folded name
+# is "\nnoted", which is not the directory name.
+validator_folded_block_leading_blank() {
+	local out rc fits
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/lead-blank/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: >-\n'
+		printf '\n'
+		printf '  noted\n'
+		printf 'description: a folded name with a leading blank line\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/lead-blank/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/lead-blank" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a folded name with a leading blank line must fail: $out"
+	fi
+	case "$out" in
+	*"must equal the directory name"*) ;;
+	*) fail "the failure must name the directory mismatch: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/no-lead-blank/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: >-\n'
+		printf '  noted\n'
+		printf 'description: a folded name with no leading blank line\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/no-lead-blank/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/no-lead-blank" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a folded name without a leading blank line must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# The description keeps the newline too, but the empty check trims it, so a
+	# 1024 character description with a leading blank line still fits.
+	fits=$(printf '%1024s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/lead-blank-desc/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '\n'
+		printf '  %s\n' "$fits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/lead-blank-desc/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/lead-blank-desc" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a trimmed 1024 character folded description must validate: $out"
+	fi
+}
+
+# A source line with a '..' names one directory whether or not that directory
+# is there at the moment it is read. A source that is renamed away is
+# unavailable, not deleted, so its links and its manifest entries stay and the
+# next run over the restored source is clean.
+relative_source_missing_keeps_links() {
+	local sources manifest
+	mkskill "$CASE_DIR/src/skills" alpha
+	mkdir -p "$CASE_DIR/cfg"
+	sources="$CASE_DIR/cfg/skill-sources"
+	manifest="$HOME/.agents/skills/.skill-links"
+	printf '%s\n' '../src/skills' >"$sources"
+
+	ls_run --sources "$sources" link
+	assert_rc 0 "link through a relative source"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" "alpha link"
+	assert_file_has "$manifest" "$CASE_DIR/src/skills/alpha" \
+		"the manifest records the source through its normalized path"
+
+	mv "$CASE_DIR/src" "$CASE_DIR/src-away"
+	ls_run --sources "$sources" link
+	assert_rc 1 "link while the source is away"
+	assert_out_has "source directory does not exist" "the missing source is reported"
+	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" \
+		"the link is kept while the source is away"
+	assert_file_has "$manifest" "$CASE_DIR/src/skills/alpha" \
+		"the manifest entry is kept while the source is away"
+
+	mv "$CASE_DIR/src-away" "$CASE_DIR/src"
+	ls_run --sources "$sources" link
+	assert_rc 0 "link once the source is back"
+	assert_out_has "unchanged 1" "the link is recognised again"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" "alpha link again"
+}
+
+# A component that is a symlink to nothing is a component that exists. A '..'
+# after it must not pop through it: that would answer with the directory
+# holding the link, which the spelling never names, and the run would write
+# there.
+dangling_symlink_component_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$CASE_DIR/parent"
+	ln -s "$CASE_DIR/parent/gone" "$CASE_DIR/parent/dangling"
+
+	ls_run --assembly "$CASE_DIR/parent/dangling/.." link
+	assert_rc 2 "--assembly through a dangling symlink"
+	assert_out_has "cannot be resolved" "refusal message"
+	assert_absent "$CASE_DIR/parent/alpha" "no link beside the dangling symlink"
+	assert_absent "$CASE_DIR/parent/.skill-links" "no manifest beside the dangling symlink"
+	assert_absent "$CASE_DIR/parent/gone" "the missing target is not created"
+}
+
+# A pid is not an identity: the number is reused, and after the owner of a lock
+# dies an unrelated process can carry it. The start time recorded beside the
+# pid tells the two apart, and the lock of a process that really is the owner
+# is still honoured.
+stale_lock_with_reused_pid_is_cleared() {
+	local lock pid start
+	if ! ps_reports_start_time; then
+		printf '    (skipped: ps does not report process start times here)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+
+	# A live pid, recorded with a start time no process of that number has.
+	mkdir "$lock"
+	sleep 60 &
+	pid=$!
+	printf '%s\t%s\n' "$pid" "Thu Jan  1 00:00:00 1970" >"$lock/pid"
+	ls_run link
+	assert_rc 0 "link over a lock whose pid was reused"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the stale lock is gone"
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+
+	# The same pid, recorded with the start time it really has.
+	mkdir "$lock"
+	sleep 60 &
+	pid=$!
+	start=$(ps -o lstart= -p "$pid" 2>/dev/null |
+		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
+	printf '%s\t%s\n' "$pid" "$start" >"$lock/pid"
+	ls_run link
+	assert_rc 1 "link over a lock whose owner really holds it"
+	assert_out_has "holds the lock" "lock message"
+	assert_exists "$lock/pid" "the live owner keeps its lock"
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	rm -f "$lock/pid"
+	rmdir "$lock"
+}
+
+# A candidate that is the assembly, or a directory the assembly sits below,
+# would be linked into itself. It is refused and counted, and nothing is
+# written inside it.
+candidate_containing_assembly_refused() {
+	mkskill "$CASE_DIR/src" foo
+	write_sources
+	add_source "$CASE_DIR/src"
+
+	ls_run --assembly "$CASE_DIR/src/foo" link
+	assert_rc 1 "link into an assembly the candidate holds"
+	assert_out_has "contains the assembly" "the refusal is reported"
+	assert_out_has "errors 1" "the summary counts it"
+	assert_absent "$CASE_DIR/src/foo/foo" "no self-referential link"
+	assert_exists "$CASE_DIR/src/foo/SKILL.md" "the candidate directory is left alone"
+}
+
+# The deadline must never leave a clone half updated. A merge whose local git
+# hook outlasts the deadline is stopped, and the clone goes back to the commit
+# it sat on, with no change left in the work tree.
+hook_timeout_during_merge_restores_clone() {
+	local pre post dirty
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	pre=$(head_of "$COMPANY")
+	# The single-quoted lines are hook source, not expansions.
+	# shellcheck disable=SC2016
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'sleep 40' >"$COMPANY/.git/hooks/post-merge"
+	chmod +x "$COMPANY/.git/hooks/post-merge"
+
+	ls_run hook
+	assert_rc 0 "hook"
+	assert_out_has "hook timed out" "the deadline is reported"
+	dirty=$(git -C "$COMPANY" status --porcelain 2>/dev/null)
+	if [ -n "$dirty" ]; then
+		fail "the clone is not clean after the deadline: $dirty"
+	fi
+	# The hook the merge runs sleeps well past the deadline, so the merge
+	# cannot have finished: whatever state the clone is left in is a state the
+	# deadline made.
+	post=$(head_of "$COMPANY")
+	if [ "$post" != "$pre" ]; then
+		fail "the clone was left at $post, expected the pre-merge commit $pre"
+	fi
+	assert_out_has "rolled back to" "the restore is reported"
+	assert_absent "$HOME/.agents/skills/.skill-links.d/merge-in-progress" \
+		"no merge marker is left behind"
+}
+
+# A merge rewrites the work tree and runs whatever local git hook the clone
+# carries, so it is never started with seconds left on the deadline. The hook
+# prints the manual command instead and the clone is not touched.
+hook_skips_merge_near_deadline() {
+	local pre post
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	pre=$(head_of "$COMPANY")
+
+	LINK_SKILLS_TEST_DEADLINE_SECONDS=9
+	export LINK_SKILLS_TEST_DEADLINE_SECONDS
+	ls_run hook
+	unset LINK_SKILLS_TEST_DEADLINE_SECONDS
+	assert_rc 0 "hook with a deadline the merge does not fit in"
+	assert_out_has "commit(s) behind" "the manual command is printed"
+	assert_out_lacks "fast-forwarded" "nothing was merged"
+	post=$(head_of "$COMPANY")
+	if [ "$post" != "$pre" ]; then
+		fail "the clone was updated inside the short deadline: $pre -> $post"
+	fi
+	assert_absent "$HOME/.agents/skills/.skill-links.d/merge-in-progress" \
+		"no merge marker is left behind"
+}
+
+# A host that gives the hook no temporary file loses the output capture and
+# nothing else: the body still runs as a bounded job, so a local git hook that
+# outlasts the deadline is still stopped and the session still starts.
+hook_bounded_without_tmpdir() {
+	local started elapsed saved
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	# The single-quoted lines are hook source, not expansions.
+	# shellcheck disable=SC2016
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'sleep 40' >"$COMPANY/.git/hooks/post-merge"
+	chmod +x "$COMPANY/.git/hooks/post-merge"
+
+	saved=${TMPDIR-}
+	TMPDIR="$CASE_DIR/no-such-tmp/"
+	export TMPDIR
+	started=$(date +%s)
+	ls_run hook
+	elapsed=$(($(date +%s) - started))
+	if [ -n "$saved" ]; then
+		TMPDIR=$saved
+		export TMPDIR
+	else
+		unset TMPDIR
+	fi
+
+	assert_rc 0 "hook with no temporary directory"
+	assert_out_has "hook timed out" "the deadline is reported"
+	if [ "$elapsed" -gt 30 ]; then
+		fail "the hook took ${elapsed}s, expected it to return inside 30s"
+	fi
+	assert_absent "$CASE_DIR/no-such-tmp" "no temporary directory is created"
+}
+
+# An entry that already carries this exact command still runs under the type
+# and the timeout it was written with. A type that is not "command" never runs
+# at all, and another timeout is another budget, so the entry is normalized,
+# backed up, and only then counted as installed.
+install_hooks_normalizes_exact_command_entry() {
+	local file got n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "prompt",' \
+		"            \"command\": \"bash $LS hook\"," \
+		'            "timeout": 1' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$file"
+
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an entry with the exact command"
+	assert_out_has "normalized the hook entry" "the normalization is reported"
+	assert_out_lacks "already runs the hook" "the entry was not counted as installed"
+	got=$(hook_entry_field "$file" type)
+	if [ "$got" != "command" ]; then
+		fail "the normalized entry carries type $got, expected command"
+	fi
+	got=$(hook_entry_field "$file" timeout)
+	if [ "$got" != "60" ]; then
+		fail "the normalized entry carries timeout $got, expected 60"
+	fi
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup of the rewritten file, found $n"
+	fi
+
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the normalized entry is installed"
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "the second run backs nothing up, found $n backups"
+	fi
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -4472,6 +5118,14 @@ main() {
 	run_case install_hooks_replacement_resets_timeout
 	run_case hook_rollback_prints_no_success_notice
 	run_case assembly_inside_runtime_home_refused
+	run_case relative_source_missing_keeps_links
+	run_case dangling_symlink_component_refused
+	run_case stale_lock_with_reused_pid_is_cleared
+	run_case candidate_containing_assembly_refused
+	run_case hook_timeout_during_merge_restores_clone
+	run_case hook_skips_merge_near_deadline
+	run_case hook_bounded_without_tmpdir
+	run_case install_hooks_normalizes_exact_command_entry
 	run_case relink_creation_failure_restores_old_link
 	run_case unlink_leaves_foreign_entries
 	run_case personal_skill_untouched
@@ -4552,6 +5206,10 @@ main() {
 	run_case validator_folded_block_paragraph_break
 	run_case validator_folded_block_more_indented_boundary
 	run_case validator_decodes_all_yaml_escapes
+	run_case validator_multiline_quoted_scalar
+	run_case validator_rejects_non_string_name
+	run_case validator_rejects_malformed_frontmatter
+	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces
