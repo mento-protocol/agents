@@ -712,6 +712,75 @@ hook_notifies_when_behind() {
 		"the manifest is byte for byte what it was"
 }
 
+# A branch that tracks nothing is measured against origin/<default branch>, so
+# the command the notice prints has to name that remote and that branch: a bare
+# pull there only reports that there is no tracking information.
+hook_pull_command_names_remote_without_upstream() {
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills"
+	ls_run link
+	assert_rc 0 "link"
+	push_beta
+	git -C "$COMPANY" branch --unset-upstream >/dev/null 2>&1
+
+	ls_run hook
+	assert_rc 0 "hook without an upstream"
+	assert_out_has "$COMPANY is 1 commit(s) behind" "the behind count is still reported"
+	assert_out_has "git pull --ff-only origin main" \
+		"the remote and the branch are named"
+
+	git -C "$COMPANY" branch --set-upstream-to=origin/main main >/dev/null 2>&1
+	ls_run hook
+	assert_rc 0 "hook with an upstream"
+	assert_out_has "git pull --ff-only &&" "the bare command stays"
+	assert_out_lacks "origin main" "nothing is named when the branch tracks a remote"
+}
+
+# The manifest is what 'link' rewrites, and 'link' refuses a path that is not a
+# regular file. Reading that path as an empty list would have the hook call
+# every skill unlinked and recommend a run that cannot happen.
+hook_reports_unusable_manifest() {
+	local manifest lines
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	manifest="$HOME/.agents/skills/.skill-links"
+	rm -f "$manifest"
+	mkdir "$manifest"
+
+	ls_run hook
+	assert_rc 0 "hook with a directory at the manifest path"
+	assert_out_has "the manifest $manifest is not a regular file" \
+		"the path in the way is named"
+	assert_out_has "link" "the notice says what to run afterwards"
+	assert_out_lacks "not linked" "no drift is counted"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+	assert_is_dir_not_link "$manifest" "the manifest path is left alone"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"the link is left alone"
+
+	# A symlink is refused the same way, and its target is not written either.
+	rmdir "$manifest"
+	printf 'mine\n' >"$CASE_DIR/elsewhere"
+	ln -s "$CASE_DIR/elsewhere" "$manifest"
+	ls_run hook
+	assert_rc 0 "hook with a symlink at the manifest path"
+	assert_out_has "the manifest $manifest is not a regular file" \
+		"the symlink is reported the same way"
+	assert_out_lacks "not linked" "no drift is counted for the symlink either"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+	assert_file_has "$CASE_DIR/elsewhere" "mine" "the symlink target is untouched"
+}
+
 # A candidate the assembly does not hold is drift. The hook names it and
 # leaves the fix to the 'link' run it points at.
 hook_notifies_drift() {
@@ -2638,6 +2707,63 @@ validator_block_indicator_either_order() {
 	fi
 }
 
+# The indentation indicator of a block scalar header is one digit from 1 to 9.
+# "|0", "|10" and "|01" are no headers, so YAML reads the line as a plain
+# scalar that starts with an indicator character and refuses the document. A
+# validator that takes them as headers measures a description a parser never
+# produces.
+validator_rejects_bad_block_header() {
+	local out rc header n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for header in '|0' '|10' '|01'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/badhdr-$n/skills/blocky"
+		{
+			printf -- '---\n'
+			printf 'name: blocky\n'
+			printf 'description: %s\n' "$header"
+			printf '  A description under a broken header.\n'
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/badhdr-$n/skills/blocky/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/badhdr-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "the header '$header' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"is not valid YAML"*) ;;
+		*) fail "the header '$header' must be reported as invalid YAML: $out" ;;
+		esac
+	done
+
+	# A single digit from 1 to 9 is a header, in either order with the
+	# chomping indicator.
+	n=0
+	for header in '|2-' '|-2'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/okhdr-$n/skills/blocky"
+		{
+			printf -- '---\n'
+			printf 'name: blocky\n'
+			printf 'description: %s\n' "$header"
+			printf '  A description under a real header.\n'
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/okhdr-$n/skills/blocky/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/okhdr-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "the header '$header' must validate: $out"
+		fi
+	done
+}
+
 # An unquoted value loses its inline comment, so a description that holds only
 # a comment is empty. A quoted value keeps every character it holds.
 validator_strips_inline_comment() {
@@ -3601,6 +3727,75 @@ validator_rejects_tagged_and_more_numeric_scalars() {
 	fi
 }
 
+# YAML 1.1 lets an underscore sit anywhere in the digits of a base-prefixed
+# integer, and it reads a colon-separated number as a sexagesimal one. A
+# runtime that parses such a description gets a number, so the validator must
+# refuse it and ask for quotes.
+validator_rejects_underscored_base_numbers() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for form in '0x_FF' '0b_1' '0o_7' '1:30' '1:30.5'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/under-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/under-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/under-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"must be a plain string"*) ;;
+		*) fail "description '$form' must be reported as a non-string: $out" ;;
+		esac
+	done
+
+	# The same characters inside quotes are text.
+	n=0
+	for form in '"0x_FF"' "'1:30'"; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/under-ok-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/under-ok-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/under-ok-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "quoted description $form must validate: $out"
+		fi
+	done
+
+	# A sentence that starts with one of these forms is an ordinary
+	# description.
+	mkdir -p "$CASE_DIR/under-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: 0x_FF is the mask\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/under-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/under-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a sentence that starts with 0x_FF must validate: $out"
+	fi
+}
+
 # Repeat text $1 $2 times on standard output. bash 3.2 has no repetition
 # operator, so the case builds the string one copy at a time.
 repeat_text_n() {
@@ -4511,6 +4706,71 @@ validator_decodes_all_yaml_escapes() {
 	esac
 }
 
+# YAML has a closed escape set inside double quotes. An escape outside it, and
+# a hex escape with too few digits, make a parser refuse the whole document. A
+# validator that drops the backslash instead passes a skill no runtime can
+# load.
+validator_rejects_unknown_escape() {
+	local out rc acute
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/esc-unknown/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\qb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-unknown/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-unknown" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "the escape \\q must fail: $out"
+	fi
+	case "$out" in
+	*'invalid escape sequence "\q"'*) ;;
+	*) fail "the failure must name the escape: $out" ;;
+	esac
+
+	# "\x" takes two hex digits, so one digit is an error, not the letter.
+	mkdir -p "$CASE_DIR/esc-short/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\x4"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-short/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-short" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a one digit \\x escape must fail: $out"
+	fi
+	case "$out" in
+	*"invalid escape sequence"*) ;;
+	*) fail "the short escape failure must name the escape: $out" ;;
+	esac
+
+	# A well formed escape next to a non-ASCII letter still validates.
+	acute=$(printf '\303\251')
+	mkdir -p "$CASE_DIR/esc-good/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\x41%s"\n' "$acute"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-good/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-good" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a valid \\x41 escape must validate: $out"
+	fi
+}
+
 # A quoted scalar does not end where its line ends: YAML reads on to the
 # closing quote. A parser that stops at the line break reads the value as a
 # plain scalar instead, so a continuation line that starts with "#" reads as a
@@ -5246,6 +5506,91 @@ install_hooks_replaces_sh_invocation() {
 	assert_out_has "already runs the hook" "a direct invocation counts as ours"
 }
 
+# An interpreter spelled as an absolute path names one file and no other, so an
+# entry that runs the script through a path that holds no executable dies at
+# every session start, where nobody reads it. A bare word is resolved on PATH
+# when the session starts, so it stands whatever this run can see.
+install_hooks_replaces_missing_interpreter() {
+	local file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	write_session_hook_settings "$file" "/nowhere/bin/bash $LS hook"
+
+	ls_run install-hooks
+	assert_rc 0 "install-hooks"
+	assert_out_has "replaced a hook whose interpreter /nowhere/bin/bash is gone" \
+		"the interpreter that is gone is named"
+	assert_file_has "$file" "bash $LS hook" "the generated command is installed"
+	assert_file_lacks "$file" "/nowhere/bin/bash" "the dead interpreter is gone"
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the replacement is recognised"
+
+	# A bare word names no file this run could test, so it stands. The quoted
+	# script path keeps this entry off the exact-command match, so the bare
+	# word is what the acceptance turns on.
+	write_session_hook_settings "$file" "bash '$LS' hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a bare bash"
+	assert_out_has "already runs the hook" "a bare bash counts as ours"
+}
+
+# The backup name is reserved when it is chosen, not merely found free. Two
+# install runs inside the same second would otherwise both see the timestamped
+# name absent, both pick it, and the second copy would land on the first
+# snapshot.
+install_hooks_backup_name_is_reserved() {
+	local text base first second
+	text=$(sed -n '/^backup_path() {/,/^}/p' "$SOURCE_SCRIPT")
+	if [ -z "$text" ]; then
+		fail "backup_path was not found in $SOURCE_SCRIPT"
+		return
+	fi
+	base="$CASE_DIR/settings.json.bak-19700101T000000Z"
+	# Each call runs in a subshell of its own, with nothing created in
+	# between: whatever keeps the second call off the first name is the
+	# reservation the first one made on disk.
+	first=$(
+		eval "$text"
+		backup_path "$base"
+	)
+	second=$(
+		eval "$text"
+		backup_path "$base"
+	)
+	if [ -z "$first" ] || [ -z "$second" ]; then
+		fail "backup_path returned nothing: '$first' and '$second'"
+		return
+	fi
+	if [ "$first" = "$second" ]; then
+		fail "two calls chose the same name $first"
+	fi
+	assert_exists "$first" "the first name is reserved"
+	assert_exists "$second" "the second name is reserved"
+	if [ -s "$first" ] || [ -s "$second" ]; then
+		fail "a reserved name should be an empty file"
+	fi
+}
+
 # A source reached through a symlink alias records its links under the
 # directory the alias points at, so once the alias is gone nothing in a
 # recorded target names the line that is still listed. The source spelling the
@@ -5364,6 +5709,8 @@ main() {
 	run_case check_reports_stale_link_as_error
 	run_case check_without_sources_file_exits_2
 	run_case hook_notifies_when_behind
+	run_case hook_pull_command_names_remote_without_upstream
+	run_case hook_reports_unusable_manifest
 	run_case hook_notifies_drift
 	run_case hook_notifies_collision
 	run_case hook_notifies_stale_link
@@ -5449,27 +5796,32 @@ main() {
 	run_case install_hooks_apostrophe_path_idempotent
 	run_case settings_mode_preserved
 	run_case install_hooks_backups_never_overwritten
+	run_case install_hooks_backup_name_is_reserved
 	run_case install_hooks_leaves_minified_file_unchanged
 	run_case install_hooks_replaces_dead_script_path
 	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
 	run_case install_hooks_replaces_sh_invocation
+	run_case install_hooks_replaces_missing_interpreter
 	run_case source_alias_missing_keeps_links
 	run_case manifest_two_column_lines_still_parse
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
 	run_case validator_ignores_finder_metadata
 	run_case validator_block_indicator_either_order
+	run_case validator_rejects_bad_block_header
 	run_case validator_strips_inline_comment
 	run_case validator_block_header_with_comment
 	run_case validator_rejects_non_string_description
 	run_case validator_rejects_typed_scalars
 	run_case validator_rejects_tagged_and_more_numeric_scalars
+	run_case validator_rejects_underscored_base_numbers
 	run_case validator_counts_code_points
 	run_case validator_folds_plain_scalar_across_blank_line
 	run_case validator_folded_block_paragraph_break
 	run_case validator_folded_block_more_indented_boundary
 	run_case validator_decodes_all_yaml_escapes
+	run_case validator_rejects_unknown_escape
 	run_case validator_multiline_quoted_scalar
 	run_case validator_rejects_non_string_name
 	run_case validator_rejects_malformed_frontmatter

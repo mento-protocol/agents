@@ -24,7 +24,10 @@
 //     inline comment, so "description: # TODO" reads as empty. A double-quoted
 //     scalar resolves the whole YAML escape set, including \N (U+0085),
 //     \_ (U+00A0), \L (U+2028) and \P (U+2029), and the empty check treats
-//     those four as whitespace as well
+//     those four as whitespace as well. An escape outside that set, such as
+//     "\q" or a "\x4" with too few digits, fails the skill, because a YAML
+//     parser refuses the document. The indentation indicator of a block
+//     scalar header is one digit from 1 to 9, so "|0" is no header
 //   - name and description are plain strings. Any unquoted value that YAML
 //     reads as another type is refused: "[]", "{}", a flow sequence or mapping,
 //     a bare anchor or alias, an explicit tag such as "!!int 123" or
@@ -84,12 +87,15 @@ const problems = [];
 /**
  * A YAML block scalar header: ">", ">-", "|", "|2-", "|-2" and so on. YAML
  * accepts the indentation indicator and the chomping indicator in either
- * order, so both spellings are matched.
+ * order, so both spellings are matched. The indentation indicator is one digit
+ * from 1 to 9, so "|0", "|10" and "|01" are no headers at all; they read as a
+ * plain scalar that starts with an indicator character, which the parser
+ * refuses further down.
  */
-const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[0-9]*|[0-9]*[+-]?)$/;
+const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$/;
 
 /** The explicit indentation indicator of a block scalar header, if it has one. */
-const BLOCK_INDENT_RE = /[0-9]+/;
+const BLOCK_INDENT_RE = /[1-9]/;
 
 /**
  * Raw unquoted values that YAML reads as something other than a string: the
@@ -111,10 +117,15 @@ const TYPED_SCALAR_RES = [
   // Decimal integers, with an optional sign. YAML 1.1 octal ("0755") is one
   // of these too.
   /^[+-]?[0-9]+$/,
-  // Hexadecimal, octal and binary integers.
-  /^[+-]?0x[0-9a-fA-F]+$/,
-  /^[+-]?0o[0-7]+$/,
-  /^[+-]?0b[01][01_]*$/,
+  // Hexadecimal, octal and binary integers. YAML 1.1 lets an underscore sit
+  // anywhere in the digits, so "0x_FF" is a number too.
+  /^[+-]?0x[0-9a-fA-F_]+$/,
+  /^[+-]?0o[0-7_]+$/,
+  /^[+-]?0[0-7_]+$/,
+  /^[+-]?0b[01_]+$/,
+  // YAML 1.1 sexagesimal numbers: "1:30" is 90, and "1:30.5" is 90.5.
+  /^[+-]?[1-9][0-9_]*(?::[0-5]?[0-9])+$/,
+  /^[+-]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*$/,
   // Digit groups separated by underscores, which YAML 1.1 reads as one
   // number: "1_000", "1_000.5", and the signed forms of both.
   /^[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?$/,
@@ -197,9 +208,13 @@ function indentWidth(line) {
 /**
  * Resolve the escape sequences of a double-quoted YAML scalar: the whole single
  * character set (\0 \a \b \t \n \v \f \r \e "\ " \" \/ \\ \N \_ \L \P), plus
- * "\xNN", "\uNNNN" and "\UNNNNNNNN". An escape that no rule matches keeps the
- * escaped character itself, which is what YAML does for the quote and backslash
- * forms.
+ * "\xNN", "\uNNNN" and "\UNNNNNNNN".
+ *
+ * Returns { value } when every escape is one of those. Returns { escape } with
+ * the text of the first escape YAML refuses: an unknown escape character, a
+ * \x \u \U escape with too few or non-hex digits, a code point above U+10FFFF,
+ * and a lone trailing backslash. Dropping the backslash instead would let a
+ * skill pass here that every YAML parser rejects.
  */
 function decodeDoubleQuoted(body) {
   const SIMPLE = new Map([
@@ -234,10 +249,7 @@ function decodeDoubleQuoted(body) {
       continue;
     }
     i += 1;
-    if (i >= body.length) {
-      out += "\\";
-      break;
-    }
+    if (i >= body.length) return { escape: "\\" };
     const esc = body[i];
     const simple = SIMPLE.get(esc);
     if (simple !== undefined) {
@@ -245,24 +257,17 @@ function decodeDoubleQuoted(body) {
       continue;
     }
     const width = HEX_WIDTHS.get(esc);
-    if (width === undefined) {
-      out += esc;
-      continue;
-    }
+    if (width === undefined) return { escape: "\\" + esc };
     const digits = body.slice(i + 1, i + 1 + width);
     if (digits.length !== width || !/^[0-9a-fA-F]+$/.test(digits)) {
-      out += esc;
-      continue;
+      return { escape: "\\" + esc + digits };
     }
     const code = parseInt(digits, 16);
-    if (code > 0x10ffff) {
-      out += esc;
-      continue;
-    }
+    if (code > 0x10ffff) return { escape: "\\" + esc + digits };
     out += String.fromCodePoint(code);
     i += width;
   }
-  return out;
+  return { value: out };
 }
 
 /**
@@ -322,6 +327,11 @@ function escapesLineBreak(segment) {
  * the quote never closes before the end of the frontmatter, or something other
  * than a comment follows the closing quote. The caller then reads the line as
  * a plain scalar.
+ *
+ * A double-quoted scalar with an escape YAML refuses also returns `escape`,
+ * the text of that escape. The value is then the body with its escapes left as
+ * written, so the caller reports the escape alone and not an empty description
+ * on top of it.
  */
 function readQuotedScalar(text, lines, start) {
   const quote = text[0];
@@ -372,9 +382,12 @@ function readQuotedScalar(text, lines, start) {
   }
   if (!closed) return null;
 
-  const value =
-    quote === '"' ? decodeDoubleQuoted(body) : body.replace(/''/g, "'");
-  return { value, end };
+  if (quote === "'") return { value: body.replace(/''/g, "'"), end };
+  const decoded = decodeDoubleQuoted(body);
+  if (decoded.escape !== undefined) {
+    return { value: body, end, escape: decoded.escape };
+  }
+  return { value: decoded.value, end };
 }
 
 /**
@@ -576,8 +589,10 @@ function flowCollectionCloses(text) {
  * key -> { value, raw, quoted, block }: `value` is the decoded text, and `raw`
  * is the significant text of a plain scalar, which the caller needs to tell an
  * unquoted YAML non-string form apart from the same characters inside quotes;
- * the two flags say which form the value took. `invalid` holds the line number
- * of every line this structural check refuses.
+ * the two flags say which form the value took. `invalid` holds one entry per
+ * refused line: the line number of a line this structural check cannot read,
+ * or a ready message for a value whose own text is malformed, where the line
+ * number alone would not say what is wrong.
  */
 function parseFrontmatter(lines, firstLineNumber) {
   const fields = new Map();
@@ -619,6 +634,11 @@ function parseFrontmatter(lines, firstLineNumber) {
     const quoted = readQuotedScalar(rest, lines, i);
     if (quoted !== null) {
       i = quoted.end;
+      if (quoted.escape !== undefined) {
+        invalid.push(
+          `"${key}" has an invalid escape sequence "${quoted.escape}" in a double-quoted scalar`,
+        );
+      }
       fields.set(key, {
         value: quoted.value,
         raw: rest,
@@ -631,6 +651,11 @@ function parseFrontmatter(lines, firstLineNumber) {
     const plain = readPlainScalar(rest, lines, i);
     i = plain.end;
     if (/^[[{]/.test(plain.value) && !flowCollectionCloses(plain.value)) {
+      invalid.push(lineNumber);
+    } else if (/^[|>]/.test(plain.value)) {
+      // The block header pattern already took every header YAML accepts, so a
+      // value that still starts with "|" or ">" is a malformed header such as
+      // "|0". No plain scalar may start with an indicator character either.
       invalid.push(lineNumber);
     }
     fields.set(key, {
@@ -712,9 +737,11 @@ function validateSkill(name) {
   // The frontmatter starts on line 2 of the file, right after the opening
   // "---", so that is the number of the first line handed to the parser.
   const { fields, invalid } = parseFrontmatter(lines.slice(1, closeIndex), 2);
-  for (const lineNumber of invalid) {
+  for (const entry of invalid) {
     problems.push(
-      `skills/${name}: frontmatter line ${lineNumber} is not valid YAML`,
+      typeof entry === "number"
+        ? `skills/${name}: frontmatter line ${entry} is not valid YAML`
+        : `skills/${name}: ${entry}`,
     );
   }
 

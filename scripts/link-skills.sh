@@ -1984,6 +1984,19 @@ git_upstream() {
 	return 1
 }
 
+# The fast-forward a notice prints. A branch that tracks nothing was measured
+# against origin/<default branch>, and a bare pull there only reports that
+# there is no tracking information, so the remote and the branch are named.
+git_pull_command() {
+	local root
+	root=$1
+	if git -C "$root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+		printf 'git pull --ff-only\n'
+		return 0
+	fi
+	printf 'git pull --ff-only origin %s\n' "$(git_default_branch "$root")"
+}
+
 git_behind_count() {
 	local root up
 	root=$1
@@ -2364,6 +2377,15 @@ cmd_hook() {
 		hook_say "could not create the assembly directory $ASSEMBLY_DIR"
 		return 0
 	fi
+	# load_manifest reads a path that is not a regular file as an empty list,
+	# and the hook would then call every skill unlinked and recommend a 'link'
+	# run that refuses that very path. Say what is in the way instead. The
+	# refusal names 'link' in its own words, which is not a session start's
+	# voice, so only this line is printed.
+	if ! manifest_path_usable 2>/dev/null; then
+		hook_say "the manifest $MANIFEST is not a regular file; move it aside, then run: $(script_command_prefix) link"
+		return 0
+	fi
 	SECONDS=0
 	detect_case_insensitive
 	# A session start never fails and never shouts. A manifest it cannot read
@@ -2413,7 +2435,7 @@ cmd_hook() {
 		else
 			state="clean"
 		fi
-		hook_say "$root is $behind commit(s) behind on branch $branch ($state); run: cd $(shell_quote "$root") && git pull --ff-only && $(script_command_prefix) link"
+		hook_say "$root is $behind commit(s) behind on branch $branch ($state); run: cd $(shell_quote "$root") && $(git_pull_command "$root") && $(script_command_prefix) link"
 	done
 
 	# Drift, sorted by what fixes it. A missing or stale link is one 'link'
@@ -2652,6 +2674,9 @@ print_hook_snippet() {
 #   replaced-interpreter <name>
 #                    an entry that ran the script through something other than
 #                    bash now holds the hook; the interpreter follows the word
+#   replaced-gone-interpreter <path>
+#                    an entry that named an interpreter by an absolute path
+#                    that holds no executable now holds the hook
 #   replaced-other   an entry that ran another installation now holds the hook
 # For every status but "unchanged" it writes the merged JSON to a temporary
 # file of its own next to the settings file and prints that path on the second
@@ -2800,6 +2825,7 @@ found = False
 stale = []
 other = []
 wrong_shell = []
+gone_shell = []
 normalize = []
 for group in groups:
     if not isinstance(group, dict):
@@ -2841,6 +2867,15 @@ for group in groups:
         if interpreter and os.path.basename(interpreter) != "bash":
             wrong_shell.append((entry, interpreter))
             continue
+        # A bare word is resolved on PATH at every session start, so it stands
+        # whatever this run can see. An absolute path names one file and no
+        # other, so once that file is gone the entry is dead the same way a
+        # gone script path is.
+        if os.path.isabs(interpreter) and not (
+            os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
+        ):
+            gone_shell.append((entry, interpreter))
+            continue
         # The script file is there, but the command runs another sources file
         # or another assembly directory. Counting that as installed would
         # leave the session hook reporting on an installation this run is not
@@ -2874,6 +2909,10 @@ elif not found and wrong_shell:
     take_over(wrong_shell[0][0])
     found = True
     status = "replaced-interpreter " + wrong_shell[0][1]
+elif not found and gone_shell:
+    take_over(gone_shell[0][0])
+    found = True
+    status = "replaced-gone-interpreter " + gone_shell[0][1]
 elif not found and other:
     take_over(other[0])
     found = True
@@ -2919,7 +2958,9 @@ sys.stdout.write(status + "\n" + out + "\n")
 # starts in, is dead: it is rewritten to the current command instead of being
 # kept. So is a command that runs the script through an interpreter other than
 # bash: the script is bash, and under dash it dies at the first bashism at
-# every session start. A command whose script is there but whose --sources or
+# every session start. So is one whose interpreter is spelled as an absolute
+# path that holds no executable file, which names one file and no other.
+# A command whose script is there but whose --sources or
 # --assembly names another installation is rewritten too: it would have the
 # session hook report on an assembly this run is not for. An entry that already carries this
 # exact command counts as installed only when the whole entry matches: a type
@@ -2933,21 +2974,27 @@ merge_hook_json() {
 }
 
 # Never overwrite a backup. Two installs inside the same second share a
-# timestamp, so the second one takes the first free numbered suffix.
+# timestamp, so the second one takes the first free numbered suffix. The name
+# is reserved by creating it under noclobber, which is O_EXCL: two runs that
+# only tested for the name would both find it free and the second copy would
+# land on the first snapshot. A file, a directory or a dangling symlink at the
+# name all fail the create, so the next suffix is tried. The caller copies
+# over the empty file it gets back, and removes it again when that copy fails.
 backup_path() {
-	local base n
+	local base n cand
 	base=$1
-	if [ ! -e "$base" ] && [ ! -L "$base" ]; then
-		printf '%s\n' "$base"
-		return 0
-	fi
-	n=1
+	cand=$base
+	n=0
 	while [ "$n" -le 100 ]; do
-		if [ ! -e "$base.$n" ] && [ ! -L "$base.$n" ]; then
-			printf '%s\n' "$base.$n"
+		if (
+			set -C
+			: >"$cand"
+		) 2>/dev/null; then
+			printf '%s\n' "$cand"
 			return 0
 		fi
 		n=$((n + 1))
+		cand="$base.$n"
 	done
 	return 1
 }
@@ -3014,7 +3061,13 @@ install_hook_file() {
 		stamp=$(date -u +%Y%m%dT%H%M%SZ)
 		bak=""
 		bak=$(backup_path "$file.bak-$stamp") || bak=""
+		# The name comes back reserved as an empty file, so a copy that fails
+		# has to take it away again: an empty backup is worse than none, and
+		# it would push the next run onto the following suffix.
 		if [ -z "$bak" ] || ! cp -p "$file" "$bak"; then
+			if [ -n "$bak" ]; then
+				rm -f "$bak"
+			fi
 			rm -f "$tmp"
 			err "could not back up $file; left it unchanged"
 			return 1
@@ -3034,6 +3087,9 @@ install_hook_file() {
 	replaced) info "$PROG: replaced a stale hook in $file" ;;
 	"replaced-interpreter "*)
 		info "$PROG: replaced a hook that ran the script through ${status#replaced-interpreter } in $file"
+		;;
+	"replaced-gone-interpreter "*)
+		info "$PROG: replaced a hook whose interpreter ${status#replaced-gone-interpreter } is gone in $file"
 		;;
 	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;

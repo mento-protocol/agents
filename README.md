@@ -154,11 +154,17 @@ Adds a Claude Code and Codex `SessionStart` hook that runs
 under the throttle below, then prints one line for each source clone that is
 behind, naming the clone, its branch, whether its work tree is clean or dirty,
 and the command that updates it:
-`cd <clone> && git pull --ff-only && <script> link`. It prints one more line
+`cd <clone> && git pull --ff-only && <script> link`. A branch that tracks
+nothing is measured against `origin/<default branch>`, and a bare pull there
+only reports that there is no tracking information, so the command names them:
+`git pull --ff-only origin <default branch>`. It prints one more line
 when the assembly has drifted from the sources: how many skills are not
 linked, and how many links are stale, each with the `link` command that fixes
 them, and one more when a skill's name is taken by an entry this script did
-not create, with the `check` command that names the entry. It never changes a
+not create, with the `check` command that names the entry. A manifest path
+that is not a regular file is the one thing it reports instead of drift: a
+`link` run would refuse that path, so the hook prints that one line and stops
+counting. It never changes a
 clone, never creates or removes a link, and takes no lock, so a `link` or
 `unlink` run in progress neither blocks it nor is disturbed by it. The only
 thing it writes is the fetch stamp below.
@@ -226,9 +232,13 @@ script through an interpreter other than `bash`, such as `sh
 /path/link-skills.sh hook`, is dead in the same way: `/bin/sh` is `dash` on
 many systems and the script fails there at its first bashism, at every session
 start, so it is repointed and the run reports that it replaced a hook that ran
-the script through that interpreter. `bash` spelled as an absolute path, and a
-command that runs the script directly with no interpreter at all, both count as
-this hook. An entry whose script
+the script through that interpreter. A bare `bash` is resolved on `PATH` at
+every session start, so it counts as this hook; `bash` spelled as an absolute
+path counts only while that path holds an executable file, and an entry such as
+`/removed/bin/bash /path/link-skills.sh hook` is dead, so it is repointed and
+the run reports that it replaced a hook whose interpreter is gone. A command
+that runs the script directly with no interpreter at all counts as this hook
+too. An entry whose script
 file is there but whose `--sources` or `--assembly` names another installation
 runs an assembly this run is not for, so it is rewritten to the current
 command and the run reports that it replaced a hook for another installation;
@@ -241,7 +251,9 @@ that runs a
 different script, such as `custom-link-skills.sh hook`, is another tool's, so
 it is kept as it is and this hook is added beside it. A file it creates itself gets mode
 `0600` and no backup. A backup name already in use
-gets a `.1`, `.2` suffix, so no earlier backup is overwritten. A runtime whose
+gets a `.1`, `.2` suffix, so no earlier backup is overwritten. The name is
+reserved, by creating the file, before the copy runs, so two runs inside the
+same second never choose the same one. A runtime whose
 home directory does not exist yet is skipped and named in the output. The JSON
 merge needs `python3`; without it the command prints the group to add by hand
 and exits 1.
