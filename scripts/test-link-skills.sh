@@ -2921,6 +2921,33 @@ check_reports_orphan_link_as_error() {
 	assert_absent "$HOME/.agents/skills/beta" "link prunes the orphan"
 }
 
+# A linked name that a second source starts providing too is refused as a
+# duplicate, so it reaches the manifest pass with no candidate. 'link' keeps
+# that link on purpose, so check must not call it an orphan and promise a
+# prune that will never happen.
+check_keeps_duplicate_link_not_orphan() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "link"
+	mkskill "$CASE_DIR/two" alpha
+	add_source "$CASE_DIR/two"
+
+	ls_run check
+	assert_rc 1 "check with two sources for alpha"
+	assert_out_has "duplicate skill name 'alpha'" "the duplicate is still an error"
+	assert_out_has "link kept: alpha; more than one source provides it" \
+		"the kept link is explained"
+	assert_out_lacks "link orphan" "a kept link is not an orphan"
+
+	ls_run link
+	assert_rc 1 "link with two sources for alpha"
+	assert_out_has "kept the existing link" "link keeps it, as check said"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"alpha still points at the first source"
+}
+
 # A block scalar header may carry a trailing comment. The comment must not stop
 # the header from being recognised, or the two marker characters read as the
 # whole description and an empty body passes.
@@ -3252,6 +3279,94 @@ validator_folds_plain_scalar_continuation() {
 	fi
 }
 
+# YAML reads ": " and a trailing ":" inside an unquoted value as a mapping
+# indicator and refuses the document. A parser that measures the text anyway
+# accepts a file no runtime can load.
+validator_rejects_mapping_indicator_in_plain_scalar() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/map-inline/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: hello: world\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/map-inline/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/map-inline" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a colon and a space in a plain scalar must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 is not valid YAML"*) ;;
+	*) fail "the failure must name line 3: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/map-trailing/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: hello:\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/map-trailing/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/map-trailing" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a plain scalar that ends with a colon must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 is not valid YAML"*) ;;
+	*) fail "the trailing colon must be reported by number: $out" ;;
+	esac
+
+	# The indicator arrives on the continuation line, so the check must look at
+	# the folded value and not at the header line alone.
+	mkdir -p "$CASE_DIR/map-continued/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description that runs on to\n'
+		printf '  note: x\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/map-continued/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/map-continued" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an indicator on a continuation line must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 is not valid YAML"*) ;;
+	*) fail "the continued indicator must name line 3: $out" ;;
+	esac
+
+	# A colon followed by anything else is text: a URL and a ratio both stay
+	# valid.
+	mkdir -p "$CASE_DIR/map-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: see https://example.com/x and ratio 1:2\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/map-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/map-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a URL and a ratio must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A quoted scalar runs to its closing quote. A "#" inside the quotes is part
 # of the text, a comment after the closing quote is not, and the escapes are
 # resolved before the value is measured.
@@ -3313,6 +3428,77 @@ validator_quoted_scalar_edge_cases() {
 	case "$out" in
 	*"1-1024 chars"*) ;;
 	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
+# A quoted value that never closes, or that carries text after the closing
+# quote, is refused by every YAML loader. Falling back to the plain scalar
+# reader accepts it and measures the quotes as part of the text.
+validator_rejects_unterminated_quote() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/unterminated/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "unterminated\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/unterminated/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/unterminated" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an unterminated quoted description must fail: $out"
+	fi
+	case "$out" in
+	*'"description" has an unterminated or malformed quoted scalar'*) ;;
+	*) fail "the failure must name the quoted scalar: $out" ;;
+	esac
+	case "$out" in
+	*"1-1024 chars"*) fail "the length must not be reported as well: $out" ;;
+	*) ;;
+	esac
+
+	# The quote closes, but the text after it is not a comment.
+	mkdir -p "$CASE_DIR/after-quote/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf "description: 'a' b\n"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/after-quote/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/after-quote" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "text after a closing quote must fail: $out"
+	fi
+	case "$out" in
+	*'"description" has an unterminated or malformed quoted scalar'*) ;;
+	*) fail "the trailing text must name the quoted scalar: $out" ;;
+	esac
+
+	# A comment after the closing quote is still allowed.
+	mkdir -p "$CASE_DIR/quote-comment/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a quoted description" # note\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/quote-comment/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/quote-comment" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment after the closing quote must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
 	esac
 }
 
@@ -5554,6 +5740,74 @@ install_hooks_replaces_missing_interpreter() {
 	assert_out_has "already runs the hook" "a bare bash counts as ours"
 }
 
+# An entry carrying the type and the timeout this script installs, so that the
+# command alone decides what the merge makes of it.
+write_installed_hook_settings() {
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "command",' \
+		"            \"command\": \"$2\"," \
+		'            "timeout": 60' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$1"
+}
+
+# An entry with no interpreter has the kernel run the file itself, so without
+# the executable bit every session start ends in "Permission denied" where
+# nobody reads it. That entry is dead and is repointed like any other stale
+# one. With the bit back it is ours again: bash reads the script either way.
+install_hooks_replaces_non_executable_direct_script() {
+	local copy file n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	# The run under test is this copy, so the command it generates names it
+	# and the entry below names the same file.
+	copy="$CASE_DIR/link-skills.sh"
+	cp "$SOURCE_SCRIPT" "$copy"
+	chmod 644 "$copy"
+	LS="$copy"
+	write_installed_hook_settings "$file" "$copy hook"
+
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a direct entry that cannot run"
+	assert_out_has "replaced a stale hook in $file" "the replacement is reported"
+	assert_file_has "$file" "bash $copy hook" "the generated command is installed"
+	n=$(count_in_file "$file" "link-skills.sh hook")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the replacement is recognised"
+
+	# The same entry against a file the kernel will run is live.
+	chmod 755 "$copy"
+	write_installed_hook_settings "$file" "$copy hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an executable direct entry"
+	assert_out_has "already runs the hook" "a direct entry that runs counts as ours"
+}
+
 # The backup name is reserved when it is chosen, not merely found free. Two
 # install runs inside the same second would otherwise both see the timestamped
 # name absent, both pick it, and the second copy would land on the first
@@ -5589,6 +5843,85 @@ install_hooks_backup_name_is_reserved() {
 	if [ -s "$first" ] || [ -s "$second" ]; then
 		fail "a reserved name should be an empty file"
 	fi
+}
+
+# A cp shim that writes the settings file behind the run's back. The first call
+# whose arguments name a backup, once only, rewrites the file named by
+# LS_TEST_CP_SETTINGS with a key the run never wrote and then goes to the real
+# cp. That lands the change between the merge's read and the rename, which is
+# the window this case is about. The single-quoted lines are shim source, not
+# expansions.
+# shellcheck disable=SC2016
+make_meddling_cp() {
+	local dir real
+	dir=$1
+	real=$(command -v cp)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'if [ -n "${LS_TEST_CP_SETTINGS:-}" ] && [ -n "${LS_TEST_CP_STATE:-}" ] &&' \
+		'	[ ! -e "$LS_TEST_CP_STATE" ]; then' \
+		'	for a in "$@"; do' \
+		'		case "$a" in' \
+		'		*.bak-*)' \
+		'			: >"$LS_TEST_CP_STATE"' \
+		'			printf "%s\n" "{ \"meddled\": true, \"hooks\": {} }" >"$LS_TEST_CP_SETTINGS"' \
+		'			break' \
+		'			;;' \
+		'		esac' \
+		'	done' \
+		'fi' \
+		"exec \"$real\" \"\$@\"" >"$dir/cp"
+	chmod +x "$dir/cp"
+}
+
+# The merge reads the settings file, python3 runs, and the rename puts the
+# result back. A write that lands in between would be lost by that rename, and
+# the backup taken in between does not hold it either, so the run must leave
+# the file alone and say so.
+install_hooks_refuses_when_settings_changed_underneath() {
+	local file shims n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	printf '%s\n' '{ "hooks": {} }' >"$file"
+
+	shims="$CASE_DIR/shims"
+	make_meddling_cp "$shims"
+	LS_TEST_CP_SETTINGS="$file"
+	LS_TEST_CP_STATE="$CASE_DIR/meddled-once"
+	export LS_TEST_CP_SETTINGS LS_TEST_CP_STATE
+	use_shims "$shims"
+	ls_run install-hooks
+	drop_shims
+	unset LS_TEST_CP_SETTINGS LS_TEST_CP_STATE
+
+	assert_rc 1 "install-hooks over a file that changed underneath"
+	assert_out_has "changed while install-hooks was running" "the refusal is reported"
+	assert_out_has "run install-hooks again" "the next step is named"
+	assert_file_has "$file" "meddled" "the concurrent edit survives"
+	assert_file_lacks "$file" "link-skills.sh hook" "no entry was written"
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "expected no backup, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name '.link-skills-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "expected no temporary file left behind, found $n"
+	fi
+
+	# Nothing meddling this time, so the same run installs the hook.
+	ls_run install-hooks
+	assert_rc 0 "install-hooks with nothing writing underneath"
+	assert_out_has "added the SessionStart hook" "the hook is added"
+	assert_file_has "$file" "bash $LS hook" "the generated command is installed"
+	assert_file_has "$file" "meddled" "the concurrent edit is still there"
 }
 
 # A source reached through a symlink alias records its links under the
@@ -5759,6 +6092,7 @@ main() {
 	run_case root_alias_assembly_refused
 	run_case absent_parent_root_alias_refused
 	run_case check_reports_orphan_link_as_error
+	run_case check_keeps_duplicate_link_not_orphan
 	run_case symlink_then_parent_resolves_physically
 	run_case manifest_write_failure_keeps_old_manifest
 	run_case manifest_write_failure_restores_repointed_link
@@ -5797,12 +6131,14 @@ main() {
 	run_case settings_mode_preserved
 	run_case install_hooks_backups_never_overwritten
 	run_case install_hooks_backup_name_is_reserved
+	run_case install_hooks_refuses_when_settings_changed_underneath
 	run_case install_hooks_leaves_minified_file_unchanged
 	run_case install_hooks_replaces_dead_script_path
 	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
 	run_case install_hooks_replaces_sh_invocation
 	run_case install_hooks_replaces_missing_interpreter
+	run_case install_hooks_replaces_non_executable_direct_script
 	run_case source_alias_missing_keeps_links
 	run_case manifest_two_column_lines_still_parse
 	run_case validator_folds_block_scalar_description
@@ -5827,7 +6163,9 @@ main() {
 	run_case validator_rejects_malformed_frontmatter
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
+	run_case validator_rejects_mapping_indicator_in_plain_scalar
 	run_case validator_quoted_scalar_edge_cases
+	run_case validator_rejects_unterminated_quote
 	run_case validator_block_scalar_keeps_internal_spaces
 	run_case validator_quoted_escaped_line_break
 	run_case validator_indented_delimiter_is_content

@@ -98,6 +98,14 @@ const BLOCK_SCALAR_RE = /^[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)$/;
 const BLOCK_INDENT_RE = /[1-9]/;
 
 /**
+ * The mapping indicator inside a plain scalar: a ":" followed by a space or a
+ * tab, or a ":" at the end of the value. YAML reads either as the start of a
+ * nested mapping and refuses the document. A ":" followed by any other
+ * character, as in "https://example.com" or "ratio 1:2", is ordinary text.
+ */
+const MAPPING_INDICATOR_RE = /:[ \t]|:$/;
+
+/**
  * Raw unquoted values that YAML reads as something other than a string: the
  * empty flow sequence and mapping, and the null spellings. A description that
  * is any of these reaches a runtime as null or as a list, not as text.
@@ -648,14 +656,33 @@ function parseFrontmatter(lines, firstLineNumber) {
       continue;
     }
 
+    if (rest.startsWith('"') || rest.startsWith("'")) {
+      // readQuotedScalar refused the value: the quote never closes before the
+      // frontmatter ends, or something other than a comment follows the
+      // closing quote. No YAML loader reads such a document, so reading on as
+      // a plain scalar would accept what every runtime rejects. The raw text
+      // is kept as the value so the length check stays quiet about it.
+      invalid.push(`"${key}" has an unterminated or malformed quoted scalar`);
+      fields.set(key, { value: rest, raw: rest, quoted: true, block: false });
+      continue;
+    }
+
     const plain = readPlainScalar(rest, lines, i);
     i = plain.end;
-    if (/^[[{]/.test(plain.value) && !flowCollectionCloses(plain.value)) {
+    const flow = /^[[{]/.test(plain.value);
+    if (flow && !flowCollectionCloses(plain.value)) {
       invalid.push(lineNumber);
     } else if (/^[|>]/.test(plain.value)) {
       // The block header pattern already took every header YAML accepts, so a
       // value that still starts with "|" or ">" is a malformed header such as
       // "|0". No plain scalar may start with an indicator character either.
+      invalid.push(lineNumber);
+    } else if (rest !== "" && !flow && MAPPING_INDICATOR_RE.test(plain.value)) {
+      // YAML reads ": " and a trailing ":" as a mapping indicator, so this
+      // text is not the scalar it looks like. A header line with no value is
+      // left alone: the indented lines under it are a nested mapping, not a
+      // plain scalar this parser folds. Inside a flow collection the same
+      // characters are that collection's own keys.
       invalid.push(lineNumber);
     }
     fields.set(key, {

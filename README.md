@@ -238,7 +238,9 @@ path counts only while that path holds an executable file, and an entry such as
 `/removed/bin/bash /path/link-skills.sh hook` is dead, so it is repointed and
 the run reports that it replaced a hook whose interpreter is gone. A command
 that runs the script directly with no interpreter at all counts as this hook
-too. An entry whose script
+only while that file carries its executable bit; without it the kernel refuses
+the file at every session start, so the entry is dead and is repointed like a
+stale one. An entry whose script
 file is there but whose `--sources` or `--assembly` names another installation
 runs an assembly this run is not for, so it is rewritten to the current
 command and the run reports that it replaced a hook for another installation;
@@ -253,7 +255,9 @@ it is kept as it is and this hook is added beside it. A file it creates itself g
 `0600` and no backup. A backup name already in use
 gets a `.1`, `.2` suffix, so no earlier backup is overwritten. The name is
 reserved, by creating the file, before the copy runs, so two runs inside the
-same second never choose the same one. A runtime whose
+same second never choose the same one. A settings file that another process or
+an editor changes while the command runs is left alone, and the command asks to
+be run again. A runtime whose
 home directory does not exist yet is skipped and named in the output. The JSON
 merge needs `python3`; without it the command prints the group to add by hand
 and exits 1.

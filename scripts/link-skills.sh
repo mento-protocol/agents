@@ -2317,6 +2317,14 @@ cmd_check() {
 		if cand_index_of "$name" >/dev/null; then
 			continue
 		fi
+		# A second source now offers this name, so the duplicate check refused
+		# it and it has no candidate. 'link' keeps the existing link on
+		# purpose, so this is not an orphan. The candidate pass already
+		# reported the duplicate as an error, so check still fails.
+		if dup_has "$name"; then
+			info "  link kept: $name; more than one source provides it"
+			continue
+		fi
 		entry="$ASSEMBLY_DIR/$name"
 		# A source that is missing or unreadable this run produces no candidate,
 		# and 'link' keeps its links rather than pruning them. Say that, instead
@@ -2858,7 +2866,13 @@ for group in groups:
         # project and usually no file at all. It is stale wherever this
         # command happens to run from, even when the current directory holds
         # a file of that name right now.
-        if not (os.path.isabs(token) and os.path.isfile(token)):
+        # An entry with no interpreter runs the file itself, so without the
+        # executable bit the kernel refuses it and every session start ends in
+        # "Permission denied". An entry with an interpreter is unaffected:
+        # bash reads a script whatever its mode.
+        if not (os.path.isabs(token) and os.path.isfile(token)) or (
+            not interpreter and not os.access(token, os.X_OK)
+        ):
             stale.append(entry)
             continue
         # The script is bash, and /bin/sh is dash on many systems. An entry
@@ -3000,10 +3014,12 @@ backup_path() {
 }
 
 install_hook_file() {
-	local parent file merged status tmp stamp real created bak
+	local parent file merged status tmp stamp real created bak snap
 	parent=$1
 	file=$2
 	created=0
+	bak=""
+	snap=""
 	if [ ! -d "$parent" ]; then
 		info "$PROG: $parent does not exist; skipped its SessionStart hook"
 		return 0
@@ -3041,12 +3057,26 @@ install_hook_file() {
 		print_hook_snippet >&2
 		return 1
 	fi
+	# The file as the merge is about to read it. Another process or an editor
+	# can write it while python3 runs, and the rename below would then put this
+	# older content back over that write.
+	snap=$(mktemp "$(dirname "$file")/.link-skills-snap.XXXXXX" 2>/dev/null) || snap=""
+	# mktemp creates the name at 600, and a copy onto an existing file keeps
+	# that mode.
+	if [ -z "$snap" ] || ! cp "$file" "$snap"; then
+		if [ -n "$snap" ]; then
+			rm -f "$snap"
+		fi
+		err "could not read $file; left it unchanged"
+		return 1
+	fi
 	merged=""
 	merged=$(merge_hook_json "$file") || merged=""
 	status=$(printf '%s\n' "$merged" | sed -n '1p')
 	tmp=$(printf '%s\n' "$merged" | sed -n '2p')
 	# An installed hook leaves the file alone: no reformatting, no backup.
 	if [ "$status" = "unchanged" ]; then
+		rm -f "$snap"
 		info "$PROG: $file already runs the hook"
 		return 0
 	fi
@@ -3054,6 +3084,7 @@ install_hook_file() {
 		if [ -n "$tmp" ]; then
 			rm -f "$tmp"
 		fi
+		rm -f "$snap"
 		err "could not merge the SessionStart hook into $file"
 		return 1
 	fi
@@ -3068,7 +3099,7 @@ install_hook_file() {
 			if [ -n "$bak" ]; then
 				rm -f "$bak"
 			fi
-			rm -f "$tmp"
+			rm -f "$tmp" "$snap"
 			err "could not back up $file; left it unchanged"
 			return 1
 		fi
@@ -3077,6 +3108,22 @@ install_hook_file() {
 	if [ "$QUIET" -eq 0 ]; then
 		diff -u "$file" "$tmp" || true
 	fi
+	# The merge read the file, so anything written to it since then would be
+	# lost by the rename, and the backup taken in between does not hold it
+	# either. The window left between this compare and the rename is a few
+	# syscalls wide and is accepted: closing it needs a lock every editor of
+	# the file would have to take.
+	if ! cmp -s "$file" "$snap"; then
+		rm -f "$tmp" "$snap"
+		# The file was not replaced, so the backup this run created holds
+		# nothing new and would only push the next run onto the next suffix.
+		if [ -n "$bak" ]; then
+			rm -f "$bak"
+		fi
+		err "$file changed while install-hooks was running; left it unchanged, run install-hooks again"
+		return 1
+	fi
+	rm -f "$snap"
 	if ! mv -f "$tmp" "$file"; then
 		rm -f "$tmp"
 		err "could not write $file"
