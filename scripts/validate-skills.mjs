@@ -44,21 +44,34 @@
 // check, not a full YAML parser: a line must be blank, a comment, a top-level
 // "key: value" line, or an indented line that belongs to the value above it,
 // and a top-level value that opens a flow collection ("[" or "{") must close
-// it on the same logical scalar. Indentation is spaces only, so a line
-// indented with a tab is refused, as is a plain value that starts with a
-// reserved indicator ("- ", "? ", ": ", ",", "@", "`" or "%"). The reserved
-// indicator and the mapping indicator (": " or a trailing ":") are read on the
-// folded value, so a continuation line under a key with no inline value is
-// refused the same way an inline value is, unless the first continuation line
-// opens a list or a mapping. Anything else is reported as "frontmatter line N
-// is not valid YAML". A file that passes this check can still hold YAML the
-// check does not model.
+// it on the same logical scalar. An indented line that no value above it takes
+// is refused, whether it sits before the first key or after a value that takes
+// no continuation, and a comment line ends a plain scalar that already holds
+// text, so the indented lines under that comment take no value either.
+// Indentation is spaces only, so a line indented with a tab is refused, as is
+// a plain value that starts with a reserved indicator ("- ", "? ", ": ", ",",
+// "@", "`", "%", "]" or "}"). A "key:" line needs a space, a tab or the end of
+// the line after its colon, so "name:x" is a plain scalar and not a key at
+// all. The reserved indicator and the mapping indicator (": " or a trailing
+// ":") are read on the folded value, so a continuation line under a key with
+// no inline value is refused the same way an inline value is, unless the first
+// continuation line opens a list or a mapping. Anything else is reported as
+// "frontmatter line N is not valid YAML". A file that passes this check can
+// still hold YAML the check does not model.
+//
+// The frontmatter is also scanned for the characters YAML forbids in a
+// document: the C0 controls except tab, LF and CR, DEL, the C1 controls except
+// U+0085, the surrogate range, and U+FFFE and U+FFFF. One of them is reported
+// as "frontmatter line N holds a control character U+XXXX", because no loader
+// reads the document at all.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
 //     metadata files (.DS_Store, .localized, Thumbs.db), which are ignored
 //     the same way scripts/link-skills.sh ignores them
 //   - a SKILL.md nested deeper than skills/<name>/SKILL.md
+//   - a directory under a skill's references/ directory; item 6 of the
+//     AGENTS.md promotion checklist keeps references/ one level deep
 //   - a SKILL.md of more than 500 lines, the cap item 6 of the AGENTS.md
 //     promotion checklist sets; a trailing newline does not add a line
 //
@@ -137,13 +150,15 @@ const COMPLEX_KEY_RE = /^\?(?:[ \t]|$)/;
 
 /**
  * A reserved indicator at the head of a plain scalar: "-", "?" or ":" that a
- * space, a tab or the end of the value follows, and ",", "@", "`" or "%"
- * anywhere at the head. YAML reads the first three as a sequence entry, a
- * complex key and a mapping value, and refuses the other four outright, so
- * none of these is the text it looks like. Followed by another character the
- * first three are ordinary text, as in "-foo" or "?x".
+ * space, a tab or the end of the value follows, and ",", "@", "`", "%", "]"
+ * or "}" anywhere at the head. YAML reads the first three as a sequence entry,
+ * a complex key and a mapping value, and refuses the other six outright, so
+ * none of these is the text it looks like: "]" and "}" close a flow collection
+ * that never opened. Followed by another character the first three are
+ * ordinary text, as in "-foo" or "?x", and a closing bracket inside the value,
+ * as in "a]b", is text as well.
  */
-const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%])/;
+const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%\]}])/;
 
 /**
  * Raw unquoted values that YAML reads as something other than a string: the
@@ -234,6 +249,42 @@ const YAML_SPACE_RE =
  */
 function trimYamlSpace(value) {
   return value.replace(YAML_SPACE_RE, "");
+}
+
+/**
+ * True when a code point is one YAML forbids anywhere in a document: the C0
+ * controls except tab, LF and CR, DEL, the C1 controls except U+0085, the
+ * surrogate range, and U+FFFE and U+FFFF. A loader refuses the whole document
+ * on any of them, so the runtime never sees the frontmatter.
+ */
+function isForbiddenCodePoint(code) {
+  if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
+  if (code <= 0x08 || (code >= 0x0b && code <= 0x1f)) return true;
+  if (code === 0x7f) return true;
+  // U+0085 is the one C1 character YAML keeps: it is a line break there.
+  if (code >= 0x80 && code <= 0x9f) return code !== 0x85;
+  if (code >= 0xd800 && code <= 0xdfff) return true;
+  return code === 0xfffe || code === 0xffff;
+}
+
+/**
+ * The first character of `lines` that YAML forbids, as { line, code } with the
+ * line number in the file and the "U+XXXX" spelling of the character, or null
+ * when the text holds none. The scan runs by code point, so an emoji stays one
+ * character and a lone surrogate is still caught.
+ */
+function findControlCharacter(lines, firstLineNumber) {
+  for (let i = 0; i < lines.length; i += 1) {
+    for (const ch of lines[i]) {
+      const code = ch.codePointAt(0);
+      if (!isForbiddenCodePoint(code)) continue;
+      return {
+        line: firstLineNumber + i,
+        code: `U+${code.toString(16).toUpperCase().padStart(4, "0")}`,
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -607,14 +658,23 @@ function readBlockScalar(header, lines, start) {
  * line at column zero, such as the next "key:" line, or the end of the
  * frontmatter ends the value.
  *
- * Returns { value, end }, where `end` is the index of the last line consumed.
- * Trailing blank lines are never consumed, so a blank line before a
- * column-zero key leaves that key for the caller to read.
+ * A comment-only line ends a scalar that already holds content: YAML reads the
+ * comment as the end of the value, so an indented line after it belongs to no
+ * value and no loader reads the document. A header with an empty inline value
+ * has no content yet, so comment lines before its first continuation are
+ * skipped as before.
+ *
+ * Returns { value, end, invalid }, where `end` is the index of the last line
+ * consumed and `invalid` holds the index of every line that follows the
+ * comment that ended the value. Trailing blank lines are never consumed, so a
+ * blank line before a column-zero key leaves that key for the caller to read.
  */
 function readPlainScalar(first, lines, start) {
   let value = stripInlineComment(first);
   let end = start;
   let blanks = 0;
+  let ended = false;
+  const invalid = [];
   for (let i = start + 1; i < lines.length; i += 1) {
     const next = lines[i].replace(/\r$/, "");
     if (next.trim() === "") {
@@ -623,7 +683,13 @@ function readPlainScalar(first, lines, start) {
     }
     if (indentWidth(next) === 0) break;
     const part = stripInlineComment(next.trim());
-    if (part !== "") {
+    if (ended) {
+      // The value ended at the comment above, so only another comment may
+      // follow it here.
+      if (part !== "") invalid.push(i);
+    } else if (part === "" && value !== "") {
+      ended = true;
+    } else if (part !== "") {
       if (value === "") {
         value = part;
       } else {
@@ -634,7 +700,7 @@ function readPlainScalar(first, lines, start) {
     }
     end = i;
   }
-  return { value, end };
+  return { value, end, invalid };
 }
 
 /**
@@ -765,19 +831,24 @@ function parseFrontmatter(lines, firstLineNumber) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].replace(/\r$/, "");
     const lineNumber = firstLineNumber + i;
-    const match = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line);
+    // A key needs a space, a tab or the end of the line after its colon. YAML
+    // reads "name:x" as one plain scalar instead, so the runtime gets no such
+    // field and the line is refused below.
+    const match = /^([A-Za-z0-9_-]+):(?:[ \t](.*))?$/.exec(line);
     if (!match) {
-      // A blank line, a comment and an indented line are all part of the value
-      // above them or of nothing at all. A line at column zero that is none of
-      // those cannot be read as YAML here.
+      // A blank line and a comment belong to no value and need none. Every
+      // other line here is text no value took: a value above consumes its own
+      // continuation lines, so an indented line that still reaches this point
+      // sits before the first key or under a value that takes no continuation,
+      // and YAML has nothing to attach it to.
       const text = line.trim();
-      if (text !== "" && !text.startsWith("#") && indentWidth(line) === 0) {
+      if (text !== "" && !text.startsWith("#")) {
         invalid.push(lineNumber);
       }
       continue;
     }
     const key = match[1];
-    const rest = match[2].trim();
+    const rest = (match[2] ?? "").trim();
 
     // A block scalar header may carry a trailing comment, as in
     // `description: >- # note`. The comment is removed before the header is
@@ -894,6 +965,14 @@ function parseFrontmatter(lines, firstLineNumber) {
       (SEQUENCE_ENTRY_RE.test(continuation.text) ||
         COMPLEX_KEY_RE.test(continuation.text) ||
         opensMappingEntry(continuation.text));
+    // A comment ends a plain scalar, so text after it is invalid. A nested
+    // collection is not a plain scalar: a comment between two of its entries
+    // is fine, and this parser does not read the entries themselves.
+    if (!collection) {
+      for (const index of plain.invalid) {
+        invalid.push(firstLineNumber + index);
+      }
+    }
     const flow = /^[[{]/.test(plain.value);
     if (flow && !flowCollectionCloses(plain.value)) {
       invalid.push(lineNumber);
@@ -971,6 +1050,36 @@ function validateSkill(name) {
     }
   }
 
+  // Item 6 of the AGENTS.md promotion checklist keeps references/ one level
+  // deep. A directory under it buries files no reader is pointed at, so the
+  // depth is checked here instead of in review.
+  const referencesDir = join(skillDir, "references");
+  let referenceEntries = [];
+  try {
+    referenceEntries = readdirSync(referencesDir, { withFileTypes: true });
+  } catch {
+    // No references/ directory, or a file under that name. Either way there is
+    // nothing to walk.
+    referenceEntries = [];
+  }
+  for (const entry of referenceEntries) {
+    let isDir = entry.isDirectory();
+    if (!isDir && entry.isSymbolicLink()) {
+      // A symlink to a directory nests the tree the same way a real one does.
+      // A broken link points at nothing, so it is left alone.
+      try {
+        isDir = statSync(join(referencesDir, entry.name)).isDirectory();
+      } catch {
+        isDir = false;
+      }
+    }
+    if (isDir) {
+      problems.push(
+        `skills/${name}: references/${entry.name} is a directory; references/ must be one level deep`,
+      );
+    }
+  }
+
   const raw = readFileSync(skillMdPath, "utf8");
   const lines = raw.split("\n");
 
@@ -1008,7 +1117,20 @@ function validateSkill(name) {
 
   // The frontmatter starts on line 2 of the file, right after the opening
   // "---", so that is the number of the first line handed to the parser.
-  const { fields, invalid } = parseFrontmatter(lines.slice(1, closeIndex), 2);
+  const frontmatterLines = lines.slice(1, closeIndex);
+
+  // The scan runs before the parse. A loader refuses the document on a
+  // forbidden character, so reading on would measure a description no runtime
+  // ever receives and count the character toward its length.
+  const control = findControlCharacter(frontmatterLines, 2);
+  if (control !== null) {
+    problems.push(
+      `skills/${name}: frontmatter line ${control.line} holds a control character ${control.code}`,
+    );
+    return;
+  }
+
+  const { fields, invalid } = parseFrontmatter(frontmatterLines, 2);
   for (const entry of invalid) {
     problems.push(
       typeof entry === "number"

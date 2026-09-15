@@ -3648,6 +3648,152 @@ validator_rejects_reserved_leading_indicator() {
 	done
 }
 
+# A plain value may not open with "]" or "}" either: the bracket closes a flow
+# collection that never opened, so YAML refuses the document. The same bracket
+# inside the value is ordinary text.
+validator_rejects_closing_flow_indicator_start() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	n=0
+	for form in ']foo' '}foo'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/closing-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/closing-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/closing-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		*"frontmatter line 3 is not valid YAML"*) ;;
+		*) fail "description '$form' must be reported by line: $out" ;;
+		esac
+	done
+
+	mkdir -p "$CASE_DIR/closing-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a]b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/closing-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/closing-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a bracket inside the value must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# A comment line ends a plain scalar that already holds text, so an indented
+# line under the comment belongs to no value and no loader reads the document.
+# Folding it in would measure a description the runtime never receives. A
+# header with an empty inline value has no text yet, so the comment lines
+# before its first continuation are still skipped.
+validator_rejects_continuation_after_comment() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/after-comment/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: foo\n'
+		printf ' # note\n'
+		printf ' bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/after-comment/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/after-comment" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a continuation under a comment must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 5 is not valid YAML"*) ;;
+	*) fail "the failure must name the continuation line: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/comment-tail/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: foo\n'
+		printf ' # note\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-tail/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-tail" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment that ends the value must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/comment-first/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  # note\n'
+		printf '  bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-first/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-first" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment before the first continuation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A nested collection is not a plain scalar: a comment between two of its
+	# entries ends nothing, and YAML reads both entries.
+	mkdir -p "$CASE_DIR/comment-in-list/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  - a\n'
+		printf '  # note\n'
+		printf '  - b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-in-list/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-in-list" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment between two list entries must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # Under "description:" a "foo: bar" line is a mapping and a "- item" line is a
 # list, so a runtime that reads either gets no text at all. Folding them into
 # a string hides that. Other keys may nest a collection, and a continuation
@@ -6652,6 +6798,261 @@ validator_rejects_malformed_frontmatter() {
 	esac
 }
 
+# A key needs a space, a tab or the end of the line after its colon. YAML reads
+# "name:noted" as one plain scalar, so a parser that takes it as a key reports
+# fields the runtime never receives.
+validator_rejects_missing_separation_after_colon() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/nosep-name/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name:noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nosep-name/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nosep-name" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a name with no space after the colon must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 2 is not valid YAML"*) ;;
+	*) fail "the failure must name line 2: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nosep-desc/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:foo\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nosep-desc/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nosep-desc" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a description with no space after the colon must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 is not valid YAML"*) ;;
+	*) fail "the failure must name line 3: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/sep-ok/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: foo\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/sep-ok/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/sep-ok" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a space after the colon must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# An indented line belongs to the value above it. Where there is no such value,
+# YAML has nothing to attach it to and refuses the document, so ignoring the
+# line would pass a frontmatter no runtime reads.
+validator_rejects_orphan_indented_line() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/orphan-first/skills/noted"
+	{
+		printf -- '---\n'
+		printf ' garbage\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/orphan-first/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/orphan-first" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an indented line before the first key must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 2 is not valid YAML"*) ;;
+	*) fail "the failure must name line 2: $out" ;;
+	esac
+
+	# A quoted scalar closes on its own line and takes no continuation, so the
+	# line under it is an orphan too.
+	mkdir -p "$CASE_DIR/orphan-quoted/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "x"\n'
+		printf '  more\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/orphan-quoted/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/orphan-quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an indented line after a closed quote must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the failure must name line 4: $out" ;;
+	esac
+
+	# The rule is strict enough to reach the repository's own skills, so they
+	# are validated here as well.
+	out=$(node "$VALIDATOR" "$HERE/.." 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "the repository's own skills must still validate: $out"
+	fi
+}
+
+# A control character makes the document unreadable for every YAML loader, so
+# the frontmatter reaches no runtime. Measuring a description that holds one
+# reports a length nothing ever sees.
+validator_rejects_control_character() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/control-c0/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a\001b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/control-c0/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/control-c0" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a control character must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 holds a control character U+0001"*) ;;
+	*) fail "the control character must be named: $out" ;;
+	esac
+
+	# U+0085 is a line break in YAML, not a forbidden character. Inside a quoted
+	# scalar it folds to a space, so the value stays readable text.
+	mkdir -p "$CASE_DIR/control-nel/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\302\205b"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/control-nel/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/control-nel" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "U+0085 must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A tab is ordinary text inside a quoted scalar.
+	mkdir -p "$CASE_DIR/control-tab/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\tb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/control-tab/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/control-tab" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted tab must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# Item 6 of the AGENTS.md promotion checklist keeps references/ one level deep.
+# A directory under it buries files no reader is pointed at, and the nested
+# SKILL.md walk never sees them because they are not SKILL.md.
+validator_rejects_nested_references_dir() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/ref-deep/skills/noted/references/topic"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ref-deep/skills/noted/SKILL.md"
+	printf 'Detail.\n' >"$CASE_DIR/ref-deep/skills/noted/references/topic/detail.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ref-deep" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a directory under references/ must fail: $out"
+	fi
+	case "$out" in
+	*"references/topic is a directory; references/ must be one level deep"*) ;;
+	*) fail "the nested reference directory must be named: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/ref-flat/skills/noted/references"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ref-flat/skills/noted/SKILL.md"
+	printf 'Detail.\n' >"$CASE_DIR/ref-flat/skills/noted/references/detail.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ref-flat" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a file under references/ must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/ref-none/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/ref-none/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/ref-none" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a skill with no references/ must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A blank line before the first content line of a folded block is content: the
 # value starts with one newline for each of them. Dropping those newlines
 # measures a value the runtime never sees. The description length cannot show
@@ -7643,11 +8044,17 @@ main() {
 	run_case validator_multiline_quoted_scalar
 	run_case validator_rejects_non_string_name
 	run_case validator_rejects_malformed_frontmatter
+	run_case validator_rejects_missing_separation_after_colon
+	run_case validator_rejects_orphan_indented_line
+	run_case validator_rejects_control_character
+	run_case validator_rejects_nested_references_dir
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
 	run_case validator_rejects_mapping_indicator_on_later_continuation
 	run_case validator_rejects_reserved_leading_indicator
+	run_case validator_rejects_closing_flow_indicator_start
+	run_case validator_rejects_continuation_after_comment
 	run_case validator_rejects_nested_collection_value
 	run_case validator_decodes_quoted_continuation_value
 	run_case validator_quoted_scalar_edge_cases
