@@ -129,8 +129,13 @@ scripts/link-skills.sh check
 
 Reports drift in the assembly directory (missing, stale, collided, or foreign
 links) and, for each git source, how many commits it is behind its
-`origin`. It creates and removes no links. Entries the script did not create
-are not reported by `check`; they are left alone. A link that points at a
+`origin`. A branch that tracks nothing is measured against the default branch
+of `origin`, taken from `refs/remotes/origin/HEAD`, or, when that optional ref
+is missing, from `origin/main`, `origin/master`, or the only remote branch
+there is; when none of those settle it, `check` reports `behind unknown` and
+prints `default branch unknown; run: git remote set-head origin --auto`. It
+creates and removes no links. Entries the script did not create are not
+reported by `check`; they are left alone. A link that points at a
 skill directory other than the one the sources now produce is stale drift, and
 counts as a problem: run `link` to repoint it. A recorded link whose target
 directory still exists but no longer holds a `SKILL.md` is an orphan, and

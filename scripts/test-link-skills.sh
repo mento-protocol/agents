@@ -791,6 +791,94 @@ hook_pull_advice_quotes_branch() {
 		"the command links what the pull brought in"
 }
 
+# refs/remotes/origin/HEAD is optional in a clone. Reading a missing one as
+# "main" measures a "master" remote against a branch that is not there, so the
+# refs in the clone decide instead; when they cannot, check says how to record
+# the answer and nothing is guessed.
+hook_finds_master_default_without_origin_head() {
+	local bare seed clone obare oseed oclone
+	bare="$CASE_DIR/remote.git"
+	seed="$CASE_DIR/seed"
+	clone="$CASE_DIR/company"
+	git init --bare --quiet "$bare"
+	git -C "$bare" symbolic-ref HEAD refs/heads/master
+	git clone --quiet "$bare" "$seed" 2>/dev/null
+	git -C "$seed" symbolic-ref HEAD refs/heads/master
+	mkskill "$seed/skills" alpha
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "init"
+	git -C "$seed" push -q origin master
+	git clone --quiet "$bare" "$clone"
+	# git 2.47 and later write the ref back on the next fetch, which would
+	# hand the script the very answer this case withholds.
+	git -C "$clone" config remote.origin.followRemoteHEAD never
+	git -C "$clone" symbolic-ref --delete refs/remotes/origin/HEAD >/dev/null 2>&1
+	git -C "$clone" branch --unset-upstream >/dev/null 2>&1
+
+	write_sources
+	add_source "$clone/skills"
+	ls_run link
+	assert_rc 0 "link"
+
+	mkskill "$seed/skills" beta
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "add beta"
+	git -C "$seed" push -q origin master
+
+	ls_run hook
+	assert_rc 0 "hook without origin/HEAD"
+	assert_out_has "$clone is 1 commit(s) behind" \
+		"the master remote is measured"
+	assert_out_has "git pull --ff-only origin master" \
+		"the advice names the branch that exists"
+
+	ls_run check
+	assert_rc 0 "check without origin/HEAD"
+	assert_out_has "behind 1" "check measures against origin/master"
+	assert_out_lacks "default branch unknown" \
+		"the refs settled the default branch"
+
+	# Two remote branches, no origin/HEAD, and neither of them named main or
+	# master: there is nothing left to deduce from.
+	obare="$CASE_DIR/other.git"
+	oseed="$CASE_DIR/other-seed"
+	oclone="$CASE_DIR/other-clone"
+	git init --bare --quiet "$obare"
+	git -C "$obare" symbolic-ref HEAD refs/heads/trunk
+	git clone --quiet "$obare" "$oseed" 2>/dev/null
+	git -C "$oseed" symbolic-ref HEAD refs/heads/trunk
+	mkskill "$oseed/skills" gamma
+	gitc "$oseed" add -A
+	gitc "$oseed" commit -q -m "init"
+	git -C "$oseed" push -q origin trunk
+	git -C "$oseed" push -q origin trunk:release
+	git clone --quiet "$obare" "$oclone"
+	git -C "$oclone" config remote.origin.followRemoteHEAD never
+	git -C "$oclone" symbolic-ref --delete refs/remotes/origin/HEAD >/dev/null 2>&1
+	git -C "$oclone" branch --unset-upstream >/dev/null 2>&1
+
+	add_source "$oclone/skills"
+	ls_run link
+	assert_rc 0 "link with both sources"
+
+	mkskill "$oseed/skills" delta
+	gitc "$oseed" add -A
+	gitc "$oseed" commit -q -m "add delta"
+	git -C "$oseed" push -q origin trunk
+
+	ls_run check
+	assert_rc 0 "check with an unsettled default branch"
+	assert_out_has "behind unknown" "the count is not guessed"
+	assert_out_has "default branch unknown; run: git remote set-head origin --auto" \
+		"check names the command that records the default branch"
+
+	ls_run hook
+	assert_rc 0 "hook with an unsettled default branch"
+	assert_out_lacks "$oclone is" "the hook reports nothing for that source"
+	assert_out_has "$clone is 1 commit(s) behind" \
+		"the source it can measure is still reported"
+}
+
 # The manifest is what 'link' rewrites, and 'link' refuses a path that is not a
 # regular file. Reading that path as an empty list would have the hook call
 # every skill unlinked and recommend a run that cannot happen.
@@ -3940,6 +4028,238 @@ validator_rejects_nested_collection_value() {
 	case "$out" in
 	'skills/noted: "description" must be a plain string') ;;
 	*) fail "the quoted key must be reported once as a plain string: $out" ;;
+	esac
+}
+
+# "&" and "*" open an anchor and an alias, and a name must follow at once. A
+# validator that only refuses "&x" takes "&" alone and "& foo" for the text
+# they look like, while PyYAML refuses the whole document. Quoted, the same
+# character is ordinary text.
+validator_rejects_malformed_anchor() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	n=0
+	for form in '&' '*' '& foo' '* foo'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/anchor-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/anchor-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/anchor-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "description '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		'skills/noted: "description" must be a plain string') ;;
+		*) fail "description '$form' must be reported as a non-string: $out" ;;
+		esac
+	done
+
+	mkdir -p "$CASE_DIR/quoted-anchor/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "&"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/quoted-anchor/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/quoted-anchor" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted ampersand must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# A flow collection closes with its own delimiter. Counting brackets instead
+# takes "[Read}" and "{key]" for closed collections, while PyYAML refuses both.
+# Nesting still has to pass, and an opener that never closes still fails.
+validator_rejects_mismatched_flow_close() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# On the string fields a flow collection is refused as a non-string before
+	# its delimiters are read, so the fixtures sit under an optional key.
+	n=0
+	for form in '[Read}' '{key]' '[a'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-bad-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'allowed-tools: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-bad-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-bad-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "flow collection '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		'skills/noted: frontmatter line 4 is not valid YAML') ;;
+		*) fail "flow collection '$form' must be reported by its line: $out" ;;
+		esac
+	done
+
+	n=0
+	for form in '[a, [b]]' '{a: [1, 2]}'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-good-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'allowed-tools: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-good-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-good-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "flow collection '$form' must validate: $out"
+			continue
+		fi
+		case "$out" in
+		"validated 1 skills") ;;
+		*) fail "unexpected validator output for '$form': $out" ;;
+		esac
+	done
+}
+
+# A collection under an optional key is judged entry by entry, not by its first
+# line alone: a bare scalar among sequence entries, or among mapping entries,
+# is a document PyYAML refuses. A deeper line belongs to the entry above it,
+# and a comment between two entries is not an entry.
+validator_rejects_malformed_nested_collection() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/nested-seq-bad-entry/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf -- '  - a\n'
+		printf '  bad scalar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-seq-bad-entry/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-seq-bad-entry" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a bare scalar among sequence entries must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter line 6 is not valid YAML') ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-seq-deeper/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf -- '  - a\n'
+		printf '    more\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-seq-deeper/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-seq-deeper" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a deeper line under a sequence entry must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-map-bad-entry/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  team: x\n'
+		printf '  bad\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-map-bad-entry/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-map-bad-entry" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a bare scalar among mapping entries must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter line 6 is not valid YAML') ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-map-deeper/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  team: x\n'
+		printf '    nested: y\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-map-deeper/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-map-deeper" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a deeper line under a mapping entry must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-seq-comment/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf -- '  - a\n'
+		printf '  # note\n'
+		printf -- '  - b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-seq-comment/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-seq-comment" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment between sequence entries must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
 	esac
 }
 
@@ -7913,6 +8233,7 @@ main() {
 	run_case hook_notifies_when_behind
 	run_case hook_pull_command_names_remote_without_upstream
 	run_case hook_pull_advice_quotes_branch
+	run_case hook_finds_master_default_without_origin_head
 	run_case hook_reports_unusable_manifest
 	run_case hook_notifies_drift
 	run_case hook_notifies_collision
@@ -8056,6 +8377,9 @@ main() {
 	run_case validator_rejects_closing_flow_indicator_start
 	run_case validator_rejects_continuation_after_comment
 	run_case validator_rejects_nested_collection_value
+	run_case validator_rejects_malformed_anchor
+	run_case validator_rejects_mismatched_flow_close
+	run_case validator_rejects_malformed_nested_collection
 	run_case validator_decodes_quoted_continuation_value
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_rejects_unterminated_quote

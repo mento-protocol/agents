@@ -2011,13 +2011,33 @@ git_is_dirty() {
 	return 1
 }
 
+# refs/remotes/origin/HEAD is optional in a clone, and assuming "main" when it
+# is missing measures a "master" remote against a branch that does not exist.
+# So the refs already in the clone answer it instead: main, then master, then
+# the only branch when there is exactly one. Nothing here reaches the network;
+# the hook may only do that through its throttled fetch. When the refs do not
+# settle it the caller gets a failure, not a guess.
 git_default_branch() {
-	local ref
-	if ref=$(git -C "$1" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null); then
+	local root ref name only
+	root=$1
+	if ref=$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null); then
 		printf '%s\n' "${ref#refs/remotes/origin/}"
 		return 0
 	fi
-	printf 'main\n'
+	for name in main master; do
+		if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$name" >/dev/null 2>&1; then
+			printf '%s\n' "$name"
+			return 0
+		fi
+	done
+	only=$(git -C "$root" for-each-ref --format='%(refname)' refs/remotes/origin/ 2>/dev/null |
+		awk '{ sub(/^refs\/remotes\/origin\//, ""); if ($0 != "HEAD") { n++; last = $0 } } END { if (n == 1) print last }' ||
+		printf '')
+	if [ -n "$only" ]; then
+		printf '%s\n' "$only"
+		return 0
+	fi
+	return 1
 }
 
 # Upstream ref for the current branch, or origin/<default branch> when the
@@ -2031,7 +2051,9 @@ git_upstream() {
 			return 0
 		fi
 	fi
-	def=$(git_default_branch "$root")
+	if ! def=$(git_default_branch "$root"); then
+		return 1
+	fi
 	if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$def" >/dev/null 2>&1; then
 		printf 'origin/%s\n' "$def"
 		return 0
@@ -2045,13 +2067,16 @@ git_upstream() {
 # git allows ';' and '$' in a ref name, so the branch is quoted: the notice is
 # meant to be copied into a shell.
 git_pull_command() {
-	local root
+	local root def
 	root=$1
-	if git -C "$root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+	# A clone whose default branch is unknown is never measured, so no notice
+	# reaches here; the bare pull is what is left to say if one ever does.
+	if git -C "$root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1 ||
+		! def=$(git_default_branch "$root"); then
 		printf 'git pull --ff-only\n'
 		return 0
 	fi
-	printf 'git pull --ff-only origin %s\n' "$(shell_quote "$(git_default_branch "$root")")"
+	printf 'git pull --ff-only origin %s\n' "$(shell_quote "$def")"
 }
 
 git_behind_count() {
@@ -2328,6 +2353,11 @@ cmd_check() {
 		fetch_note=$(maybe_fetch "$root" "$FETCH_TIMEOUT_SECONDS" force)
 		behind=$(git_behind_count "$root")
 		info "  git: branch $branch, $state, behind $behind"
+		# "behind unknown" with no default branch to measure against is the one
+		# case the reader can fix, so the command that records it is named.
+		if [ "$behind" = "unknown" ] && ! git_default_branch "$root" >/dev/null 2>&1; then
+			info "  git: default branch unknown; run: git remote set-head origin --auto"
+		fi
 		info "  fetch: $fetch_note"
 	done
 

@@ -149,6 +149,13 @@ const SEQUENCE_ENTRY_RE = /^-(?:[ \t]|$)/;
 const COMPLEX_KEY_RE = /^\?(?:[ \t]|$)/;
 
 /**
+ * The value half of a complex key: a ":" followed by a space or a tab, or a
+ * ":" alone on its line. It sits at the same indentation as the "? " line it
+ * answers, so a mapping that uses complex keys spells its entries with both.
+ */
+const COMPLEX_VALUE_RE = /^:(?:[ \t]|$)/;
+
+/**
  * A reserved indicator at the head of a plain scalar: "-", "?" or ":" that a
  * space, a tab or the end of the value follows, and ",", "@", "`", "%", "]"
  * or "}" anywhere at the head. YAML reads the first three as a sequence entry,
@@ -213,7 +220,10 @@ function isNonStringScalar(raw) {
   if (raw === "") return false;
   if (NON_STRING_VALUES.has(raw)) return true;
   if (raw.startsWith("[") || raw.startsWith("{")) return true;
-  if (/^[&*]\S/.test(raw)) return true;
+  // "&" and "*" open an anchor and an alias, and a name must follow at once.
+  // "&x" names one, while "&" alone and "& foo" name none, and a loader
+  // refuses the document rather than reading either as text.
+  if (raw.startsWith("&") || raw.startsWith("*")) return true;
   // An explicit tag names the type of the value, so the text after it is not
   // the description a runtime reads. A plain scalar never starts with "!".
   if (raw.startsWith("!")) return true;
@@ -704,13 +714,14 @@ function readPlainScalar(first, lines, start) {
 }
 
 /**
- * True when every flow collection the text opens is closed in it. Quoted
- * sections are skipped, so a bracket between quotes is text. An unquoted value
- * that opens "[" or "{" and never closes it is not the scalar it looks like:
+ * True when every flow collection the text opens is closed in it by its own
+ * delimiter. Quoted sections are skipped, so a bracket between quotes is text.
+ * An unquoted value that opens "[" or "{" and never closes it, or closes it
+ * with the other delimiter as in "[Read}", is not the scalar it looks like:
  * real YAML reads on into the next lines and fails somewhere else.
  */
 function flowCollectionCloses(text) {
-  let depth = 0;
+  const openers = [];
   let quote = "";
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
@@ -729,15 +740,15 @@ function flowCollectionCloses(text) {
       continue;
     }
     if (ch === "[" || ch === "{") {
-      depth += 1;
+      openers.push(ch);
       continue;
     }
     if (ch === "]" || ch === "}") {
-      depth -= 1;
-      if (depth < 0) return false;
+      const opener = openers.pop();
+      if (opener !== (ch === "]" ? "[" : "{")) return false;
     }
   }
-  return quote === "" && depth === 0;
+  return quote === "" && openers.length === 0;
 }
 
 /**
@@ -965,6 +976,26 @@ function parseFrontmatter(lines, firstLineNumber) {
       (SEQUENCE_ENTRY_RE.test(continuation.text) ||
         COMPLEX_KEY_RE.test(continuation.text) ||
         opensMappingEntry(continuation.text));
+    if (collection) {
+      // The first entry sets the shape, and YAML refuses a sequence or a
+      // mapping whose later entries do not repeat it, so every further line at
+      // the collection's own indentation is read the same way. A deeper line
+      // belongs to the entry above it and is that entry's business.
+      const sequence = SEQUENCE_ENTRY_RE.test(continuation.text);
+      const indent = indentWidth(lines[continuation.index].replace(/\r$/, ""));
+      for (let j = continuation.index + 1; j <= plain.end; j += 1) {
+        const entry = lines[j].replace(/\r$/, "");
+        if (indentWidth(entry) !== indent) continue;
+        const text = stripInlineComment(entry.trim());
+        if (text === "") continue;
+        const shaped = sequence
+          ? SEQUENCE_ENTRY_RE.test(text)
+          : COMPLEX_KEY_RE.test(text) ||
+            COMPLEX_VALUE_RE.test(text) ||
+            opensMappingEntry(text);
+        if (!shaped) invalid.push(firstLineNumber + j);
+      }
+    }
     // A comment ends a plain scalar, so text after it is invalid. A nested
     // collection is not a plain scalar: a comment between two of its entries
     // is fine, and this parser does not read the entries themselves.
