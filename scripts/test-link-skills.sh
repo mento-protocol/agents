@@ -2539,6 +2539,37 @@ aged_lock_with_live_owner_is_kept() {
 	assert_absent "$lock" "the lock is gone"
 }
 
+# The pid file is created before its line is written, so a run that starts
+# beside another can find a lock whose record is still empty. That is a lock
+# somebody has just taken, not a lock whose owner is dead: reading it as dead
+# would let both runs write the assembly at once. Only age tells the two apart.
+lock_with_empty_pid_record_is_kept() {
+	local lock
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	mkdir "$lock"
+	: >"$lock/pid"
+
+	ls_run link
+	assert_rc 1 "link over a fresh lock whose pid record is empty"
+	assert_out_has "holds the lock" "lock message"
+	assert_exists "$lock" "the fresh lock is kept"
+	assert_exists "$lock/pid" "its pid file is kept"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+
+	# The same lock, once it is older than the stale age.
+	touch -t 200001010000 "$lock/pid"
+	touch -t 200001010000 "$lock"
+	ls_run link
+	assert_rc 0 "link over an aged lock whose pid record is empty"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the aged lock is gone"
+}
+
 # A symlink at the lock path names files this script does not own. Nothing
 # below it is read or removed, and the run stops instead of going on unlocked.
 symlinked_lock_refused() {
@@ -3292,6 +3323,60 @@ validator_block_header_with_comment() {
 	if [ "$rc" -ne 0 ]; then
 		fail "a commented block header with a real body must validate: $out"
 	fi
+}
+
+# Only a space or a tab separates a comment from a block scalar header. Behind
+# a U+00A0 the "#" is part of the header, which PyYAML refuses with "expected
+# chomping or indentation indicators, but found '\xa0'", so the validator must
+# refuse the line instead of folding the body under it.
+validator_rejects_block_header_nbsp_comment() {
+	local out rc nbsp
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	nbsp=$(printf '\302\240')
+
+	mkdir -p "$CASE_DIR/nbsp-header/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-%s# note\n' "$nbsp"
+		printf '  a real folded description that spans\n'
+		printf '  two lines of the block scalar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nbsp-header/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nbsp-header" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a block header with a NBSP before the comment must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter line 3 is not valid YAML') ;;
+	*) fail "the header line must be reported by its number: $out" ;;
+	esac
+
+	# The same header with a space is the comment YAML reads.
+	mkdir -p "$CASE_DIR/space-header/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >- # note\n'
+		printf '  a real folded description that spans\n'
+		printf '  two lines of the block scalar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/space-header/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/space-header" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a block header with a space before the comment must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
 }
 
 # The manifest is the only record of what this script may remove later, so a
@@ -4313,6 +4398,68 @@ validator_rejects_malformed_flow_collection() {
 	done
 }
 
+# A member of a flow collection is a scalar like any other, so a double-quoted
+# member holding an escape YAML refuses makes the whole line a document PyYAML
+# refuses ("found unknown escape character 'q'"). A backslash inside single
+# quotes is text: PyYAML reads 'a\q' as the two characters it spells.
+validator_rejects_escape_inside_flow_collection() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# A flow collection is refused as a non-string on the string fields, so the
+	# fixtures sit under an optional key.
+	n=0
+	for form in '["\q"]' '{k: "\x4"}' '[a, ["\u12"]]'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-escape-bad-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'metadata: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-escape-bad-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-escape-bad-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "flow member '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		'skills/noted: frontmatter line 4 is not valid YAML') ;;
+		*) fail "flow member '$form' must be reported by its line: $out" ;;
+		esac
+	done
+
+	n=0
+	for form in '["\t", '"'"'a\q'"'"']' '{k: "a\\b"}' '[a, ["A"]]'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-escape-good-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'metadata: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-escape-good-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-escape-good-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "flow member '$form' must validate: $out"
+			continue
+		fi
+		case "$out" in
+		"validated 1 skills") ;;
+		*) fail "unexpected validator output for '$form': $out" ;;
+		esac
+	done
+}
+
 # A collection under an optional key is judged entry by entry, not by its first
 # line alone: a bare scalar among sequence entries, or among mapping entries,
 # is a document PyYAML refuses. A deeper line belongs to the entry above it,
@@ -5018,6 +5165,57 @@ install_hooks_ignores_similar_named_script() {
 	assert_out_has "added the SessionStart hook" "this hook is added"
 	assert_file_has "$HOME/.claude/settings.json" "$custom hook" "the unrelated hook is kept"
 	assert_file_has "$HOME/.claude/settings.json" "$LS hook" "this hook is there"
+}
+
+# A command that names this script path without running it belongs to whoever
+# wrote it: "echo <script> hook" prints the path. Only a shell word before the
+# path makes an entry ours, so this one is kept as it stands and the generated
+# entry is added beside it. A shell word is another matter, repair and all.
+install_hooks_leaves_unrelated_command_alone() {
+	local file got groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	write_session_hook_settings "$file" "echo $LS hook"
+
+	ls_run install-hooks
+	assert_rc 0 "install-hooks beside an unrelated command"
+	assert_out_has "added the SessionStart hook" "this hook is added"
+	assert_out_lacks "replaced" "nothing of the user is rewritten"
+	assert_file_has "$file" "bash $LS hook" "this hook is there"
+	# The merge appends its group, so the unrelated entry is still the first
+	# one. A take-over would have rewritten both of its fields.
+	got=$(hook_entry_field "$file" command)
+	if [ "$got" != "echo $LS hook" ]; then
+		fail "the unrelated command was changed: $got"
+	fi
+	got=$(hook_entry_field "$file" timeout)
+	if [ "$got" != "20" ]; then
+		fail "the unrelated entry lost its own timeout: $got"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "2" ]; then
+		fail "expected 2 SessionStart groups, found $groups"
+	fi
+	ls_run install-hooks
+	assert_rc 0 "second install-hooks"
+	assert_out_has "already runs the hook" "the added hook is recognised"
+
+	# The same shape with a shell in front runs the script, so it is ours and
+	# dead: zsh dies at the first bashism at every session start.
+	write_session_hook_settings "$file" "zsh $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a zsh invocation"
+	assert_out_has "replaced a hook that ran the script through zsh" \
+		"the zsh entry is replaced"
+	assert_file_has "$file" "bash $LS hook" "the generated command is installed"
+	assert_file_lacks "$file" "\"zsh $LS hook\"" "the zsh command is gone"
 }
 
 # An explicit YAML tag names the type of a value, so the text after it is not
@@ -8682,6 +8880,7 @@ main() {
 	run_case unreadable_name_not_repointed
 	run_case stale_lock_is_removed
 	run_case aged_lock_with_live_owner_is_kept
+	run_case lock_with_empty_pid_record_is_kept
 	run_case symlinked_lock_refused
 	run_case regular_file_at_lock_path_refused
 	run_case parent_traversal_through_file_refused
@@ -8708,6 +8907,7 @@ main() {
 	run_case install_hooks_replaces_dead_script_path
 	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
+	run_case install_hooks_leaves_unrelated_command_alone
 	run_case install_hooks_replaces_sh_invocation
 	run_case install_hooks_replaces_missing_interpreter
 	run_case install_hooks_replaces_non_executable_direct_script
@@ -8723,6 +8923,7 @@ main() {
 	run_case validator_strips_inline_comment
 	run_case validator_keeps_text_after_nbsp_hash
 	run_case validator_block_header_with_comment
+	run_case validator_rejects_block_header_nbsp_comment
 	run_case validator_rejects_non_string_description
 	run_case validator_rejects_typed_scalars
 	run_case validator_rejects_tagged_and_more_numeric_scalars
@@ -8757,6 +8958,7 @@ main() {
 	run_case validator_rejects_malformed_anchor
 	run_case validator_rejects_mismatched_flow_close
 	run_case validator_rejects_malformed_flow_collection
+	run_case validator_rejects_escape_inside_flow_collection
 	run_case validator_rejects_malformed_nested_collection
 	run_case validator_decodes_quoted_continuation_value
 	run_case validator_quoted_scalar_edge_cases

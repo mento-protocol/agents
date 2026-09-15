@@ -786,6 +786,16 @@ function flowCollectionEnd(text, start) {
     } else if (ch === '"' || ch === "'") {
       const end = quotedScalarEnd(text, i);
       if (end === text.length) return -1;
+      // A member is a scalar like any other, so its escapes decide too: a
+      // double-quoted member holding an escape YAML refuses makes the whole
+      // collection a document no loader reads. A backslash inside single
+      // quotes is text.
+      if (
+        ch === '"' &&
+        decodeDoubleQuoted(text.slice(i + 1, end)).escape !== undefined
+      ) {
+        return -1;
+      }
       i = end;
     }
     filled = true;
@@ -930,8 +940,11 @@ function parseFrontmatter(lines, firstLineNumber) {
     // A block scalar header may carry a trailing comment, as in
     // `description: >- # note`. The comment is removed before the header is
     // recognised, so such a line folds its indented body like any other block
-    // scalar instead of reading as a plain two-character value.
-    const header = rest.replace(/\s+#.*$/, "").trim();
+    // scalar instead of reading as a plain two-character value. Only a space
+    // or a tab separates a comment: behind any other whitespace the "#" is
+    // text, the header keeps it, and the line is refused below as the
+    // malformed header every loader refuses.
+    const header = rest.replace(/[ \t]+#.*$/, "").trim();
     if (BLOCK_SCALAR_RE.test(header)) {
       const block = readBlockScalar(header, lines, i);
       i = block.end;

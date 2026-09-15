@@ -81,10 +81,10 @@ directory itself: a lock another run gives back while this one is waiting is
 taken, not read as permission to go on without it. Each run gives its lock
 back when it ends. A lock left behind by a run that was killed is removed
 once its process is gone. A lock whose owner is still running is kept however
-old it is, and a lock that records no owner at all is removed after two
-minutes. A symlink or a file at the lock path is not a lock this script made:
-`link` and `unlink` report it and exit 1 without reading or removing anything
-below it. The hook never looks at the lock path.
+old it is, and a lock that records no owner at all, or an incomplete record,
+is removed after two minutes. A symlink or a file at the lock path is not a
+lock this script made: `link` and `unlink` report it and exit 1 without
+reading or removing anything below it. The hook never looks at the lock path.
 
 The manifest `~/.agents/skills/.skill-links` holds one line per link, with
 three tab-separated columns: the skill name, the target it points at, and the

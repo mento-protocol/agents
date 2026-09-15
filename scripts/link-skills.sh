@@ -1558,9 +1558,13 @@ release_lock() {
 #                        the start time the pid file records, so a process that
 #                        merely inherited the number is not the owner.
 #   owner dead or unreadable  remove the lock. Its owner cannot come back.
-#   no pid file          a run that has just taken the lock, or one that died
-#                        before writing its pid. Only age separates the two, so
-#                        a lock older than LOCK_STALE_MINUTES is removed.
+#   no owner recorded    no pid file at all, or one that holds no readable pid:
+#                        a run that has just taken the lock and has not written
+#                        its line yet, or one that died before writing it. Only
+#                        age separates the two, so a lock older than
+#                        LOCK_STALE_MINUTES is removed and a younger one is
+#                        kept. Reading an unwritten record as a dead owner
+#                        would take a lock away seconds after it was made.
 #
 # Nothing below the lock path is read or removed unless that path is a real
 # directory: a symlink there names someone else's files.
@@ -1572,14 +1576,21 @@ clear_stale_lock() {
 	if [ -f "$LOCK_DIR/pid" ]; then
 		pid=$(lock_recorded_pid "$LOCK_DIR/pid")
 		start=$(lock_recorded_start "$LOCK_DIR/pid")
-		if lock_owner_alive "$pid" "$start"; then
+		# An empty or unparsable record names no owner to ask about, so it
+		# falls through to the age below. The file is created before its line
+		# is written, and a run that read it in that moment would otherwise
+		# clear the lock of a run that had just taken it.
+		if [ -n "$pid" ]; then
+			if lock_owner_alive "$pid" "$start"; then
+				return 0
+			fi
+			rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+			rmdir "$LOCK_DIR" 2>/dev/null || true
 			return 0
 		fi
-		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
-		rmdir "$LOCK_DIR" 2>/dev/null || true
-		return 0
 	fi
 	if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
 		rmdir "$LOCK_DIR" 2>/dev/null || true
 	fi
 	return 0
@@ -2949,6 +2960,15 @@ def parse_tail(parts, index):
     return sources, assembly, positionals
 
 
+# The words that can stand before the script path and still leave the entry
+# ours: a shell, spelled bare or as a path. Any other first word makes the
+# command something the user wrote that merely names the script, such as
+# "echo <script> hook", and rewriting that would delete their command. The
+# script is bash, so every other word here is a shell that cannot run it,
+# which is exactly what the caller repairs.
+INTERPRETERS = ("bash", "sh", "dash", "zsh", "ksh", "ash", "busybox")
+
+
 def interpreter_name(text):
     # What the first word is called in the report. A spelling with whitespace
     # in it would break the line protocol below, so it is not repeated back.
@@ -2991,11 +3011,15 @@ def parse_command(value):
     index = 0
     interpreter = ""
     first = parts[0].strip(QUOTES)
-    # A first word that is not the script itself runs the script, so the
-    # script sits one position later. Which interpreter it is decides below:
-    # the script is bash, and dash or another shell would fail at the first
-    # bashism, silently, at every session start.
+    # A first word that is not the script itself runs the script only when it
+    # is a shell; the script then sits one position later. Which shell it is
+    # decides below: the script is bash, and dash or another shell would fail
+    # at the first bashism, silently, at every session start. A first word
+    # that is no shell at all takes the script as data rather than running it,
+    # so the entry is not ours and is left where it stands.
     if os.path.basename(first) != marker:
+        if os.path.basename(first) not in INTERPRETERS:
+            return None
         index = 1
         interpreter = interpreter_name(first)
     if index >= len(parts):
