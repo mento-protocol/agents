@@ -89,8 +89,8 @@ below it. The hook never looks at the lock path.
 The manifest `~/.agents/skills/.skill-links` holds one line per link, with
 three tab-separated columns: the skill name, the target it points at, and the
 source directory the link came from, spelled as the sources file spells it
-once the path is absolute and normalized but before any symlink in it is
-resolved. That third column is what keeps the links of a source whose symlink
+once the path is absolute, before any symlink or `..` in it is resolved.
+That third column is what keeps the links of a source whose symlink
 alias has disappeared: nothing in the target names the alias, so without it a
 source that is listed and merely missing would look like a source nobody
 lists. A two-column line written by an older version is still read, and the
@@ -187,7 +187,13 @@ part of the path and not a token: nothing in the format can tell a stray word
 from a path that holds a space. A line that names no directory is reported as
 a missing source, which is what a source that has been renamed or is
 temporarily away already is: `link` and `check` exit 1, and the line links
-again the moment the directory is back.
+again the moment the directory is back. A path is resolved the way the kernel
+resolves it, symlinks first and then `..`, so `/a/alias/../skills` with `alias`
+pointing at `/b/child` names `/b/skills` and not `/a/skills`. While `alias` is
+away that line names no directory at all and is reported as a missing source;
+a `..` after a name that is not there never falls back to the collapsed text,
+so the run does not switch to `/a/skills` and does not prune the links it
+recorded under `/b/skills`.
 
 A session hook runs with none of the environment the person who installed it
 had, so `install-hooks` writes the paths of the installation it was run for

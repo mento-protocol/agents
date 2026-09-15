@@ -44,7 +44,9 @@
 // check, not a full YAML parser: a line must be blank, a comment, a top-level
 // "key: value" line, or an indented line that belongs to the value above it,
 // and a top-level value that opens a flow collection ("[" or "{") must close
-// it on the same logical scalar. An indented line that no value above it takes
+// it on the same logical scalar and hold no empty entry, so "[foo,,bar]" is
+// refused while the trailing comma of "[a, b, ]" is not. An indented line that
+// no value above it takes
 // is refused, whether it sits before the first key or after a value that takes
 // no continuation, and a comment line ends a plain scalar that already holds
 // text, so the indented lines under that comment take no value either.
@@ -63,7 +65,10 @@
 // document: the C0 controls except tab, LF and CR, DEL, the C1 controls except
 // U+0085, the surrogate range, and U+FFFE and U+FFFF. One of them is reported
 // as "frontmatter line N holds a control character U+XXXX", because no loader
-// reads the document at all.
+// reads the document at all. A raw U+0085 is legal YAML, but a YAML 1.1 loader
+// reads it as a line break while a YAML 1.2 loader keeps it as text, so it is
+// reported as "frontmatter line N holds a NEL character (U+0085), which loaders
+// read differently"; the escaped "\N" spells the same character in one way.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
@@ -235,12 +240,14 @@ function isNonStringScalar(raw) {
 
 /**
  * Remove an inline YAML comment from one line of an unquoted scalar: a "#"
- * that starts the line, or a "#" preceded by whitespace. A quoted value never
- * reaches this function, because there the character is part of the text.
+ * that starts the line, or a "#" preceded by a space or a tab. Those are the
+ * only two characters YAML starts a comment after, so a "#" after any other
+ * whitespace, such as U+00A0, is text and stays in the value. A quoted value
+ * never reaches this function, because there the character is part of the text.
  */
 function stripInlineComment(value) {
   if (value.startsWith("#")) return "";
-  return value.replace(/\s+#.*$/, "").trim();
+  return value.replace(/[ \t]+#.*$/, "").trim();
 }
 
 /**
@@ -271,7 +278,8 @@ function isForbiddenCodePoint(code) {
   if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
   if (code <= 0x08 || (code >= 0x0b && code <= 0x1f)) return true;
   if (code === 0x7f) return true;
-  // U+0085 is the one C1 character YAML keeps: it is a line break there.
+  // U+0085 is the one C1 character YAML keeps: it is a line break there. The
+  // loaders disagree about it, so findNelLine refuses it on its own.
   if (code >= 0x80 && code <= 0x9f) return code !== 0x85;
   if (code >= 0xd800 && code <= 0xdfff) return true;
   return code === 0xfffe || code === 0xffff;
@@ -295,6 +303,20 @@ function findControlCharacter(lines, firstLineNumber) {
     }
   }
   return null;
+}
+
+/**
+ * The number of the first line of `lines` that holds a raw U+0085, or -1 when
+ * none does. A YAML 1.1 loader (libyaml, Psych, PyYAML) reads the character as
+ * a line break and refuses the unindented rest, while a YAML 1.2 loader keeps
+ * it as text, so the frontmatter says one thing to one runtime and another to
+ * the next. The escaped "\N" carries the same character with no disagreement.
+ */
+function findNelLine(lines, firstLineNumber) {
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes("\u0085")) return firstLineNumber + i;
+  }
+  return -1;
 }
 
 /**
@@ -714,11 +736,70 @@ function readPlainScalar(first, lines, start) {
 }
 
 /**
+ * The index of the quote that closes the scalar `text` opens at `start`, or
+ * text.length when it never closes. A "\\" escapes the next character inside
+ * double quotes, and a doubled quote stands for one quote inside single quotes.
+ */
+function quotedScalarEnd(text, start) {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote === '"' && ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch !== quote) continue;
+    if (quote === "'" && text[i + 1] === "'") {
+      i += 1;
+      continue;
+    }
+    return i;
+  }
+  return text.length;
+}
+
+/**
+ * The index of the delimiter that closes the flow collection `text` opens at
+ * `start`, or -1 when the collection never closes, closes with the other
+ * delimiter, or holds an empty entry. A top-level comma ends an entry, while a
+ * comma inside a quoted scalar or a nested collection belongs to that scalar or
+ * collection; a nested collection is read the same way this one is. YAML allows
+ * one trailing comma, as in "[a, b, ]", and nothing else empty, so "[foo,,bar]"
+ * closes and is still a document no loader reads.
+ */
+function flowCollectionEnd(text, start) {
+  const close = text[start] === "[" ? "]" : "}";
+  let filled = false;
+  for (let i = start + 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === " " || ch === "\t") continue;
+    if (ch === ",") {
+      if (!filled) return -1;
+      filled = false;
+      continue;
+    }
+    if (ch === "]" || ch === "}") return ch === close ? i : -1;
+    if (ch === "[" || ch === "{") {
+      const end = flowCollectionEnd(text, i);
+      if (end === -1) return -1;
+      i = end;
+    } else if (ch === '"' || ch === "'") {
+      const end = quotedScalarEnd(text, i);
+      if (end === text.length) return -1;
+      i = end;
+    }
+    filled = true;
+  }
+  return -1;
+}
+
+/**
  * True when every flow collection the text opens is closed in it by its own
- * delimiter. Quoted sections are skipped, so a bracket between quotes is text.
- * An unquoted value that opens "[" or "{" and never closes it, or closes it
- * with the other delimiter as in "[Read}", is not the scalar it looks like:
- * real YAML reads on into the next lines and fails somewhere else.
+ * delimiter and holds the entries a collection holds. Quoted sections are
+ * skipped, so a bracket between quotes is text. An unquoted value that opens
+ * "[" or "{" and never closes it, or closes it with the other delimiter as in
+ * "[Read}", is not the scalar it looks like: real YAML reads on into the next
+ * lines and fails somewhere else.
  */
 function flowCollectionCloses(text) {
   const openers = [];
@@ -748,35 +829,20 @@ function flowCollectionCloses(text) {
       if (opener !== (ch === "]" ? "[" : "{")) return false;
     }
   }
-  return quote === "" && openers.length === 0;
+  if (quote !== "" || openers.length !== 0) return false;
+  // The delimiters match, so the entries between them decide: a collection
+  // that closes can still be one no loader reads.
+  if (text[0] !== "[" && text[0] !== "{") return true;
+  return flowCollectionEnd(text, 0) !== -1;
 }
 
 /**
  * The text after the quoted scalar that a text opens, or null when the quote
- * never closes. A "\\" escapes the next character inside double quotes, and a
- * doubled quote stands for one quote inside single quotes.
+ * never closes.
  */
 function afterQuotedScalar(text) {
-  const quote = text[0];
-  for (let i = 1; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quote === '"') {
-      if (ch === "\\") {
-        i += 1;
-        continue;
-      }
-      if (ch === '"') return text.slice(i + 1);
-      continue;
-    }
-    if (ch === "'") {
-      if (text[i + 1] === "'") {
-        i += 1;
-        continue;
-      }
-      return text.slice(i + 1);
-    }
-  }
-  return null;
+  const end = quotedScalarEnd(text, 0);
+  return end === text.length ? null : text.slice(end + 1);
 }
 
 /**
@@ -1157,6 +1223,17 @@ function validateSkill(name) {
   if (control !== null) {
     problems.push(
       `skills/${name}: frontmatter line ${control.line} holds a control character ${control.code}`,
+    );
+    return;
+  }
+
+  // A raw U+0085 is legal YAML that the loaders read in two ways, so the
+  // frontmatter has no one meaning. The escaped "\N" spells the character
+  // where it is wanted.
+  const nelLine = findNelLine(frontmatterLines, 2);
+  if (nelLine !== -1) {
+    problems.push(
+      `skills/${name}: frontmatter line ${nelLine} holds a NEL character (U+0085), which loaders read differently`,
     );
     return;
   }

@@ -791,6 +791,59 @@ hook_pull_advice_quotes_branch() {
 		"the command links what the pull brought in"
 }
 
+# refs/heads/-x is a legal ref, and quoting a branch named '-x' does not help:
+# git reads the argument itself as an option and the advice cannot be run. The
+# full refspec names the same branch and can only be read as a ref.
+hook_pull_advice_uses_refspec_for_dash_branch() {
+	local branch bare seed clone cmd rc
+	branch='-x'
+	bare="$CASE_DIR/remote.git"
+	seed="$CASE_DIR/seed"
+	clone="$CASE_DIR/company"
+	git init --bare --quiet "$bare"
+	git -C "$bare" symbolic-ref HEAD "refs/heads/$branch"
+	git clone --quiet "$bare" "$seed" 2>/dev/null
+	git -C "$seed" symbolic-ref HEAD "refs/heads/$branch"
+	mkskill "$seed/skills" alpha
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "init"
+	# The branch is pushed by refspec, because 'origin -x' is an option to git
+	# here just as it would be in the advice under test.
+	git -C "$seed" push -q origin "HEAD:refs/heads/$branch"
+	git clone --quiet "$bare" "$clone"
+	git -C "$clone" branch --unset-upstream >/dev/null 2>&1
+
+	write_sources
+	add_source "$clone/skills"
+	ls_run link
+	assert_rc 0 "link"
+
+	mkskill "$seed/skills" beta
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "add beta"
+	git -C "$seed" push -q origin "HEAD:refs/heads/$branch"
+
+	ls_run hook
+	assert_rc 0 "hook without an upstream"
+	assert_out_has "$clone is 1 commit(s) behind" "the behind count is reported"
+	assert_out_has "git pull --ff-only origin refs/heads/-x" \
+		"the advice names the branch as a refspec"
+
+	# Advice nobody can run is no better, so the printed command is handed to
+	# a shell as it stands: everything after 'run: ' is the command.
+	cmd=${LS_OUT#*run: }
+	sh -c "$cmd" >/dev/null 2>&1
+	rc=$?
+	if [ "$rc" != "0" ]; then
+		fail "the printed command exited $rc: $cmd"
+	fi
+	if [ "$(head_of "$clone")" != "$(head_of "$seed")" ]; then
+		fail "the printed command did not fast-forward the clone"
+	fi
+	assert_link "$HOME/.agents/skills/beta" "$clone/skills/beta" \
+		"the command links what the pull brought in"
+}
+
 # refs/remotes/origin/HEAD is optional in a clone. Reading a missing one as
 # "main" measures a "master" remote against a branch that is not there, so the
 # refs in the clone decide instead; when they cannot, check says how to record
@@ -3016,6 +3069,58 @@ validator_strips_inline_comment() {
 	fi
 }
 
+# YAML starts an inline comment after a space or a tab only. A "#" behind any
+# other whitespace, such as U+00A0, is text: PyYAML reads the 1042 characters
+# of this fixture, and the length limit has to count them too.
+validator_keeps_text_after_nbsp_hash() {
+	local out rc nbsp lead rest
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	nbsp=$(printf '\302\240')
+	lead=$(repeat_text_n 'a' 1020)
+	rest=$(repeat_text_n 'b' 20)
+
+	mkdir -p "$CASE_DIR/nbsp-hash/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: %s%s#%s\n' "$lead" "$nbsp" "$rest"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nbsp-hash/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nbsp-hash" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "1042 characters after a NBSP hash must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the description must be reported as too long: $out" ;;
+	esac
+
+	# A space before the "#" does open a comment, so the same text measures the
+	# 1020 characters in front of it.
+	mkdir -p "$CASE_DIR/space-hash/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: %s #%s\n' "$lead" "$rest"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/space-hash/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/space-hash" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "1020 characters before a space hash must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # This harness must refuse to run when mktemp -d cannot create the temporary
 # root, and it must register no cleanup trap before that check. The failing
 # run starts from a throwaway working directory that holds a sentinel file and
@@ -4133,6 +4238,69 @@ validator_rejects_mismatched_flow_close() {
 			printf 'Body.\n'
 		} >"$CASE_DIR/flow-good-$n/skills/noted/SKILL.md"
 		out=$(node "$VALIDATOR" "$CASE_DIR/flow-good-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "flow collection '$form' must validate: $out"
+			continue
+		fi
+		case "$out" in
+		"validated 1 skills") ;;
+		*) fail "unexpected validator output for '$form': $out" ;;
+		esac
+	done
+}
+
+# A flow collection that closes can still be malformed. PyYAML refuses
+# "[foo,,bar]", "[,a]" and "{a: 1,, b: 2}" because an entry is empty, so
+# matching the delimiters alone passes a document no loader reads. One trailing
+# comma is the exception YAML allows, and a nested collection is read the same
+# way its parent is.
+validator_rejects_malformed_flow_collection() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# On the string fields a flow collection is refused as a non-string before
+	# its entries are read, so the fixtures sit under an optional key.
+	n=0
+	for form in '[foo,,bar]' '[,a]' '{a: 1,, b: 2}' '[a, [b,,c]]'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-entry-bad-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'allowed-tools: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-entry-bad-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-entry-bad-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "flow collection '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		'skills/noted: frontmatter line 4 is not valid YAML') ;;
+		*) fail "flow collection '$form' must be reported by its line: $out" ;;
+		esac
+	done
+
+	n=0
+	for form in '[a, b, ]' '[a, [b, c]]' '{a: [1, 2], b: {c: d}}' '[]'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-entry-good-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'allowed-tools: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-entry-good-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-entry-good-$n" 2>&1)
 		rc=$?
 		if [ "$rc" -ne 0 ]; then
 			fail "flow collection '$form' must validate: $out"
@@ -7267,8 +7435,9 @@ validator_rejects_control_character() {
 	*) fail "the control character must be named: $out" ;;
 	esac
 
-	# U+0085 is a line break in YAML, not a forbidden character. Inside a quoted
-	# scalar it folds to a space, so the value stays readable text.
+	# U+0085 is a line break in YAML, not a forbidden character, but the loaders
+	# disagree about it, so a raw one is refused by its own message and the
+	# escape carries the character instead.
 	mkdir -p "$CASE_DIR/control-nel/skills/noted"
 	{
 		printf -- '---\n'
@@ -7279,8 +7448,26 @@ validator_rejects_control_character() {
 	} >"$CASE_DIR/control-nel/skills/noted/SKILL.md"
 	out=$(node "$VALIDATOR" "$CASE_DIR/control-nel" 2>&1)
 	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a raw U+0085 must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 holds a NEL character (U+0085)"*) ;;
+	*) fail "the NEL character must be named: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/control-nel-escape/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\Nb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/control-nel-escape/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/control-nel-escape" 2>&1)
+	rc=$?
 	if [ "$rc" -ne 0 ]; then
-		fail "U+0085 must validate: $out"
+		fail "an escaped U+0085 must validate: $out"
 	fi
 	case "$out" in
 	"validated 1 skills") ;;
@@ -7304,6 +7491,96 @@ validator_rejects_control_character() {
 	case "$out" in
 	"validated 1 skills") ;;
 	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# A raw U+0085 is a line break to a YAML 1.1 loader, which then refuses the
+# unindented rest, and text to a YAML 1.2 loader. PyYAML refuses the plain
+# fixture below and reads the quoted one as "a b", so the runtimes disagree on
+# both and the character is refused wherever it sits. The escaped "\N" carries
+# it with one meaning and counts as one character.
+validator_rejects_raw_nel() {
+	local out rc nel lead
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	nel=$(printf '\302\205')
+
+	mkdir -p "$CASE_DIR/nel-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a%sdescription\n' "$nel"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nel-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nel-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a raw U+0085 in a plain scalar must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 holds a NEL character (U+0085), which loaders read differently"*) ;;
+	*) fail "the NEL failure must name the character and the line: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nel-quoted/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a%sdescription"\n' "$nel"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nel-quoted/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nel-quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a raw U+0085 in a quoted scalar must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 holds a NEL character (U+0085), which loaders read differently"*) ;;
+	*) fail "the quoted NEL failure must name the character: $out" ;;
+	esac
+
+	# The escape decodes to one character, so 1022 letters, "\N" and one more
+	# letter measure the 1024 the limit allows, and one letter more is over it.
+	# The escape sits inside the text: a trailing one is whitespace and trims.
+	lead=$(repeat_text_n 'a' 1022)
+	mkdir -p "$CASE_DIR/nel-escape-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\Nb"\n' "$lead"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nel-escape-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nel-escape-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "an escaped U+0085 inside 1024 characters must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nel-escape-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%sa\\Nb"\n' "$lead"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nel-escape-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nel-escape-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an escaped U+0085 must count as one character: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the 1025 character description must be reported as too long: $out" ;;
 	esac
 }
 
@@ -8149,6 +8426,101 @@ source_alias_missing_keeps_links() {
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" "alpha link again"
 }
 
+# A '..' after a symlink goes to the target's parent, because that is where the
+# kernel goes. Collapsing the line's text first answers with the alias's own
+# parent instead, and the run then links skills from a directory the line never
+# names. Both directories hold a skill here, so the wrong one is not silent.
+source_dotdot_after_symlink_resolves_physically() {
+	local manifest
+	mkdir -p "$CASE_DIR/a" "$CASE_DIR/b/child"
+	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
+	mkskill "$CASE_DIR/b/skills" alpha
+	mkskill "$CASE_DIR/a/skills" beta
+	write_sources
+	add_source "$CASE_DIR/a/alias/../skills"
+	manifest="$HOME/.agents/skills/.skill-links"
+
+	ls_run link
+	assert_rc 0 "link through a '..' after the alias"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
+		"the skill under the alias target's parent is linked"
+	assert_absent "$HOME/.agents/skills/beta" \
+		"nothing is linked from the lexically collapsed directory"
+	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" \
+		"the manifest records the target the kernel resolves"
+	assert_file_lacks "$manifest" "$CASE_DIR/a/skills/beta" \
+		"the lexically collapsed directory is recorded nowhere"
+
+	ls_run check
+	assert_rc 0 "check"
+	assert_out_has "link ok: alpha" "the link is in sync"
+	assert_out_lacks "not linked" "no drift is counted"
+}
+
+# The same line once the alias is gone. A '..' after a name that is not there
+# must not fall back to the collapsed text: the line names no directory, so it
+# is a missing source and its links are kept, exactly as a plain alias line is
+# treated. Falling back would link the other directory's skill and prune the
+# recorded one.
+source_dotdot_alias_missing_keeps_links() {
+	local manifest
+	mkdir -p "$CASE_DIR/a" "$CASE_DIR/b/child"
+	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
+	mkskill "$CASE_DIR/b/skills" alpha
+	mkskill "$CASE_DIR/a/skills" beta
+	write_sources
+	add_source "$CASE_DIR/a/alias/../skills"
+	manifest="$HOME/.agents/skills/.skill-links"
+
+	ls_run link
+	assert_rc 0 "link through a '..' after the alias"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" "alpha link"
+
+	rm "$CASE_DIR/a/alias"
+	ls_run link
+	assert_rc 1 "link while the alias is gone"
+	assert_out_has "source directory does not exist: $CASE_DIR/a/alias/../skills" \
+		"the missing source is reported as the line names it"
+	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
+	assert_out_lacks "linked beta" "the collapsed directory is not linked from"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
+		"the link is kept while the alias is gone"
+	assert_absent "$HOME/.agents/skills/beta" \
+		"the lexically collapsed directory is still linked from nowhere"
+	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" \
+		"the manifest entry is kept while the alias is gone"
+
+	ls_run check
+	assert_rc 1 "check while the alias is gone"
+	assert_out_has "source $CASE_DIR/a/alias/../skills: missing" \
+		"check names the line's own path as missing"
+
+	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
+	ls_run link
+	assert_rc 0 "link once the alias is back"
+	assert_out_has "unchanged 1" "the link is recognised again"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" "alpha link again"
+	assert_absent "$HOME/.agents/skills/beta" "beta is still linked from nowhere"
+
+	# The line that collapses to the same text as the alias line is another
+	# source: it is listed first, its beta links, and while the alias is gone
+	# alpha stays tied to the alias line and is not pruned on beta's account.
+	write_sources
+	add_source "$CASE_DIR/a/skills"
+	add_source "$CASE_DIR/a/alias/../skills"
+	ls_run link
+	assert_rc 0 "link with both lines"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/a/skills/beta" "beta link"
+	rm "$CASE_DIR/a/alias"
+	ls_run link
+	assert_rc 1 "link with both lines while the alias is gone"
+	assert_out_lacks "pruned alpha" "alpha is not pruned on the other line's account"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
+		"alpha is kept beside the other line"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/a/skills/beta" "beta is untouched"
+	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" "alpha's manifest entry is kept"
+}
+
 # A manifest an older version wrote holds two columns. Those lines still say
 # what they said, the links they record are kept, and the run rewrites them
 # with the source spelling in a third column.
@@ -8233,6 +8605,7 @@ main() {
 	run_case hook_notifies_when_behind
 	run_case hook_pull_command_names_remote_without_upstream
 	run_case hook_pull_advice_quotes_branch
+	run_case hook_pull_advice_uses_refspec_for_dash_branch
 	run_case hook_finds_master_default_without_origin_head
 	run_case hook_reports_unusable_manifest
 	run_case hook_notifies_drift
@@ -8339,6 +8712,8 @@ main() {
 	run_case install_hooks_replaces_missing_interpreter
 	run_case install_hooks_replaces_non_executable_direct_script
 	run_case source_alias_missing_keeps_links
+	run_case source_dotdot_after_symlink_resolves_physically
+	run_case source_dotdot_alias_missing_keeps_links
 	run_case manifest_two_column_lines_still_parse
 	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
@@ -8346,6 +8721,7 @@ main() {
 	run_case validator_block_indicator_either_order
 	run_case validator_rejects_bad_block_header
 	run_case validator_strips_inline_comment
+	run_case validator_keeps_text_after_nbsp_hash
 	run_case validator_block_header_with_comment
 	run_case validator_rejects_non_string_description
 	run_case validator_rejects_typed_scalars
@@ -8368,6 +8744,7 @@ main() {
 	run_case validator_rejects_missing_separation_after_colon
 	run_case validator_rejects_orphan_indented_line
 	run_case validator_rejects_control_character
+	run_case validator_rejects_raw_nel
 	run_case validator_rejects_nested_references_dir
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
@@ -8379,6 +8756,7 @@ main() {
 	run_case validator_rejects_nested_collection_value
 	run_case validator_rejects_malformed_anchor
 	run_case validator_rejects_mismatched_flow_close
+	run_case validator_rejects_malformed_flow_collection
 	run_case validator_rejects_malformed_nested_collection
 	run_case validator_decodes_quoted_continuation_value
 	run_case validator_quoted_scalar_edge_cases

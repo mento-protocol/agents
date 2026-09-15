@@ -292,38 +292,81 @@ abs_path() {
 	esac
 }
 
+# A plain 'cd' in bash is logical: it collapses a '..' against the spelling it
+# was given instead of asking the filesystem, which is the one thing this
+# function is here to avoid. -P makes the kernel answer.
 phys_dir() {
 	if [ ! -d "$1" ]; then
 		return 1
 	fi
-	(cd "$1" && pwd -P)
+	(cd -P "$1" && pwd -P)
 }
 
-# The physical spelling of an absolute path whose tail may not exist: the
-# longest prefix that is a directory is resolved with pwd -P, and what is left
-# is appended as text.
+# The physical spelling of an absolute path whose tail may not exist: the path
+# is walked from the root, every segment that is a directory is resolved with
+# cd -P before the next one is applied, and what is left once a segment is
+# missing is appended as text.
 #
-# The answer does not change when the tail appears or disappears, and that is
-# the point. A source directory is recorded in the manifest through the path
-# this returns, and the same source must still answer with the same spelling
-# after it is renamed away, or the run would read its recorded links as links
-# to a source nobody lists and prune every one of them.
+# Walking forward is what makes a '..' land where the kernel lands it. With
+# 'alias' a link to /b/child, '/a/alias/..' is /b, not /a; collapsing the text
+# first would answer /a and the run would read skills from a directory the
+# line never names.
+#
+# Once a segment is missing the walk stays off the filesystem: every remaining
+# segment, '..' included, is appended as it is spelled. A '..' must not pop a
+# name that never resolved, because the kernel resolves nothing through a name
+# that is not there. So '/a/alias/../skills' while 'alias' is away answers
+# '/a/alias/../skills', the caller finds no directory there and reports a
+# missing source, instead of quietly reading /a/skills, a directory the line
+# names only while the alias is gone.
+#
+# The links a source recorded are tied to its line by the lexical spelling
+# load_sources keeps beside this path, so a source that is only away keeps its
+# links even though this answer then names nothing.
 phys_prefix_path() {
-	local p tail d
+	local p seg cur rest phys had_noglob oldifs off
 	p=$1
-	tail=""
-	while :; do
-		if d=$(phys_dir "$p"); then
-			printf '%s%s\n' "${d%/}" "$tail"
-			return 0
-		fi
-		case "$p" in
-		"" | /) break ;;
+	cur="/"
+	rest=""
+	off=0
+	had_noglob=0
+	case "$-" in
+	*f*) had_noglob=1 ;;
+	esac
+	# A segment may hold a glob character, so globbing is off while the path is
+	# split on '/'. The split itself is the point, so word splitting is wanted.
+	set -f
+	oldifs=$IFS
+	IFS='/'
+	# shellcheck disable=SC2086
+	set -- $p
+	IFS=$oldifs
+	if [ "$had_noglob" -eq 0 ]; then
+		set +f
+	fi
+	for seg in "$@"; do
+		case "$seg" in
+		"" | ".") continue ;;
 		esac
-		tail="/$(basename "$p")$tail"
-		p=$(dirname "$p")
+		if [ "$off" -eq 1 ]; then
+			rest="$rest/$seg"
+			continue
+		fi
+		if [ "$seg" = ".." ]; then
+			cur=$(dirname "$cur")
+			continue
+		fi
+		if phys=$(phys_dir "${cur%/}/$seg"); then
+			cur=$phys
+			continue
+		fi
+		off=1
+		rest="/$seg"
 	done
-	printf '%s\n' "$tail"
+	case "$cur" in
+	/) printf '%s\n' "${rest:-/}" ;;
+	*) printf '%s%s\n' "$cur" "$rest" ;;
+	esac
 }
 
 # Normalize an absolute path by text alone: drop empty and '.' segments, and
@@ -331,6 +374,38 @@ phys_prefix_path() {
 # so no spelling can climb above /. Nothing here touches the filesystem, so a
 # path whose middle directories do not exist is normalized just as well as one
 # that does.
+# The spelling a source line is recorded under: the absolute line with empty
+# and '.' segments dropped and nothing else touched. A '..' stays as written,
+# because collapsing it by text would give two different lines the same
+# spelling ('/a/alias/../skills' and '/a/skills' name different directories
+# when 'alias' is a symlink), and the spelling is what ties a source that is
+# temporarily away to the links it recorded.
+spell_source() {
+	local p seg out had_noglob oldifs
+	p=$1
+	out=""
+	had_noglob=0
+	case "$-" in
+	*f*) had_noglob=1 ;;
+	esac
+	set -f
+	oldifs=$IFS
+	IFS='/'
+	# shellcheck disable=SC2086
+	set -- $p
+	IFS=$oldifs
+	if [ "$had_noglob" -eq 0 ]; then
+		set +f
+	fi
+	for seg in "$@"; do
+		case "$seg" in
+		"" | ".") continue ;;
+		*) out="$out/$seg" ;;
+		esac
+	done
+	printf '%s\n' "${out:-/}"
+}
+
 normalize_lexical() {
 	local p seg out had_noglob oldifs
 	p=$1
@@ -709,30 +784,31 @@ load_sources() {
 		/*) ;;
 		*) path="$dir/$path" ;;
 		esac
-		# Normalized by text first, so that a '..' in the line is collapsed
-		# whether or not the directory it names is there right now, and only
-		# then resolved against the filesystem as far as the filesystem
-		# reaches. A source that is renamed away keeps the spelling it had
-		# while it was there, which is the spelling its links carry in the
-		# manifest.
-		path=$(normalize_lexical "$path")
-		case "$path" in
-		/) ;;
-		*/) path=${path%/} ;;
-		esac
-		# The spelling before any symlink is resolved. A source reached
+		# The spelling before any symlink or '..' is resolved. A source reached
 		# through an alias records its links under the directory the alias
 		# points at, so after the alias is gone only this spelling still ties
-		# them to the line that is still listed.
-		spelling="$path"
+		# them to the line that is still listed. It is not collapsed by text:
+		# two lines that collapse to the same text can name two directories.
+		spelling=$(spell_source "$path")
+		case "$spelling" in
+		/) ;;
+		*/) spelling=${spelling%/} ;;
+		esac
+		# The directory the line really names, resolved the way the kernel
+		# resolves it: symlinks first, then '..'. Collapsing the text first
+		# would answer '/a/alias/../skills' with /a/skills while the kernel
+		# opens /b/skills, and the run would link from a directory the line
+		# never names.
+		resolved=$(phys_prefix_path "$path")
+		if [ -n "$resolved" ]; then
+			path="$resolved"
+		else
+			path="$spelling"
+		fi
 		# A spelling that cannot round-trip through the tab-separated manifest
 		# is recorded as none; the physical rule below still covers it.
 		if ! field_is_safe "$spelling"; then
 			spelling=""
-		fi
-		resolved=$(phys_prefix_path "$path")
-		if [ -n "$resolved" ]; then
-			path="$resolved"
 		fi
 		case "$path" in
 		/) ;;
@@ -2076,6 +2152,12 @@ git_pull_command() {
 		printf 'git pull --ff-only\n'
 		return 0
 	fi
+	# refs/heads/-x is a legal ref, and quoting does not help there: git reads
+	# the argument itself as an option. The full refspec names the same branch
+	# and cannot be read as one.
+	case "$def" in
+	-*) def="refs/heads/$def" ;;
+	esac
 	printf 'git pull --ff-only origin %s\n' "$(shell_quote "$def")"
 }
 
