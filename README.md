@@ -52,6 +52,14 @@ that is empty is replaced by the symlink (a directory holding only Finder
 metadata such as `.DS_Store` counts as empty), and one that holds anything else
 is refused with a message telling you to move it aside.
 
+Because those two paths become links into the assembly, the assembly directory
+must not be either of them and must not hold either of them. An `--assembly`
+or `SKILLS_ASSEMBLY_DIR` path that is, or contains, `~/.claude/skills` or
+`~/.codex/skills` is refused with exit 2 before anything is created, since the
+link would point into itself and every reader that walked below it would walk
+forever. The comparison uses the resolved paths, so an alias spelling is
+refused too. The session hook reports the same refusal in one line and exits 0.
+
 ### Update
 
 ```bash
@@ -86,7 +94,10 @@ that is there but cannot be read is refused the same way: `link`, `check` and
 aside. A run is one transaction: if the manifest cannot be written, the links
 that run created are removed again, the links it repointed carry their previous
 target again, the links it pruned are created again at the target the manifest
-still records, links it found already recorded stay, and the run exits 1. A
+still records, links it found already recorded stay, and the run exits 1. The
+session hook rolls its own re-link back the same way, and then reports the
+rollback instead of an `assembly updated` notice: nothing was linked or pruned
+once the work is undone. A
 recorded link that now has to point somewhere else and that the script cannot
 remove is reported, keeps the target it already had and its manifest entry,
 and makes `link` exit 1: no new link is created for it.
@@ -181,7 +192,11 @@ file is there but whose `--sources` or `--assembly` names another installation
 runs an assembly this run is not for, so it is rewritten to the current
 command and the run reports that it replaced a hook for another installation;
 an omitted option is read as the default for the `HOME` in effect, and the two
-paths are compared after symlinks are resolved. An entry that runs a
+paths are compared after symlinks are resolved. Every entry taken over this way
+is rewritten whole: its type becomes `command`, its command the current one,
+and its timeout the one this script installs, so an entry written by hand or by
+an older version cannot leave the hook running under another budget. An entry
+that runs a
 different script, such as `custom-link-skills.sh hook`, is another tool's, so
 it is kept as it is and this hook is added beside it. A file it creates itself gets mode
 `0600` and no backup. A backup name already in use

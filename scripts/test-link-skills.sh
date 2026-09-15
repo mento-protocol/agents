@@ -4056,6 +4056,356 @@ install_hooks_replaces_other_installation() {
 	fi
 }
 
+# One field of the first SessionStart hook entry of a settings file, or
+# '<missing>' when the entry does not carry that field at all.
+hook_entry_field() {
+	python3 -c 'import json, sys
+data = json.load(open(sys.argv[1]))
+entry = data["hooks"]["SessionStart"][0]["hooks"][0]
+print(entry.get(sys.argv[2], "<missing>"))' "$1" "$2" 2>/dev/null
+}
+
+# An entry this run takes over becomes this installation entirely: type,
+# command and timeout. An entry written by hand or by an older version can
+# carry a timeout of its own, and rewriting only its command would leave the
+# session hook running under a budget this script never installed.
+install_hooks_replacement_resets_timeout() {
+	local file sources assembly got
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		'            "type": "shell",' \
+		"            \"command\": \"bash $CASE_DIR/gone/scripts/link-skills.sh hook\"," \
+		'            "timeout": 1' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$file"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a stale entry"
+	assert_out_has "replaced a stale hook" "the stale entry is replaced"
+	got=$(hook_entry_field "$file" timeout)
+	if [ "$got" != "60" ]; then
+		fail "the replaced entry carries timeout $got, expected 60"
+	fi
+	got=$(hook_entry_field "$file" type)
+	if [ "$got" != "command" ]; then
+		fail "the replaced entry carries type $got, expected command"
+	fi
+	got=$(hook_entry_field "$file" command)
+	case "$got" in
+	*"$LS hook") ;;
+	*) fail "the replaced entry carries command $got, expected one ending in '$LS hook'" ;;
+	esac
+
+	# The same for an entry whose script is there but whose options name
+	# another installation.
+	sources="$CASE_DIR/custom-sources"
+	assembly="$CASE_DIR/custom-assembly"
+	printf '%s\n' "$CASE_DIR/one" >"$sources"
+	printf '%s\n' \
+		'{' \
+		'  "hooks": {' \
+		'    "SessionStart": [' \
+		'      {' \
+		'        "hooks": [' \
+		'          {' \
+		"            \"command\": \"bash $LS --sources $sources --assembly $assembly hook\"," \
+		'            "timeout": 1' \
+		'          }' \
+		'        ]' \
+		'      }' \
+		'    ]' \
+		'  }' \
+		'}' >"$file"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over another installation"
+	assert_out_has "replaced a hook for another installation" "the other installation is replaced"
+	got=$(hook_entry_field "$file" timeout)
+	if [ "$got" != "60" ]; then
+		fail "the rewritten entry carries timeout $got, expected 60"
+	fi
+	got=$(hook_entry_field "$file" type)
+	if [ "$got" != "command" ]; then
+		fail "the rewritten entry carries type $got, expected command"
+	fi
+}
+
+# The hook re-links after it fast-forwards a source, and that re-link is one
+# transaction like every other. A run whose manifest write fails puts the
+# assembly back, so it linked and pruned nothing: the notice must report the
+# rollback and never claim an update that was undone.
+hook_rollback_prints_no_success_notice() {
+	local shims before
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	fixture_company
+	write_sources
+	add_source "$COMPANY/skills auto-update"
+	ls_run link
+	assert_rc 0 "link"
+	before="$CASE_DIR/manifest.before"
+	cp "$HOME/.agents/skills/.skill-links" "$before"
+	push_beta
+
+	shims="$CASE_DIR/shims"
+	make_breaking_mktemp "$shims"
+	use_shims "$shims"
+	LS_TEST_UNWRITABLE_TMP=1
+	export LS_TEST_UNWRITABLE_TMP
+	ls_run hook
+	unset LS_TEST_UNWRITABLE_TMP
+	drop_shims
+
+	assert_rc 0 "hook"
+	assert_out_has "updated $COMPANY" "the clone is fast-forwarded"
+	assert_out_has "could not write the manifest" "the failed write is reported"
+	assert_out_has "link(s) this run created were removed" "the rollback is reported"
+	assert_out_lacks "assembly updated" "no success notice after a rollback"
+	assert_absent "$HOME/.agents/skills/beta" "the link the hook created is rolled back"
+	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
+}
+
+# The runtime skills paths become links into the assembly, so an assembly that
+# is one of them, or holds one of them, would be a link into itself: every
+# reader that walked below it would walk forever. The refusal comes before
+# anything is created.
+assembly_inside_runtime_home_refused() {
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude" "$HOME/.codex"
+
+	ls_run --assembly "$HOME/.claude" link
+	assert_rc 2 "an assembly at the Claude Code home"
+	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
+	assert_absent "$HOME/.claude/skills" "no runtime link is created"
+	assert_absent "$HOME/.claude/.skill-links" "no manifest is written"
+
+	ls_run --assembly "$HOME/.claude/skills" link
+	assert_rc 2 "an assembly at the Claude Code runtime path"
+	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
+	assert_absent "$HOME/.claude/skills" "nothing is created at the runtime path"
+
+	ls_run --assembly "$HOME/.codex/skills" link
+	assert_rc 2 "an assembly at the Codex runtime path"
+	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
+	assert_absent "$HOME/.codex/skills" "nothing is created at the runtime path"
+
+	ls_run --assembly "$HOME" link
+	assert_rc 2 "an assembly at the home directory"
+	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
+	assert_absent "$HOME/alpha" "no skill link in the home directory"
+	assert_absent "$HOME/.skill-links" "no manifest in the home directory"
+	assert_absent "$HOME/.claude/skills" "no runtime link is created"
+
+	# A session start never fails on a path this script cannot use.
+	ls_run --assembly "$HOME/.claude" hook
+	assert_rc 0 "the same refusal in hook mode"
+	assert_out_has "[link-skills] the assembly directory must not contain a runtime skills path" "one hook line"
+	assert_absent "$HOME/.claude/skills" "the hook creates nothing"
+
+	# The default assembly is neither runtime path and holds neither, so it
+	# still works.
+	ls_run link
+	assert_rc 0 "the default assembly"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "the Claude Code runtime link"
+	assert_link "$HOME/.codex/skills" "$HOME/.agents/skills" "the Codex runtime link"
+}
+
+# A double-quoted scalar carries the whole YAML escape set, and four of the
+# escapes name characters that are whitespace: \N (U+0085), \_ (U+00A0),
+# \L (U+2028) and \P (U+2029). An undecoded escape keeps the letter instead, so
+# a description of only separators measures as one or two visible characters
+# and passes the empty check. JavaScript's own trim removes U+00A0, U+2028 and
+# U+2029 but not U+0085, so the empty check needs the wider set as well.
+validator_decodes_all_yaml_escapes() {
+	local out rc psfits psover emfits emover
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# "\L" is U+2028 alone: whitespace, so the description is empty.
+	mkdir -p "$CASE_DIR/esc-ls/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\L"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-ls/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-ls" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a description of only \\L must fail as empty: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the \\L failure must name the length limit: $out" ;;
+	esac
+
+	# "\N\_" is U+0085 followed by U+00A0: both are whitespace to YAML, and
+	# JavaScript's trim drops only the second of them.
+	mkdir -p "$CASE_DIR/esc-nel/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\N\\_"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-nel/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-nel" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a description of only \\N\\_ must fail as empty: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the \\N\\_ failure must name the length limit: $out" ;;
+	esac
+
+	# "\x20\u0020" is two spaces: the hex forms decode too.
+	mkdir -p "$CASE_DIR/esc-hex/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\x20\\u0020"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-hex/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-hex" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a description of only \\x20\\u0020 must fail as empty: $out"
+	fi
+
+	# A separator between two letters stays in the value: "a\Pb" is three code
+	# points, not empty and not two.
+	mkdir -p "$CASE_DIR/esc-ps/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "a\\Pb"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-ps/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-ps" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a description of a\\Pb must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output for a\\Pb: $out" ;;
+	esac
+
+	# The length boundary pins \P at exactly one code point: 1022 "a", the
+	# separator and "b" are 1024, and one more "a" is 1025.
+	psfits=$(printf '%1022s' '' | tr ' ' 'a')
+	psover=$(printf '%1023s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/esc-ps-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\Pb"\n' "$psfits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-ps-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-ps-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024 code point description around \\P must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/esc-ps-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\Pb"\n' "$psover"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-ps-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-ps-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail 'a 1025 code point description around \P must fail'
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the \\P length failure must name the length limit: $out" ;;
+	esac
+
+	# "\U0001F600" is one code point, not the two UTF-16 units that carry it.
+	mkdir -p "$CASE_DIR/esc-emoji/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "\\U0001F600"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-emoji/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-emoji" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a description of one escaped emoji must validate: $out"
+	fi
+
+	emfits=$(printf '%1023s' '' | tr ' ' 'a')
+	emover=$(printf '%1024s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/esc-emoji-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\U0001F600"\n' "$emfits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-emoji-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-emoji-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024 code point description ending in an escaped emoji must validate: $out"
+	fi
+
+	mkdir -p "$CASE_DIR/esc-emoji-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: "%s\\U0001F600"\n' "$emover"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/esc-emoji-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/esc-emoji-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025 code point description ending in an escaped emoji must fail"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the emoji length failure must name the length limit: $out" ;;
+	esac
+}
+
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -4119,6 +4469,9 @@ main() {
 	run_case install_hooks_embeds_custom_paths
 	run_case sources_path_inside_assembly_refused
 	run_case install_hooks_replaces_other_installation
+	run_case install_hooks_replacement_resets_timeout
+	run_case hook_rollback_prints_no_success_notice
+	run_case assembly_inside_runtime_home_refused
 	run_case relink_creation_failure_restores_old_link
 	run_case unlink_leaves_foreign_entries
 	run_case personal_skill_untouched
@@ -4198,6 +4551,7 @@ main() {
 	run_case validator_folds_plain_scalar_across_blank_line
 	run_case validator_folded_block_paragraph_break
 	run_case validator_folded_block_more_indented_boundary
+	run_case validator_decodes_all_yaml_escapes
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_block_scalar_keeps_internal_spaces

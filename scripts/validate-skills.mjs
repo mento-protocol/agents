@@ -16,7 +16,10 @@
 //     keeps the line break before it, so a blank line next to one yields two
 //     newlines. The chomping indicator of a block scalar decides how many
 //     trailing newlines its value keeps. An unquoted value loses its inline
-//     comment, so "description: # TODO" reads as empty
+//     comment, so "description: # TODO" reads as empty. A double-quoted scalar
+//     resolves the whole YAML escape set, including \N (U+0085), \_ (U+00A0),
+//     \L (U+2028) and \P (U+2029), and the empty check treats those four as
+//     whitespace as well
 //   - description is a plain string. Any unquoted value that YAML reads as
 //     another type is refused: "[]", "{}", a flow sequence or mapping, a bare
 //     anchor or alias, an explicit tag such as "!!int 123" or "!custom y", the
@@ -143,6 +146,24 @@ function stripInlineComment(value) {
   return value.replace(/\s+#.*$/, "").trim();
 }
 
+/**
+ * The whitespace the empty check strips from both ends of a decoded
+ * description. JavaScript's trim already removes U+00A0, U+2028 and U+2029,
+ * but not U+0085, so a description of only "\N" would measure as one
+ * character. The class names all four YAML break and space characters next to
+ * "\s" so the rule stays readable.
+ */
+const YAML_SPACE_RE =
+  /^[\s\u0085\u00a0\u2028\u2029]+|[\s\u0085\u00a0\u2028\u2029]+$/g;
+
+/**
+ * Trim a decoded scalar with the YAML whitespace set: JavaScript's trim set
+ * plus U+0085, U+00A0, U+2028 and U+2029.
+ */
+function trimYamlSpace(value) {
+  return value.replace(YAML_SPACE_RE, "");
+}
+
 /** The number of leading space and tab characters of a line. */
 function indentWidth(line) {
   const match = /^[ \t]*/.exec(line);
@@ -150,10 +171,11 @@ function indentWidth(line) {
 }
 
 /**
- * Resolve the escape sequences of a double-quoted YAML scalar: the single
- * character escapes, "\xNN", "\uNNNN" and "\UNNNNNNNN". An escape that no rule
- * matches keeps the escaped character itself, which is what YAML does for the
- * quote and backslash forms.
+ * Resolve the escape sequences of a double-quoted YAML scalar: the whole single
+ * character set (\0 \a \b \t \n \v \f \r \e "\ " \" \/ \\ \N \_ \L \P), plus
+ * "\xNN", "\uNNNN" and "\UNNNNNNNN". An escape that no rule matches keeps the
+ * escaped character itself, which is what YAML does for the quote and backslash
+ * forms.
  */
 function decodeDoubleQuoted(body) {
   const SIMPLE = new Map([
@@ -172,6 +194,8 @@ function decodeDoubleQuoted(body) {
     ["\\", "\\"],
     ["N", "\x85"],
     ["_", "\xa0"],
+    ["L", "\u2028"],
+    ["P", "\u2029"],
   ]);
   const HEX_WIDTHS = new Map([
     ["x", 2],
@@ -571,7 +595,7 @@ function validateSkill(name) {
     // boolean, a number, a date, or whatever type an explicit tag names.
     problems.push(`skills/${name}: "description" must be a plain string`);
   } else {
-    const trimmed = descriptionField.value.trim();
+    const trimmed = trimYamlSpace(descriptionField.value);
     const trimmedLength = codePointLength(trimmed);
     if (trimmedLength < 1 || trimmedLength > 1024) {
       problems.push(

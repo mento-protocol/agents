@@ -169,7 +169,11 @@ usage() {
 		'' \
 		'Options:' \
 		'  --sources FILE  Sources list (default: $HOME/.agents/skill-sources)' \
-		'  --assembly DIR  Assembly directory (default: $HOME/.agents/skills)' \
+		'  --assembly DIR  Assembly directory (default: $HOME/.agents/skills).' \
+		'                  It must not be, or hold, $HOME/.claude/skills or' \
+		'                  $HOME/.codex/skills: those two paths become links' \
+		'                  into the assembly, so either would be a link into' \
+		'                  itself.' \
 		'  --quiet         Print only problems.' \
 		'' \
 		'Environment:' \
@@ -184,8 +188,9 @@ usage() {
 		'  1  at least one problem was reported' \
 		'  2  wrong usage, or no source to work from: no sources file, a' \
 		'     sources file that is not a regular file, names one of the' \
-		'     assembly control paths, or lists no source, or a path whose' \
-		'     components are not all directories' \
+		'     assembly control paths, or lists no source, a path whose' \
+		'     components are not all directories, or an assembly directory' \
+		'     that is or holds a runtime skills path' \
 		'' \
 		'Sources file format, one entry per line. Each path names the directory' \
 		'whose immediate children are skill directories holding a SKILL.md:' \
@@ -1558,6 +1563,39 @@ ensure_runtime_links() {
 	runtime_link "$HOME/.codex"
 }
 
+# One of the two paths ensure_runtime_links writes, with the directory that
+# holds it resolved. The final 'skills' segment is never resolved: it is the
+# link this script creates, and following it would answer with the assembly it
+# already points at.
+runtime_link_path() {
+	local dir
+	if ! dir=$(canonical_path "$1" 2>/dev/null); then
+		dir=$1
+	fi
+	printf '%s/skills\n' "${dir%/}"
+}
+
+# An assembly directory that is, or holds, a runtime skills path. Linking
+# $HOME/.claude/skills -> $HOME/.claude makes a directory that contains
+# itself, and an assembly at $HOME/.claude/skills would be linked into
+# itself: either way every reader that walks below that link walks forever.
+# The two runtime paths are compared with the canonical assembly path, so an
+# alias spelling is refused as well as the plain one.
+assembly_holds_runtime_link() {
+	local link
+	for link in \
+		"$(runtime_link_path "$HOME/.claude")" \
+		"$(runtime_link_path "$HOME/.codex")"; do
+		if [ "$ASSEMBLY_DIR" = "$link" ]; then
+			return 0
+		fi
+		case "$link/" in
+		"$ASSEMBLY_DIR"/*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
 # Create the sources file from the clone that holds this script, if that is
 # where the script lives and no sources file exists yet.
 ensure_sources_file() {
@@ -2278,6 +2316,12 @@ cmd_hook() {
 			restore_repointed_links
 			restore_pruned_links
 			rollback_new_links
+			# The assembly is back to what the manifest on disk describes, so
+			# this run linked and pruned nothing. The counters must say so, or
+			# the notice below would announce an update that was undone.
+			LINKED=0
+			UNCHANGED=0
+			PRUNED=0
 		fi
 		ensure_runtime_links
 		if [ "$LINKED" -gt 0 ] || [ "$PRUNED" -gt 0 ]; then
@@ -2634,13 +2678,24 @@ for group in groups:
             continue
         found = True
 
+def take_over(entry):
+    # The whole entry is rewritten for this installation, not its command
+    # alone. An entry written by hand, by an older version or by another
+    # installation can carry another timeout, or no type at all, and the
+    # session hook would then run under a budget this script never installed,
+    # or not run at all.
+    entry["type"] = "command"
+    entry["command"] = command
+    entry["timeout"] = timeout
+
+
 status = "unchanged"
 if not found and stale:
-    stale[0]["command"] = command
+    take_over(stale[0])
     found = True
     status = "replaced"
 elif not found and other:
-    other[0]["command"] = command
+    take_over(other[0])
     found = True
     status = "replaced-other"
 
@@ -3086,6 +3141,12 @@ main() {
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
 	ASSEMBLY_DIR=${ASSEMBLY_DIR%/}
+	# Refused here, before any command runs and so before any directory, link
+	# or manifest is created: an assembly that is or holds a runtime skills
+	# path would be linked into itself.
+	if assembly_holds_runtime_link; then
+		die "the assembly directory must not contain a runtime skills path: $ASSEMBLY_DIR"
+	fi
 	MANIFEST="$ASSEMBLY_DIR/.skill-links"
 	STAMP_DIR="$ASSEMBLY_DIR/.skill-links.d"
 	LOCK_DIR="$ASSEMBLY_DIR/.skill-links.lock"
