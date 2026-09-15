@@ -3476,6 +3476,122 @@ validator_rejects_mapping_indicator_in_plain_scalar() {
 	esac
 }
 
+# A key with no inline value whose first indented line is plain text folds the
+# lines under it into one scalar, so a mapping indicator on a later line is
+# inside that scalar and YAML refuses the document. A first line that opens a
+# mapping, with a plain key or with a complex key ("? "), is a nested
+# collection, which stays a collection.
+validator_rejects_mapping_indicator_on_later_continuation() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/late-map/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  foo\n'
+		printf '  bar: baz\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/late-map/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/late-map" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an indicator on a later continuation must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 3 is not valid YAML"*) ;;
+	*) fail "the late indicator must name the header line: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/late-text/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  foo\n'
+		printf '  bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/late-text/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/late-text" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "two plain continuation lines must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/late-nested/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  team: platform\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/late-nested/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/late-nested" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a nested mapping under metadata must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A complex key opens a mapping too, so the reserved-indicator rule must
+	# leave it alone the way it leaves "- item" and "team: platform" alone.
+	mkdir -p "$CASE_DIR/late-complex/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  ? foo\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/late-complex/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/late-complex" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a complex key under metadata must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/late-complex-value/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  ? foo\n'
+		printf '  : bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/late-complex-value/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/late-complex-value" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a complex key with its value must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A key with no inline value takes whatever the indented lines under it spell.
 # A plain value may not open with a reserved indicator. YAML reads "- ", "? "
 # and ": " as a sequence entry, a complex key and a mapping value, and refuses
@@ -4483,6 +4599,71 @@ validator_counts_code_points() {
 	esac
 }
 
+# Write a SKILL.md of exactly $2 lines to $1. The last line carries no newline,
+# so the caller adds one when it needs the terminated form.
+write_skill_of_lines() {
+	local target=$1 want=$2 i=5
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n'
+		while [ "$i" -lt "$want" ]; do
+			printf 'body line %s\n' "$i"
+			i=$((i + 1))
+		done
+		printf 'body line %s' "$want"
+	} >"$target"
+}
+
+# Item 6 of the AGENTS.md promotion checklist caps SKILL.md at 500 lines. A cap
+# no check counts is a cap a reviewer has to hold by eye, so CI counts it.
+validator_rejects_skill_over_500_lines() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/lines-over/skills/noted"
+	write_skill_of_lines "$CASE_DIR/lines-over/skills/noted/SKILL.md" 501
+	out=$(node "$VALIDATOR" "$CASE_DIR/lines-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 501 line SKILL.md must fail: $out"
+	fi
+	case "$out" in
+	*"SKILL.md has 501 lines; the limit is 500"*) ;;
+	*) fail "the line count must be reported: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/lines-at/skills/noted"
+	write_skill_of_lines "$CASE_DIR/lines-at/skills/noted/SKILL.md" 500
+	out=$(node "$VALIDATOR" "$CASE_DIR/lines-at" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 500 line SKILL.md must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# The newline that ends the last line is a terminator, not a line of its own.
+	mkdir -p "$CASE_DIR/lines-nl/skills/noted"
+	write_skill_of_lines "$CASE_DIR/lines-nl/skills/noted/SKILL.md" 500
+	printf '\n' >>"$CASE_DIR/lines-nl/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/lines-nl" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 500 line SKILL.md with a trailing newline must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A relink is a removal and a creation. When the removal fails and is not
 # checked, the old link stays and 'ln -s' follows it: the new link lands inside
 # the old target directory, where nothing ever finds it again.
@@ -4562,6 +4743,57 @@ unreadable_skill_directory_keeps_link() {
 	assert_out_has "pruned 1" "beta pruned"
 	assert_absent "$HOME/.agents/skills/beta" "the beta link is gone"
 	assert_file_lacks "$HOME/.agents/skills/.skill-links" "beta" "the manifest dropped beta"
+}
+
+# A SKILL.md that is there and cannot be opened is not a skill this run can
+# offer: linking it points the runtime at a file it cannot read. It is not a
+# deleted skill either, so a recorded link survives the permission problem.
+unreadable_skill_file_keeps_link() {
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/one" beta
+	write_sources
+	add_source "$CASE_DIR/one"
+	ls_run link
+	assert_rc 0 "first link"
+	chmod 000 "$CASE_DIR/one/beta/SKILL.md"
+	mkskill "$CASE_DIR/one" gamma
+	ls_run link
+	assert_rc 1 "link with an unreadable SKILL.md"
+	assert_out_has "skill beta in $CASE_DIR/one: SKILL.md cannot be read; kept the existing link" \
+		"the recorded skill is named"
+	assert_out_has "kept 1 link(s)" "the kept count"
+	assert_out_has "pruned 0" "nothing pruned"
+	assert_out_lacks "holds no skill" "the source itself reads fine"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link kept"
+	assert_file_has "$HOME/.agents/skills/.skill-links" "beta" "the manifest keeps beta"
+	assert_link "$HOME/.agents/skills/gamma" "$CASE_DIR/one/gamma" "a new skill is still linked"
+
+	ls_run check
+	assert_rc 1 "check with an unreadable SKILL.md"
+	assert_out_has "link kept: beta" "check reports beta as kept"
+	assert_out_lacks "will prune it" "check promises no prune that link will not do"
+
+	# A name nothing records yet is not linked at all: there is no link to keep
+	# and no skill to offer.
+	mkskill "$CASE_DIR/one" delta
+	chmod 000 "$CASE_DIR/one/delta/SKILL.md"
+	ls_run link
+	assert_rc 1 "link with an unreadable new skill"
+	assert_out_has "skill delta in $CASE_DIR/one: SKILL.md cannot be read; not linked" \
+		"the new skill is named"
+	assert_absent "$HOME/.agents/skills/delta" "no link for the unreadable new skill"
+	assert_file_lacks "$HOME/.agents/skills/.skill-links" "delta" "the manifest records no delta"
+
+	chmod 644 "$CASE_DIR/one/beta/SKILL.md" "$CASE_DIR/one/delta/SKILL.md"
+	ls_run link
+	assert_rc 0 "link once the files read again"
+	assert_out_has "errors 0" "a clean run"
+	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta is still linked"
+	assert_link "$HOME/.agents/skills/delta" "$CASE_DIR/one/delta" "delta is linked now"
 }
 
 # A plain scalar does not end at a blank line when an indented line still
@@ -5484,6 +5716,78 @@ install_hooks_replaces_malformed_option_command() {
 	assert_out_lacks "replaced a malformed" "the spelled-out entry is not rewritten"
 }
 
+# An unmatched quote is a command the shell refuses at every session start. A
+# plain split of it tokenizes a tail anyway, and reading a hook run out of that
+# tail would report the hook installed while no session ever runs it.
+install_hooks_replaces_unbalanced_quote_command() {
+	local file n groups other spaced
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	write_installed_hook_settings "$file" "bash $LS \\\"hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an unmatched quote"
+	assert_out_has "replaced a malformed hook command in $file" \
+		"the broken quoting is reported"
+	assert_out_lacks "already runs the hook" "it is not counted as installed"
+	assert_file_has "$file" "bash $LS hook" \
+		"the entry is rewritten to the generated command"
+	assert_file_lacks "$file" '\"hook' "the broken command is gone"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+
+	# The same broken quoting on another tool's script says nothing about this
+	# installation: the entry stays and the generated one is added beside it.
+	rm -f "$file" "$file".bak-*
+	other="$CASE_DIR/other-tool.sh"
+	write_installed_hook_settings "$file" "bash '$other' \\\"hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks beside another tool's broken entry"
+	assert_out_has "added the SessionStart hook to $file" "the hook is added"
+	assert_out_lacks "replaced a malformed" "the other tool's entry is not rewritten"
+	assert_file_has "$file" "$other" "the other tool's entry is kept"
+	assert_file_has "$file" "bash $LS hook" "the generated command is there"
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "2" ]; then
+		fail "expected 2 SessionStart groups, found $groups"
+	fi
+
+	# An installation path with a space is quoted in the stored command, so a
+	# plain split shatters it and the script sits in no fixed token. The entry
+	# is still ours and is still a command no shell runs.
+	rm -f "$file" "$file".bak-*
+	spaced="$CASE_DIR/my repos/link-skills.sh"
+	mkdir -p "$CASE_DIR/my repos"
+	cp "$SOURCE_SCRIPT" "$spaced"
+	LS="$spaced"
+	write_installed_hook_settings "$file" "bash '$spaced' \\\"hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an unmatched quote on a path with a space"
+	assert_out_has "replaced a malformed hook command in $file" \
+		"the broken quoting on a spaced path is reported"
+	assert_out_lacks "added the SessionStart hook" "the entry is repaired, not doubled"
+	assert_file_has "$file" "bash '$spaced' hook" \
+		"the entry is rewritten to the generated command"
+	assert_file_lacks "$file" '\"hook' "the broken command is gone"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+}
+
 # Two SessionStart groups, the first holding $2 and the second $3, both with
 # the type and the timeout this script installs.
 write_two_hook_groups() {
@@ -5571,6 +5875,73 @@ install_hooks_removes_bad_duplicate_beside_valid_entry() {
 	if [ "$n" != "1" ]; then
 		fail "expected one backup for the stale duplicate, found $n"
 	fi
+}
+
+# With no valid entry the repair took over the first bad one and left the
+# others where they were, so one entry ran the hook and the next still wrote a
+# sources file named "hook" at every session start.
+install_hooks_repairs_one_and_removes_other_bad_entries() {
+	local file n groups
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	write_two_hook_groups "$file" "bash $LS --sources hook" "bash $LS --sources hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over two malformed entries"
+	assert_out_has "replaced a malformed hook command in $file" "the repair is reported"
+	assert_out_has "removed 1 duplicate hook entry in $file" "the removal is reported"
+	assert_file_has "$file" "bash $LS hook" "the generated command is there"
+	assert_file_lacks "$file" "--sources hook" "no malformed entry is left"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command, found $n"
+	fi
+	groups=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["SessionStart"]))' "$file")
+	if [ "$groups" != "1" ]; then
+		fail "expected 1 SessionStart group, found $groups"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup, found $n"
+	fi
+
+	ls_run install-hooks
+	assert_rc 0 "a rerun"
+	assert_out_has "already runs the hook" "the file is installed once it is repaired"
+	assert_out_lacks "duplicate hook entr" "nothing is removed twice"
+
+	# Two different bad shapes: the stale entry is the one the chain repairs,
+	# and the malformed one goes with it instead of staying active.
+	rm -f "$file" "$file".bak-*
+	write_two_hook_groups "$file" "bash $CASE_DIR/gone/link-skills.sh hook" \
+		"bash $LS --sources hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a stale entry and a malformed one"
+	assert_out_has "replaced a stale hook in $file" "the stale entry is repaired"
+	assert_out_has "removed 1 duplicate hook entry in $file" "the malformed entry is removed"
+	assert_file_has "$file" "bash $LS hook" "the generated command is there"
+	assert_file_lacks "$file" "$CASE_DIR/gone" "the stale path is gone"
+	assert_file_lacks "$file" "--sources hook" "the malformed entry is gone"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command after the mixed repair, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "expected one backup for the mixed repair, found $n"
+	fi
+
+	ls_run install-hooks
+	assert_rc 0 "a rerun after the mixed repair"
+	assert_out_has "already runs the hook" "the file is installed"
+	assert_out_lacks "duplicate hook entr" "nothing is removed twice"
 }
 
 # One field of the first SessionStart hook entry of a settings file, or
@@ -7160,7 +7531,9 @@ main() {
 	run_case sources_symlink_to_manifest_refused
 	run_case install_hooks_replaces_other_installation
 	run_case install_hooks_replaces_malformed_option_command
+	run_case install_hooks_replaces_unbalanced_quote_command
 	run_case install_hooks_removes_bad_duplicate_beside_valid_entry
+	run_case install_hooks_repairs_one_and_removes_other_bad_entries
 	run_case install_hooks_replacement_resets_timeout
 	run_case assembly_inside_runtime_home_refused
 	run_case relative_source_missing_keeps_links
@@ -7209,6 +7582,7 @@ main() {
 	run_case nested_missing_assembly_is_created
 	run_case relink_failure_keeps_old_link_and_entry
 	run_case unreadable_skill_directory_keeps_link
+	run_case unreadable_skill_file_keeps_link
 	run_case lock_vanish_is_retried
 	run_case unreadable_name_not_repointed
 	run_case stale_lock_is_removed
@@ -7256,6 +7630,7 @@ main() {
 	run_case validator_rejects_tagged_and_more_numeric_scalars
 	run_case validator_rejects_underscored_base_numbers
 	run_case validator_counts_code_points
+	run_case validator_rejects_skill_over_500_lines
 	run_case validator_folds_plain_scalar_across_blank_line
 	run_case validator_folded_block_paragraph_break
 	run_case validator_folded_block_more_indented_boundary
@@ -7271,6 +7646,7 @@ main() {
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
+	run_case validator_rejects_mapping_indicator_on_later_continuation
 	run_case validator_rejects_reserved_leading_indicator
 	run_case validator_rejects_nested_collection_value
 	run_case validator_decodes_quoted_continuation_value

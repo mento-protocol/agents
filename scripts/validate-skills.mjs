@@ -46,15 +46,21 @@
 // and a top-level value that opens a flow collection ("[" or "{") must close
 // it on the same logical scalar. Indentation is spaces only, so a line
 // indented with a tab is refused, as is a plain value that starts with a
-// reserved indicator ("- ", "? ", ": ", ",", "@", "`" or "%"). Anything else
-// is reported as "frontmatter line N is not valid YAML". A file that passes
-// this check can still hold YAML the check does not model.
+// reserved indicator ("- ", "? ", ": ", ",", "@", "`" or "%"). The reserved
+// indicator and the mapping indicator (": " or a trailing ":") are read on the
+// folded value, so a continuation line under a key with no inline value is
+// refused the same way an inline value is, unless the first continuation line
+// opens a list or a mapping. Anything else is reported as "frontmatter line N
+// is not valid YAML". A file that passes this check can still hold YAML the
+// check does not model.
 //
 // Also fails on:
 //   - a skills/* entry that is not a directory, except Finder and Explorer
 //     metadata files (.DS_Store, .localized, Thumbs.db), which are ignored
 //     the same way scripts/link-skills.sh ignores them
 //   - a SKILL.md nested deeper than skills/<name>/SKILL.md
+//   - a SKILL.md of more than 500 lines, the cap item 6 of the AGENTS.md
+//     promotion checklist sets; a trailing newline does not add a line
 //
 // Usage: node scripts/validate-skills.mjs [repo-root]
 //
@@ -76,6 +82,10 @@ const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // link script treats the same names as noise, so the validator must not fail
 // a local checkout on them.
 const NOISE_NAMES = new Set([".DS_Store", ".localized", "Thumbs.db"]);
+
+// Item 6 of the AGENTS.md promotion checklist caps a SKILL.md here, so CI has
+// to count the lines instead of leaving the cap to a reviewer.
+const MAX_SKILL_MD_LINES = 500;
 
 /**
  * The length of a string in Unicode code points. String.length counts UTF-16
@@ -116,6 +126,14 @@ const MAPPING_INDICATOR_RE = /:[ \t]|:$/;
  * opens a list.
  */
 const SEQUENCE_ENTRY_RE = /^-(?:[ \t]|$)/;
+
+/**
+ * A complex key at the head of a value: a "?" followed by a space or a tab, or
+ * a "?" alone on its line. Under a key with no inline value, such a line opens
+ * a mapping whose key the lines after the "?" spell, so it opens a collection
+ * the way "- " and "key:" do.
+ */
+const COMPLEX_KEY_RE = /^\?(?:[ \t]|$)/;
 
 /**
  * A reserved indicator at the head of a plain scalar: "-", "?" or ":" that a
@@ -864,6 +882,18 @@ function parseFrontmatter(lines, firstLineNumber) {
 
     const plain = readPlainScalar(rest, lines, i);
     i = plain.end;
+    // A key with no inline value carries whatever the indented lines under it
+    // spell. When the first continuation line opens a sequence entry, a
+    // complex key or a mapping entry, YAML hands the runtime a list or a
+    // mapping, not the text this parser folded. A continuation line that is a
+    // quoted scalar stays a string, so the indicator is read outside the
+    // quotes. Other keys may nest a collection; the two string fields refuse
+    // one.
+    const collection =
+      rest === "" &&
+      (SEQUENCE_ENTRY_RE.test(continuation.text) ||
+        COMPLEX_KEY_RE.test(continuation.text) ||
+        opensMappingEntry(continuation.text));
     const flow = /^[[{]/.test(plain.value);
     if (flow && !flowCollectionCloses(plain.value)) {
       invalid.push(lineNumber);
@@ -872,17 +902,19 @@ function parseFrontmatter(lines, firstLineNumber) {
       // value that still starts with "|" or ">" is a malformed header such as
       // "|0". No plain scalar may start with an indicator character either.
       invalid.push(lineNumber);
-    } else if (rest !== "" && RESERVED_LEADING_RE.test(plain.value)) {
+    } else if (!collection && RESERVED_LEADING_RE.test(plain.value)) {
       // "- ", "? " and ": " open a sequence entry, a complex key and a mapping
       // value here, and ",", "@", "`" and "%" are reserved, so YAML refuses
       // the line instead of reading it as the text it looks like.
       invalid.push(lineNumber);
-    } else if (rest !== "" && !flow && MAPPING_INDICATOR_RE.test(plain.value)) {
+    } else if (!collection && !flow && MAPPING_INDICATOR_RE.test(plain.value)) {
       // YAML reads ": " and a trailing ":" as a mapping indicator, so this
-      // text is not the scalar it looks like. A header line with no value is
-      // left alone: the indented lines under it are a nested mapping, not a
-      // plain scalar this parser folds. Inside a flow collection the same
-      // characters are that collection's own keys.
+      // text is not the scalar it looks like. Only a collection is left alone:
+      // under a header with no value the indented lines are then a nested
+      // mapping or a list, not a plain scalar this parser folds. When they
+      // fold as one, a later line may carry the indicator, and YAML refuses
+      // that document as well. Inside a flow collection the same characters
+      // are that collection's own keys.
       invalid.push(lineNumber);
     }
     fields.set(key, {
@@ -890,16 +922,7 @@ function parseFrontmatter(lines, firstLineNumber) {
       raw: plain.value,
       quoted: false,
       block: false,
-      // A key with no inline value carries whatever the indented lines under
-      // it spell. When the first continuation line opens a sequence entry or a
-      // mapping entry, YAML hands the runtime a list or a mapping, not the text
-      // this parser folded. A continuation line that is a quoted scalar stays a
-      // string, so the indicator is read outside the quotes. Other keys may
-      // nest a collection; the two string fields refuse one.
-      collection:
-        rest === "" &&
-        (SEQUENCE_ENTRY_RE.test(continuation.text) ||
-          opensMappingEntry(continuation.text)),
+      collection,
     });
   }
   return { fields, invalid };
@@ -950,6 +973,18 @@ function validateSkill(name) {
 
   const raw = readFileSync(skillMdPath, "utf8");
   const lines = raw.split("\n");
+
+  // The split leaves an empty last element for a file that ends with a
+  // newline; that terminator is not a line of its own.
+  const lineCount =
+    lines.length > 0 && lines[lines.length - 1] === ""
+      ? lines.length - 1
+      : lines.length;
+  if (lineCount > MAX_SKILL_MD_LINES) {
+    problems.push(
+      `skills/${name}: SKILL.md has ${lineCount} lines; the limit is ${MAX_SKILL_MD_LINES}`,
+    );
+  }
 
   if (!isDelimiterLine(lines[0])) {
     problems.push(

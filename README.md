@@ -291,7 +291,11 @@ listed source holds no skill.
 A source directory the script cannot read says nothing about what belongs in
 the assembly, and neither does a skill directory inside a readable source that
 the script cannot read. Both keep their recorded links and their manifest
-entries, both are reported by path, and `link` and `check` exit 1. When a name
+entries, both are reported by path, and `link` and `check` exit 1. A skill
+directory that reads fine and holds a `SKILL.md` the script cannot open is
+treated the same way: the runtime would reach a file it cannot read, so the
+name is reported, a recorded link and its manifest entry are kept, a skill
+nothing records yet is not linked, and `link` and `check` exit 1. When a name
 whose skill directory could not be read is also provided by another source, the
 two copies are a duplicate this run cannot resolve: the recorded link and its
 manifest entry stay as they are, the name is not repointed at the readable

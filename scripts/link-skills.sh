@@ -825,7 +825,7 @@ unread_source_of() {
 }
 
 # Fill CAND_NAME/CAND_TARGET with every immediate child directory of every
-# source that holds a SKILL.md. A name claimed by two sources is an error and
+# source that holds a SKILL.md this run can read. A name claimed by two sources is an error and
 # neither copy is linked.
 collect_candidates() {
 	local i j n src entry name first paths found
@@ -877,6 +877,22 @@ collect_candidates() {
 				continue
 			fi
 			if [ ! -f "$entry/SKILL.md" ]; then
+				continue
+			fi
+			# The file is there and cannot be opened, so the runtime
+			# would reach a skill it cannot read. That is a permission
+			# problem like an unreadable directory, not a skill that
+			# was deleted, so an existing link survives it.
+			if [ ! -r "$entry/SKILL.md" ]; then
+				if manifest_target_of "$name" >/dev/null; then
+					err "skill $name in $src: SKILL.md cannot be read; kept the existing link"
+				else
+					err "skill $name in $src: SKILL.md cannot be read; not linked"
+				fi
+				UNREAD_NAME[UNREAD_COUNT]="$name"
+				UNREAD_SRC[UNREAD_COUNT]="$src"
+				UNREAD_COUNT=$((UNREAD_COUNT + 1))
+				found=$((found + 1))
 				continue
 			fi
 			RAW_NAME[RAW_COUNT]="$name"
@@ -2717,21 +2733,26 @@ print_hook_snippet() {
 # must not contain a single quote. It prints a status word on the first line:
 #   unchanged        the hook is already installed; nothing is written
 #   added            a new SessionStart group holds the hook
-#   normalized       an entry that already ran this command carried another
+#   normalized <n>   an entry that already ran this command carried another
 #                    type or another timeout, and now carries both of this one
-#   replaced         an entry whose script path is gone now holds the hook
-#   replaced-interpreter <name>
+#   replaced <n>     an entry whose script path is gone now holds the hook
+#   replaced-interpreter <name> <n>
 #                    an entry that ran the script through something other than
 #                    bash now holds the hook; the interpreter follows the word
-#   replaced-gone-interpreter <path>
+#   replaced-gone-interpreter <path> <n>
 #                    an entry that named an interpreter by an absolute path
 #                    that holds no executable now holds the hook
-#   replaced-malformed
+#   replaced-malformed <n>
 #                    an entry that ran this script with a tail that is not a
-#                    hook run now holds the hook
-#   replaced-other   an entry that ran another installation now holds the hook
+#                    hook run, or that no shell can parse at all, now holds the
+#                    hook
+#   replaced-other <n>
+#                    an entry that ran another installation now holds the hook
 #   deduplicated <n> the hook was already installed and <n> other entries this
 #                    script owns were removed from the file
+# Every replacement status ends in the number of other entries this script owns
+# that the repair removed, which is 0 when there were none: the repair and the
+# removals are one change and are reported together.
 # For every status but "unchanged" it writes the merged JSON to a temporary
 # file of its own next to the settings file and prints that path on the second
 # line, so the name is never predictable and never collides with a second run.
@@ -2836,10 +2857,23 @@ def parse_command(value):
     # defaults to link, and a session start would write a sources file and
     # relink the assembly.
     text = str(value)
+    # An unmatched quote is a command no shell runs at all, so the plain split
+    # is good for one thing only: saying whose entry it is. Its tokens are not
+    # what would have run, and reading a hook run out of them would report the
+    # hook installed while every session start dies on the quote. Nor is the
+    # script in a fixed position there: a quoted path with a space in it is
+    # shattered across several tokens, and the first one after the
+    # interpreter is then a fragment. So ownership is read from any token
+    # whose basename is this script name, and the fourth value tells the
+    # caller that the command is broken whatever else the tokens look like.
     try:
         parts = shlex.split(text)
     except ValueError:
-        parts = text.split()
+        for part in text.split():
+            name = part.strip(QUOTES)
+            if os.path.basename(name) == marker:
+                return name, None, "", True
+        return None
     if not parts:
         return None
     index = 0
@@ -2862,11 +2896,11 @@ def parse_command(value):
         return None
     tail = parse_tail(parts, index)
     if tail is None:
-        return token, None, interpreter
+        return token, None, interpreter, False
     sources, assembly, positionals = tail
     if positionals != ["hook"]:
-        return token, None, interpreter
-    return token, (sources, assembly), interpreter
+        return token, None, interpreter, False
+    return token, (sources, assembly), interpreter, False
 
 
 def canon(value):
@@ -2932,7 +2966,14 @@ for group in groups:
         parsed = parse_command(text)
         if parsed is None:
             continue
-        token, options, interpreter = parsed
+        token, options, interpreter, broken = parsed
+        # Ours, and no shell would run it: a command with an unmatched quote
+        # is malformed, like a tail that is not a hook run. Nothing else about
+        # it decides, because the tokens it was recognized by are not what
+        # would have run and the path among them may be a fragment.
+        if broken:
+            malformed.append(entry)
+            continue
         # A SessionStart hook runs from whatever directory the session opens
         # in, so a relative script path names a different file in every
         # project and usually no file at all. It is stale wherever this
@@ -3015,43 +3056,60 @@ def take_over(entry):
     entry["timeout"] = timeout
 
 
+def owned_entries():
+    # Every entry this script owns, whichever bucket read it.
+    owned = valid + normalize + stale + malformed + other
+    owned = owned + [pair[0] for pair in wrong_shell]
+    owned = owned + [pair[0] for pair in gone_shell]
+    return owned
+
+
 status = "unchanged"
+# The entry that ends up holding the hook: the first valid one, or the bad one
+# a repair takes over.
+holder_entry = None
 # A valid entry stops every repair branch below, so without this the bad
 # entries beside it would stay active: a malformed "--sources hook" duplicate
 # runs link at every session start whatever the good entry next to it says.
-# Only one entry may hold this hook, so the first valid one keeps it and every
-# other entry this script owns is removed, an exact duplicate included.
 if found:
-    duplicates = valid[1:] + normalize + stale + malformed + other
-    duplicates = duplicates + [pair[0] for pair in wrong_shell]
-    duplicates = duplicates + [pair[0] for pair in gone_shell]
+    holder_entry = valid[0]
+elif normalize:
+    holder_entry = normalize[0]
+    status = "normalized"
+elif stale:
+    holder_entry = stale[0]
+    status = "replaced"
+elif wrong_shell:
+    holder_entry = wrong_shell[0][0]
+    status = "replaced-interpreter " + wrong_shell[0][1]
+elif gone_shell:
+    holder_entry = gone_shell[0][0]
+    status = "replaced-gone-interpreter " + gone_shell[0][1]
+elif malformed:
+    holder_entry = malformed[0]
+    status = "replaced-malformed"
+elif other:
+    holder_entry = other[0]
+    status = "replaced-other"
+
+# Only one entry may hold this hook, so every other entry this script owns is
+# removed, an exact duplicate included. A repaired entry is no different from a
+# valid one here: the bad entries beside it would otherwise keep running at
+# every session start, repair or no repair.
+if holder_entry is not None:
+    if not found:
+        take_over(holder_entry)
+        found = True
+    duplicates = [entry for entry in owned_entries() if entry is not holder_entry]
     if duplicates:
         drop_entries(duplicates)
-        status = "deduplicated " + str(len(duplicates))
-elif not found and normalize:
-    take_over(normalize[0])
-    found = True
-    status = "normalized"
-elif not found and stale:
-    take_over(stale[0])
-    found = True
-    status = "replaced"
-elif not found and wrong_shell:
-    take_over(wrong_shell[0][0])
-    found = True
-    status = "replaced-interpreter " + wrong_shell[0][1]
-elif not found and gone_shell:
-    take_over(gone_shell[0][0])
-    found = True
-    status = "replaced-gone-interpreter " + gone_shell[0][1]
-elif not found and malformed:
-    take_over(malformed[0])
-    found = True
-    status = "replaced-malformed"
-elif not found and other:
-    take_over(other[0])
-    found = True
-    status = "replaced-other"
+    if status == "unchanged":
+        if duplicates:
+            status = "deduplicated " + str(len(duplicates))
+    else:
+        # The repair and the removals are both reported, so the count rides
+        # along as the last word of every replacement status.
+        status = status + " " + str(len(duplicates))
 
 if not found:
     status = "added"
@@ -3099,14 +3157,16 @@ sys.stdout.write(status + "\n" + out + "\n")
 # --assembly names another installation is rewritten too: it would have the
 # session hook report on an assembly this run is not for. So is one whose
 # tokens after the script are not a hook run, such as "--sources hook", which
-# reads the word as the option operand and runs link at every session start.
+# reads the word as the option operand and runs link at every session start,
+# and so is one whose quoting is unmatched, which no shell runs at all.
 # An entry that already carries this
 # exact command counts as installed only when the whole entry matches: a type
 # that is not "command" never runs, and another timeout runs the hook under a
 # budget this script never installed, so either one is normalized. One entry
-# holds this hook and no more: when a valid entry is there, every other entry
-# this script owns is removed instead of left beside it, because a bad
-# duplicate keeps running at every session start whatever the good entry says.
+# holds this hook and no more: every other entry this script owns is removed
+# instead of left beside it, because a bad duplicate keeps running at every
+# session start whatever the entry beside it says. That holds for an entry a
+# repair takes over as much as for a valid one.
 # Prints the status word, and the path of the merged temporary file when there
 # is one.
 merge_hook_json() {
@@ -3142,7 +3202,7 @@ backup_path() {
 }
 
 install_hook_file() {
-	local parent file merged status tmp stamp real created bak snap n
+	local parent file merged status tmp stamp real created bak snap removed rest
 	parent=$1
 	file=$2
 	created=0
@@ -3257,27 +3317,44 @@ install_hook_file() {
 		err "could not write $file"
 		return 1
 	fi
+	# Every replacement status carries the number of other entries the repair
+	# removed as its last word, so both halves of the change are reported.
+	removed=0
 	case "$status" in
-	normalized) info "$PROG: normalized the hook entry in $file" ;;
-	replaced) info "$PROG: replaced a stale hook in $file" ;;
+	"normalized "*)
+		removed=${status##* }
+		info "$PROG: normalized the hook entry in $file"
+		;;
+	"replaced "*)
+		removed=${status##* }
+		info "$PROG: replaced a stale hook in $file"
+		;;
 	"replaced-interpreter "*)
-		info "$PROG: replaced a hook that ran the script through ${status#replaced-interpreter } in $file"
+		removed=${status##* }
+		rest=${status#replaced-interpreter }
+		info "$PROG: replaced a hook that ran the script through ${rest% *} in $file"
 		;;
 	"replaced-gone-interpreter "*)
-		info "$PROG: replaced a hook whose interpreter ${status#replaced-gone-interpreter } is gone in $file"
+		removed=${status##* }
+		rest=${status#replaced-gone-interpreter }
+		info "$PROG: replaced a hook whose interpreter ${rest% *} is gone in $file"
 		;;
-	replaced-malformed) info "$PROG: replaced a malformed hook command in $file" ;;
-	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
-	"deduplicated "*)
-		n=${status#deduplicated }
-		if [ "$n" = "1" ]; then
-			info "$PROG: removed 1 duplicate hook entry in $file"
-		else
-			info "$PROG: removed $n duplicate hook entries in $file"
-		fi
+	"replaced-malformed "*)
+		removed=${status##* }
+		info "$PROG: replaced a malformed hook command in $file"
 		;;
+	"replaced-other "*)
+		removed=${status##* }
+		info "$PROG: replaced a hook for another installation in $file"
+		;;
+	"deduplicated "*) removed=${status#deduplicated } ;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;
 	esac
+	if [ "$removed" = "1" ]; then
+		info "$PROG: removed 1 duplicate hook entry in $file"
+	elif [ "$removed" != "0" ]; then
+		info "$PROG: removed $removed duplicate hook entries in $file"
+	fi
 	return 0
 }
 
