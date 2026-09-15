@@ -170,10 +170,11 @@ usage() {
 		'                  A settings file that already runs the hook is left' \
 		'                  byte for byte as it is. An entry that runs a' \
 		'                  link-skills.sh whose path no longer exists, whose' \
-		'                  path is relative, or whose --sources or --assembly' \
-		'                  names another installation, is rewritten to the' \
-		'                  command this run is for; an entry that runs another' \
-		'                  script is left alone.' \
+		'                  path is relative, whose --sources or --assembly' \
+		'                  names another installation, or whose arguments are' \
+		'                  not a hook run, is rewritten to the command this' \
+		'                  run is for; an entry that runs another script is' \
+		'                  left alone.' \
 		'  unlink          Remove the links this script recorded, and the manifest.' \
 		'  help            Print this text.' \
 		'' \
@@ -209,9 +210,10 @@ usage() {
 		'  ~/code/agents/skills' \
 		'' \
 		"Lines that are empty or start with '#' are ignored. A relative path" \
-		'resolves against the directory that holds the sources file. A line' \
-		'names one path and nothing else, spaces in the path included: a' \
-		'second token after the path is refused.'
+		'resolves against the directory that holds the sources file. A line is' \
+		'one path, spaces in the path included. The one token refused is a' \
+		"trailing 'auto-update'. A line that names no directory is reported" \
+		'as a missing source.'
 }
 
 # ----------------------------------------------------------------- paths ----
@@ -635,32 +637,16 @@ sources_is_control_path() {
 	return 1
 }
 
-# The directory a sources line names, expanded the way load_sources expands it,
-# so that a line can be judged before the sources are loaded.
-source_line_dir() {
-	local path
-	path=$(expand_home "$1")
-	case "$path" in
-	/*) ;;
-	*) path="$(dirname "$SOURCES_FILE")/$path" ;;
-	esac
-	printf '%s\n' "$path"
-}
-
-# A sources line names one path and nothing else. An older sources file could
-# put 'auto-update' after a path, and the session hook then fast-forwarded that
-# clone. The hook only notifies now, so a second token states an expectation
-# this script no longer meets, and reading it as part of the path would answer
-# that expectation with a source directory that does not exist. The line is
-# refused instead, whatever the second token spells.
-#
-# A source may live under a path that holds a space, so whitespace alone does
-# not make a token: the whitespace belongs to the path whenever the whole line
-# names a directory. A line that does not name one, but whose text before the
-# last whitespace does, carries a token after the path. 'auto-update' is
-# refused wherever it sits, because it names the removed behavior outright.
-refuse_extra_source_token() {
-	local line trimmed head
+# A sources line is one path, spaces in the path included. An older sources
+# file could put 'auto-update' after a path, and the session hook then
+# fast-forwarded that clone. The hook only notifies now, so a trailing
+# 'auto-update' states an expectation this script no longer meets and is
+# refused outright. Nothing else is read as a token: a directory that is
+# temporarily away must not turn its own path into one, so every other line is
+# the path, and one that names no directory is reported as a missing source by
+# the readers below.
+refuse_auto_update_token() {
+	local line trimmed
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
@@ -671,17 +657,7 @@ refuse_extra_source_token() {
 		*[[:space:]]auto-update)
 			die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
 			;;
-		*[[:space:]]*) ;;
-		*) continue ;;
 		esac
-		if [ -d "$(source_line_dir "$trimmed")" ]; then
-			continue
-		fi
-		head=$(trim "${trimmed%[[:space:]]*}")
-		if [ -z "$head" ] || [ ! -d "$(source_line_dir "$head")" ]; then
-			continue
-		fi
-		die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
 	done <"$SOURCES_FILE"
 	return 0
 }
@@ -1987,6 +1963,8 @@ git_upstream() {
 # The fast-forward a notice prints. A branch that tracks nothing was measured
 # against origin/<default branch>, and a bare pull there only reports that
 # there is no tracking information, so the remote and the branch are named.
+# git allows ';' and '$' in a ref name, so the branch is quoted: the notice is
+# meant to be copied into a shell.
 git_pull_command() {
 	local root
 	root=$1
@@ -1994,7 +1972,7 @@ git_pull_command() {
 		printf 'git pull --ff-only\n'
 		return 0
 	fi
-	printf 'git pull --ff-only origin %s\n' "$(git_default_branch "$root")"
+	printf 'git pull --ff-only origin %s\n' "$(shell_quote "$(git_default_branch "$root")")"
 }
 
 git_behind_count() {
@@ -2685,6 +2663,9 @@ print_hook_snippet() {
 #   replaced-gone-interpreter <path>
 #                    an entry that named an interpreter by an absolute path
 #                    that holds no executable now holds the hook
+#   replaced-malformed
+#                    an entry that ran this script with a tail that is not a
+#                    hook run now holds the hook
 #   replaced-other   an entry that ran another installation now holds the hook
 # For every status but "unchanged" it writes the merged JSON to a temporary
 # file of its own next to the settings file and prints that path on the second
@@ -2729,35 +2710,45 @@ if not isinstance(groups, list):
 QUOTES = chr(34) + chr(39)
 
 
-def options_of(parts, index):
-    # The options this script writes, read from the tokens between the script
-    # and the final word. Both spellings the command line takes are read. An
-    # option this program does not know is skipped: the script path and these
-    # two paths are what name an installation.
+def parse_tail(parts, index):
+    # The tokens after the script, read the way the option loop in main reads
+    # them, so that a stored command is judged by what it would really do: the
+    # two path options take the next token whatever it spells, --quiet, -q and
+    # -- take none, and every other token is a positional. Anything else that
+    # begins with a dash is an option main refuses. Returns None for a shape
+    # main would not run.
     sources = None
     assembly = None
+    positionals = []
     i = index + 1
-    last = len(parts) - 1
-    while i < last:
+    n = len(parts)
+    while i < n:
         token = parts[i].strip(QUOTES)
-        if token == "--sources" and i + 1 < last:
-            sources = parts[i + 1].strip(QUOTES)
+        if token == "--sources" or token == "--assembly":
+            if i + 1 >= n:
+                return None
+            if token == "--sources":
+                sources = parts[i + 1].strip(QUOTES)
+            else:
+                assembly = parts[i + 1].strip(QUOTES)
             i += 2
             continue
         if token.startswith("--sources="):
             sources = token[len("--sources=") :]
             i += 1
             continue
-        if token == "--assembly" and i + 1 < last:
-            assembly = parts[i + 1].strip(QUOTES)
-            i += 2
-            continue
         if token.startswith("--assembly="):
             assembly = token[len("--assembly=") :]
             i += 1
             continue
+        if token == "--quiet" or token == "-q" or token == "--":
+            i += 1
+            continue
+        if token.startswith("-"):
+            return None
+        positionals.append(token)
         i += 1
-    return sources, assembly
+    return sources, assembly, positionals
 
 
 def interpreter_name(text):
@@ -2774,12 +2765,17 @@ def parse_command(value):
     # non-default sources file or assembly directory names those paths between
     # the script and the final word. The script position is read directly, so
     # that the argument of an option can never be mistaken for the script.
+    # The options come back as None when the tail is not one this script
+    # runs, because the entry then does something other than the hook: the
+    # word after a lone --sources is that option operand, the subcommand
+    # defaults to link, and a session start would write a sources file and
+    # relink the assembly.
     text = str(value)
     try:
         parts = shlex.split(text)
     except ValueError:
         parts = text.split()
-    if len(parts) < 2 or parts[-1] != "hook":
+    if not parts:
         return None
     index = 0
     interpreter = ""
@@ -2791,7 +2787,7 @@ def parse_command(value):
     if os.path.basename(first) != marker:
         index = 1
         interpreter = interpreter_name(first)
-    if index > len(parts) - 2:
+    if index >= len(parts):
         return None
     token = parts[index].strip(QUOTES)
     # The file name must be this script name, not merely end with it:
@@ -2799,7 +2795,13 @@ def parse_command(value):
     # it or counting it as ours would break that session start.
     if os.path.basename(token) != marker:
         return None
-    return token, options_of(parts, index), interpreter
+    tail = parse_tail(parts, index)
+    if tail is None:
+        return token, None, interpreter
+    sources, assembly, positionals = tail
+    if positionals != ["hook"]:
+        return token, None, interpreter
+    return token, (sources, assembly), interpreter
 
 
 def canon(value):
@@ -2832,6 +2834,7 @@ def same_installation(options):
 found = False
 stale = []
 other = []
+malformed = []
 wrong_shell = []
 gone_shell = []
 normalize = []
@@ -2890,6 +2893,12 @@ for group in groups:
         ):
             gone_shell.append((entry, interpreter))
             continue
+        # The script file is there and runs, but the tokens after it are not a
+        # hook run. Counting that as installed would leave the session start
+        # doing something else, so it is rewritten to the hook command.
+        if options is None:
+            malformed.append(entry)
+            continue
         # The script file is there, but the command runs another sources file
         # or another assembly directory. Counting that as installed would
         # leave the session hook reporting on an installation this run is not
@@ -2927,6 +2936,10 @@ elif not found and gone_shell:
     take_over(gone_shell[0][0])
     found = True
     status = "replaced-gone-interpreter " + gone_shell[0][1]
+elif not found and malformed:
+    take_over(malformed[0])
+    found = True
+    status = "replaced-malformed"
 elif not found and other:
     take_over(other[0])
     found = True
@@ -2976,7 +2989,10 @@ sys.stdout.write(status + "\n" + out + "\n")
 # path that holds no executable file, which names one file and no other.
 # A command whose script is there but whose --sources or
 # --assembly names another installation is rewritten too: it would have the
-# session hook report on an assembly this run is not for. An entry that already carries this
+# session hook report on an assembly this run is not for. So is one whose
+# tokens after the script are not a hook run, such as "--sources hook", which
+# reads the word as the option operand and runs link at every session start.
+# An entry that already carries this
 # exact command counts as installed only when the whole entry matches: a type
 # that is not "command" never runs, and another timeout runs the hook under a
 # budget this script never installed, so either one is normalized. Prints the
@@ -3138,6 +3154,7 @@ install_hook_file() {
 	"replaced-gone-interpreter "*)
 		info "$PROG: replaced a hook whose interpreter ${status#replaced-gone-interpreter } is gone in $file"
 		;;
+	replaced-malformed) info "$PROG: replaced a malformed hook command in $file" ;;
 	replaced-other) info "$PROG: replaced a hook for another installation in $file" ;;
 	*) info "$PROG: added the SessionStart hook to $file" ;;
 	esac
@@ -3472,7 +3489,7 @@ main() {
 	fi
 	# Judged here too, so that every command refuses the line in its own
 	# voice, including the two that never read the sources file themselves.
-	refuse_extra_source_token
+	refuse_auto_update_token
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
 	case "$FETCH_INTERVAL_HOURS" in

@@ -169,20 +169,20 @@ clone, never creates or removes a link, and takes no lock, so a `link` or
 `unlink` run in progress neither blocks it nor is disturbed by it. The only
 thing it writes is the fetch stamp below.
 
-A sources line names one path and nothing else: a second token after the path
-is refused, whatever it spells. An older sources file could put `auto-update`
-after a path, and the hook then fast-forwarded that clone, so a second token
-states an expectation this script no longer meets. Reading it as part of the
-path would answer that expectation with a source directory that does not
-exist, so every command refuses the line instead. `link`, `check`, `unlink`
-and `install-hooks` exit 2; the hook says the same thing in one line and exits 0.
+A sources line is one path, spaces in the path included. The one token refused
+is a trailing `auto-update`: an older sources file could put it after a path,
+and the hook then fast-forwarded that clone, so the token states an
+expectation this script no longer meets. Every command refuses that line.
+`link`, `check`, `unlink` and `install-hooks` exit 2; the hook says the same
+thing in one line and exits 0. `auto-update` is refused whether or not the
+path before it is there.
 
-A source may live under a path that holds a space, so whitespace alone does
-not make a token: the whitespace is part of the path whenever the whole line
-names a directory. A line that names none, but whose text before the last
-whitespace does, carries a token after the path and is refused.
-`auto-update` is refused wherever it sits, whether or not the path before it
-is there.
+Every other line is the path as it is written, so a word after a directory is
+part of the path and not a token: nothing in the format can tell a stray word
+from a path that holds a space. A line that names no directory is reported as
+a missing source, which is what a source that has been renamed or is
+temporarily away already is: `link` and `check` exit 1, and the line links
+again the moment the directory is back.
 
 A session hook runs with none of the environment the person who installed it
 had, so `install-hooks` writes the paths of the installation it was run for
@@ -245,7 +245,13 @@ file is there but whose `--sources` or `--assembly` names another installation
 runs an assembly this run is not for, so it is rewritten to the current
 command and the run reports that it replaced a hook for another installation;
 an omitted option is read as the default for the `HOME` in effect, and the two
-paths are compared after symlinks are resolved. Every entry taken over this way
+paths are compared after symlinks are resolved. The tokens after the script are
+read the way the script itself reads them, so an entry such as
+`bash <script> --sources hook` does not run the hook at all: the word is the
+option operand, the subcommand falls back to `link`, and a session start would
+write a sources file named `hook`. That entry, and any other shape this script
+would refuse, is rewritten to the current command and the run reports that it
+replaced a malformed hook command. Every entry taken over this way
 is rewritten whole: its type becomes `command`, its command the current one,
 and its timeout the one this script installs, so an entry written by hand or by
 an older version cannot leave the hook running under another budget. An entry

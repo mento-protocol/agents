@@ -737,6 +737,60 @@ hook_pull_command_names_remote_without_upstream() {
 	assert_out_lacks "origin main" "nothing is named when the branch tracks a remote"
 }
 
+# git allows ';' and '$' in a branch name and the notice is written to be
+# copied into a shell, so the branch it names is quoted: an unquoted one would
+# make the rest of the ref name a second command.
+hook_pull_advice_quotes_branch() {
+	local branch bare seed clone cmd rc
+	branch='evil;touch-x'
+	bare="$CASE_DIR/remote.git"
+	seed="$CASE_DIR/seed"
+	clone="$CASE_DIR/company"
+	git init --bare --quiet "$bare"
+	git -C "$bare" symbolic-ref HEAD "refs/heads/$branch"
+	git clone --quiet "$bare" "$seed" 2>/dev/null
+	git -C "$seed" symbolic-ref HEAD "refs/heads/$branch"
+	mkskill "$seed/skills" alpha
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "init"
+	git -C "$seed" push -q origin "$branch"
+	git clone --quiet "$bare" "$clone"
+	git -C "$clone" branch --unset-upstream >/dev/null 2>&1
+
+	write_sources
+	add_source "$clone/skills"
+	ls_run link
+	assert_rc 0 "link"
+
+	mkskill "$seed/skills" beta
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "add beta"
+	git -C "$seed" push -q origin "$branch"
+
+	ls_run hook
+	assert_rc 0 "hook without an upstream"
+	assert_out_has "git pull --ff-only origin 'evil;touch-x'" \
+		"the branch is quoted in the advice"
+	assert_absent "$clone/touch-x" "printing the notice runs nothing"
+
+	# Advice nobody can run is no better, so the printed command is handed to
+	# a shell as it stands: everything after 'run: ' is the command.
+	cmd=${LS_OUT#*run: }
+	sh -c "$cmd" >/dev/null 2>&1
+	rc=$?
+	if [ "$rc" != "0" ]; then
+		fail "the printed command exited $rc: $cmd"
+	fi
+	assert_absent "$clone/touch-x" "the branch is not run as a second command"
+	assert_absent "$clone/x" "the branch is not run as a second command"
+	assert_absent "$CASE_DIR/touch-x" "nothing lands next to the clone"
+	if [ "$(head_of "$clone")" != "$(head_of "$seed")" ]; then
+		fail "the printed command did not fast-forward the clone"
+	fi
+	assert_link "$HOME/.agents/skills/beta" "$clone/skills/beta" \
+		"the command links what the pull brought in"
+}
+
 # The manifest is what 'link' rewrites, and 'link' refuses a path that is not a
 # regular file. Reading that path as an empty list would have the hook call
 # every skill unlinked and recommend a run that cannot happen.
@@ -927,44 +981,60 @@ sources_auto_update_token_refused() {
 	fi
 }
 
-# The rule is the format, not one spelling: a second token after the path is
-# refused, so a token this script never knew is not folded into the path and
-# reported later as a source directory that does not exist. A path that holds
-# a space is still one path, and still works.
-sources_line_with_extra_token_refused() {
-	local lines
+# Only a trailing auto-update is a token. Nothing else can be told apart from
+# a path that holds a space, so a word after a directory belongs to the path:
+# the line names a directory that is not there, and that is a missing source,
+# not wrong usage.
+sources_line_with_extra_token_is_a_path() {
 	mkskill "$CASE_DIR/one" alpha
 	write_sources
 	add_source "$CASE_DIR/one bogus-token"
 
 	ls_run link
-	assert_rc 2 "link with a second token"
-	assert_out_has "unexpected token after the path" "the refusal is named"
-	assert_out_lacks "source directory does not exist" "the token is not folded into the path"
+	assert_rc 1 "link with a word after the path"
+	assert_out_has "source directory does not exist" "the line is read as a path"
+	assert_out_has "$CASE_DIR/one bogus-token" "the whole line is named"
+	assert_out_lacks "unexpected token after the path" "nothing is refused"
 	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
 
 	ls_run check
-	assert_rc 2 "check with a second token"
-	assert_out_has "unexpected token after the path" "check says the same"
-	assert_out_lacks "missing" "check does not report a missing source"
+	assert_rc 1 "check with a word after the path"
+	assert_out_has "source $CASE_DIR/one bogus-token: missing" \
+		"check reports the whole line as one missing source"
+	assert_out_lacks "unexpected token after the path" "check refuses nothing"
 
-	ls_run hook
-	assert_rc 0 "hook with a second token"
-	assert_out_has "unexpected token after the path" "the hook says the same"
-	assert_out_lacks "source directory is missing" "the hook does not report a missing source"
-	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
-	if [ "$lines" != "1" ]; then
-		fail "expected one line from the hook, got $lines: $LS_OUT"
-	fi
-
-	# The whitespace belongs to the path when the whole line names a
-	# directory, so a source under a path with a space is not a second token.
+	# A path that holds a space is one path, and still works.
 	mkskill "$CASE_DIR/my repos/two" beta
 	write_sources
 	add_source "$CASE_DIR/my repos/two"
 	ls_run link
 	assert_rc 0 "link with a space in the source path"
 	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/my repos/two/beta" "beta link"
+}
+
+# A source that is temporarily away, under a path that holds a space, used to
+# match the shape of a stray token whenever the text before the last space
+# named a directory. That blocked every command with wrong usage until the
+# source came back. It is a missing source like any other, and it links again
+# the moment it is there.
+sources_missing_path_with_space_is_missing() {
+	mkdir -p "$CASE_DIR/my"
+	write_sources
+	add_source "$CASE_DIR/my skills"
+
+	ls_run link
+	assert_rc 1 "link while the source is away"
+	assert_out_has "source directory does not exist" "the source is reported missing"
+	assert_out_lacks "unexpected token after the path" "nothing is refused"
+
+	ls_run check
+	assert_rc 1 "check while the source is away"
+	assert_out_lacks "unexpected token after the path" "check refuses nothing"
+
+	mkskill "$CASE_DIR/my skills" alpha
+	ls_run link
+	assert_rc 0 "link once the source is back"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/my skills/alpha" "alpha link"
 }
 
 install_hooks_missing_file() {
@@ -3367,6 +3437,156 @@ validator_rejects_mapping_indicator_in_plain_scalar() {
 	esac
 }
 
+# A key with no inline value takes whatever the indented lines under it spell.
+# Under "description:" a "foo: bar" line is a mapping and a "- item" line is a
+# list, so a runtime that reads either gets no text at all. Folding them into
+# a string hides that. Other keys may nest a collection, and a continuation
+# that is ordinary text is still the description it looks like. A continuation
+# line that is a quoted scalar is text as well, quotes and all, so only a
+# mapping indicator outside the quotes makes the value a mapping.
+validator_rejects_nested_collection_value() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/nested-map/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  foo: bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-map/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-map" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a nested mapping under description must fail: $out"
+	fi
+	# The whole output, so the length is not reported on top of it.
+	case "$out" in
+	'skills/noted: "description" must be a plain string') ;;
+	*) fail "the mapping must be reported once as a plain string: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-seq/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf -- '  - item\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-seq/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-seq" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a nested sequence under description must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: "description" must be a plain string') ;;
+	*) fail "the sequence must be reported once as a plain string: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-other-key/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  team: platform\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-other-key/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-other-key" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a nested mapping under another key must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-text/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  plain continuation text\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-text/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-text" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a text continuation under an empty header must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-double-quoted/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "foo: bar"\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-double-quoted/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-double-quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a double-quoted continuation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-single-quoted/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf "  'a: b and more text'\n"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-single-quoted/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-single-quoted" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a single-quoted continuation must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/nested-quoted-key/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '  "foo": bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-quoted-key/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-quoted-key" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a quoted mapping key under description must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: "description" must be a plain string') ;;
+	*) fail "the quoted key must be reported once as a plain string: $out" ;;
+	esac
+}
+
 # A quoted scalar runs to its closing quote. A "#" inside the quotes is part
 # of the text, a comment after the closing quote is not, and the escapes are
 # resolved before the value is measured.
@@ -4481,6 +4701,185 @@ validator_folded_block_more_indented_boundary() {
 	esac
 }
 
+# A line of spaces indented past a block's own indentation is not a blank
+# line: YAML keeps every space the indentation does not cover. In a folded
+# block it is a more-indented line, so the breaks on both sides of it survive
+# as well, and the value is two characters longer than the visible text.
+validator_block_keeps_overindented_space_line() {
+	local out rc over fits
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	# 1021 "a", a newline, the two spaces the indentation leaves, a newline and
+	# "b" measure 1026. One "a" fewer on each side of the limit tells the two
+	# apart.
+	over=$(printf '%1021s' '' | tr ' ' 'a')
+	fits=$(printf '%1019s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/space-line-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$over"
+		printf '    \n'
+		printf '  b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/space-line-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1026-character folded description across a line of spaces must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/space-line-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: >-\n'
+		printf '  %s\n' "$fits"
+		printf '    \n'
+		printf '  b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/space-line-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a 1024-character folded description across a line of spaces must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A literal block keeps the same spaces, with one newline per break.
+	mkdir -p "$CASE_DIR/space-line-literal/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |-\n'
+		printf '  %s\n' "$over"
+		printf '    \n'
+		printf '  b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/space-line-literal/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-literal" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1026-character literal description across a line of spaces must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the literal failure must name the length limit: $out" ;;
+	esac
+}
+
+# The indentation of a block is the header's indicator, and without one the
+# indentation of the first non-blank body line. A later line indented less
+# than that ends the block in the middle of the frontmatter, and no YAML
+# loader reads the document. Taking the smallest indentation instead accepted
+# files every runtime refuses.
+validator_rejects_underindented_block_line() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	# With the indicator at 2, the four-space line leaves two spaces of
+	# content: 1020 "a", a newline and "  b" are 1024.
+	fits=$(printf '%1020s' '' | tr ' ' 'a')
+	over=$(printf '%1021s' '' | tr ' ' 'a')
+
+	mkdir -p "$CASE_DIR/under-indicator/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |2\n'
+		printf ' one space under a two space indicator\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/under-indicator/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/under-indicator" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a body line under the block indicator must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the under-indented line must be reported by number: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/under-first/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |\n'
+		printf '    four spaces set the indentation\n'
+		printf '  two spaces do not reach it\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/under-first/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/under-first" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a body line under the first line's indentation must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 5 is not valid YAML"*) ;;
+	*) fail "the shallower line must be reported by number: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/over-indicator-fits/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |2\n'
+		printf '  %s\n' "$fits"
+		printf '    b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/over-indicator-fits/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/over-indicator-fits" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a line indented past the indicator must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# The two spaces the indicator does not cover are content: one "a" more
+	# and the same three lines are over the limit.
+	mkdir -p "$CASE_DIR/over-indicator-over/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: |2\n'
+		printf '  %s\n' "$over"
+		printf '    b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/over-indicator-over/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/over-indicator-over" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "the extra spaces of a deeper line must be measured: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
 # A relink is a removal and a creation. When the creation fails, the removal
 # has already happened: the name carries nothing at all. The old link has to
 # come back, and the manifest has to keep recording the target it carries,
@@ -4577,6 +4976,70 @@ install_hooks_replaces_other_installation() {
 	if [ "$n" != "1" ]; then
 		fail "expected one hook command after the rerun, found $n"
 	fi
+}
+
+# One stored command that this script cannot run as the hook: it is backed up,
+# replaced by the generated command, and reported. $3 names the shape.
+check_malformed_hook_command() {
+	local file n
+	file=$1
+	rm -f "$file" "$file".bak-*
+	write_installed_hook_settings "$file" "$2"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over $3"
+	assert_out_has "replaced a malformed hook command in $file" \
+		"$3 is reported"
+	assert_file_has "$file" "bash $LS hook" \
+		"$3 is rewritten to the generated command"
+	assert_file_lacks "$file" "$2" "$3 is gone"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "$3: expected one hook command, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "1" ]; then
+		fail "$3: expected one backup, found $n"
+	fi
+}
+
+# A stored command is judged by what it would really do. In "--sources hook"
+# the word is the option operand, so the subcommand falls back to link and a
+# session start would write a sources file named "hook" and relink the
+# assembly from it. That is not the hook, so it is not counted as installed.
+install_hooks_replaces_malformed_option_command() {
+	local file
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	check_malformed_hook_command "$file" "bash $LS --sources hook" \
+		"a missing option operand"
+	check_malformed_hook_command "$file" "bash $LS hook extra" \
+		"a second positional"
+	check_malformed_hook_command "$file" "bash $LS --bogus hook" \
+		"an unknown option"
+
+	# The shapes the option loop does accept, with "hook" left as the one
+	# positional, run this hook and stand as they are.
+	write_installed_hook_settings "$file" "bash $LS --quiet hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a --quiet entry"
+	assert_out_has "already runs the hook" "--quiet counts as installed"
+	assert_out_lacks "replaced a malformed" "the --quiet entry is not rewritten"
+
+	write_installed_hook_settings "$file" \
+		"bash $LS --sources $HOME/.agents/skill-sources hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over an entry naming this sources file"
+	assert_out_has "already runs the hook" \
+		"the sources file of this run counts as installed"
+	assert_out_lacks "replaced a malformed" "the spelled-out entry is not rewritten"
 }
 
 # One field of the first SessionStart hook entry of a settings file, or
@@ -6043,13 +6506,15 @@ main() {
 	run_case check_without_sources_file_exits_2
 	run_case hook_notifies_when_behind
 	run_case hook_pull_command_names_remote_without_upstream
+	run_case hook_pull_advice_quotes_branch
 	run_case hook_reports_unusable_manifest
 	run_case hook_notifies_drift
 	run_case hook_notifies_collision
 	run_case hook_notifies_stale_link
 	run_case hook_never_takes_lock
 	run_case sources_auto_update_token_refused
-	run_case sources_line_with_extra_token_refused
+	run_case sources_line_with_extra_token_is_a_path
+	run_case sources_missing_path_with_space_is_missing
 	run_case hook_bounded_by_deadline
 	run_case hook_exits_zero_on_init_failure
 	run_case hardlinked_stamp_not_truncated
@@ -6059,6 +6524,7 @@ main() {
 	run_case install_hooks_embeds_custom_paths
 	run_case sources_path_inside_assembly_refused
 	run_case install_hooks_replaces_other_installation
+	run_case install_hooks_replaces_malformed_option_command
 	run_case install_hooks_replacement_resets_timeout
 	run_case assembly_inside_runtime_home_refused
 	run_case relative_source_missing_keeps_links
@@ -6156,6 +6622,8 @@ main() {
 	run_case validator_folds_plain_scalar_across_blank_line
 	run_case validator_folded_block_paragraph_break
 	run_case validator_folded_block_more_indented_boundary
+	run_case validator_block_keeps_overindented_space_line
+	run_case validator_rejects_underindented_block_line
 	run_case validator_decodes_all_yaml_escapes
 	run_case validator_rejects_unknown_escape
 	run_case validator_multiline_quoted_scalar
@@ -6164,6 +6632,7 @@ main() {
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
+	run_case validator_rejects_nested_collection_value
 	run_case validator_quoted_scalar_edge_cases
 	run_case validator_rejects_unterminated_quote
 	run_case validator_block_scalar_keeps_internal_spaces

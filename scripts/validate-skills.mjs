@@ -106,6 +106,13 @@ const BLOCK_INDENT_RE = /[1-9]/;
 const MAPPING_INDICATOR_RE = /:[ \t]|:$/;
 
 /**
+ * A sequence entry at the head of a value: a "-" followed by a space or a tab,
+ * or a "-" alone on its line. Under a key with no inline value, such a line
+ * opens a list.
+ */
+const SEQUENCE_ENTRY_RE = /^-(?:[ \t]|$)/;
+
+/**
  * Raw unquoted values that YAML reads as something other than a string: the
  * empty flow sequence and mapping, and the null spellings. A description that
  * is any of these reaches a runtime as null or as a list, not as text.
@@ -425,6 +432,11 @@ function chompingOf(header) {
  *
  * Blank lines before the first content line count the same way: each of them
  * puts one newline at the head of the value.
+ *
+ * The block's indentation is already removed from these lines, so a line is
+ * blank only when nothing is left of it. A line that still holds spaces is a
+ * more-indented content line, and YAML keeps both its spaces and the line
+ * breaks around it.
  */
 function foldBlockLines(content) {
   let value = "";
@@ -432,7 +444,7 @@ function foldBlockLines(content) {
   let blanks = 0;
   let previousMoreIndented = false;
   for (const line of content) {
-    if (line.trim() === "") {
+    if (line === "") {
       blanks += 1;
       continue;
     }
@@ -466,7 +478,9 @@ function foldBlockLines(content) {
  * so the measured length is the length of the real value. The chomping
  * indicator then decides how many trailing newlines the value keeps.
  *
- * Returns { value, end }, where `end` is the index of the last line consumed.
+ * Returns { value, end, invalid }, where `end` is the index of the last line
+ * consumed and `invalid` is the index of the first body line indented less
+ * than the block, or -1 when every line is indented enough.
  */
 function readBlockScalar(header, lines, start) {
   const literal = header.startsWith("|");
@@ -481,23 +495,38 @@ function readBlockScalar(header, lines, start) {
     end = i;
   }
 
-  let indent = indicator ? Number(indicator[0]) : Number.POSITIVE_INFINITY;
+  // YAML takes the block indentation from the indicator, and without one from
+  // the first non-blank body line alone. A whitespace-only line is an empty
+  // line whatever its width, so it never sets the indentation.
+  let indent = indicator ? Number(indicator[0]) : 0;
   if (!indicator) {
     for (const line of bodyLines) {
       if (line.trim() === "") continue;
-      indent = Math.min(indent, indentWidth(line));
+      indent = indentWidth(line);
+      break;
     }
-    if (!Number.isFinite(indent)) indent = 0;
   }
 
-  const parts = bodyLines.map((line) =>
-    line.slice(Math.min(indent, indentWidth(line))),
-  );
+  // A later non-blank line indented less than that is not part of the scalar:
+  // YAML ends the block there and fails the document on the text it starts. A
+  // line at column zero never reaches here, because it ended the body above.
+  let invalid = -1;
+  for (let i = 0; i < bodyLines.length; i += 1) {
+    if (bodyLines[i].trim() === "") continue;
+    if (indentWidth(bodyLines[i]) < indent) {
+      invalid = start + 1 + i;
+      break;
+    }
+  }
 
-  // A trailing blank line is not part of the text. The chomping indicator says
-  // how many of the newlines those lines stand for the value keeps.
+  const parts = bodyLines.map((line) => line.slice(indent));
+
+  // A trailing blank line is not part of the text. A line that still holds
+  // spaces once the indentation is gone is content, not a blank line. The
+  // chomping indicator says how many of the newlines the blank lines stand for
+  // the value keeps.
   let last = parts.length;
-  while (last > 0 && parts[last - 1].trim() === "") last -= 1;
+  while (last > 0 && parts[last - 1] === "") last -= 1;
   const content = parts.slice(0, last);
   const trailingBlanks = parts.length - last;
 
@@ -508,7 +537,7 @@ function readBlockScalar(header, lines, start) {
   } else if (chomping === "keep") {
     value = "\n".repeat(trailingBlanks);
   }
-  return { value, end };
+  return { value, end, invalid };
 }
 
 /**
@@ -589,15 +618,76 @@ function flowCollectionCloses(text) {
 }
 
 /**
+ * The text after the quoted scalar that a text opens, or null when the quote
+ * never closes. A "\\" escapes the next character inside double quotes, and a
+ * doubled quote stands for one quote inside single quotes.
+ */
+function afterQuotedScalar(text) {
+  const quote = text[0];
+  for (let i = 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote === '"') {
+      if (ch === "\\") {
+        i += 1;
+        continue;
+      }
+      if (ch === '"') return text.slice(i + 1);
+      continue;
+    }
+    if (ch === "'") {
+      if (text[i + 1] === "'") {
+        i += 1;
+        continue;
+      }
+      return text.slice(i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a line opens a mapping entry. A line that starts with a quote
+ * spells a quoted scalar or a quoted key, so the indicator counts only after
+ * that scalar's closing quote: `"foo: bar"` is a string, while `"foo": bar` is
+ * a mapping entry. A quote anywhere else in a line is ordinary text.
+ */
+function opensMappingEntry(text) {
+  if (text[0] !== '"' && text[0] !== "'") {
+    return MAPPING_INDICATOR_RE.test(text);
+  }
+  const rest = afterQuotedScalar(text);
+  return rest === null ? false : MAPPING_INDICATOR_RE.test(rest);
+}
+
+/**
+ * The first continuation line under a key with no inline value: the first
+ * following line that is indented and holds something other than a comment.
+ * Blank lines are skipped and a line at column zero ends the value, exactly as
+ * readPlainScalar folds them. Returns "" when the key has no such line.
+ */
+function firstContinuationText(lines, start) {
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const next = lines[i].replace(/\r$/, "");
+    if (next.trim() === "") continue;
+    if (indentWidth(next) === 0) return "";
+    const part = stripInlineComment(next.trim());
+    if (part !== "") return part;
+  }
+  return "";
+}
+
+/**
  * Parse top-level "key: value" frontmatter lines from the lines between the
  * two "---" delimiters. `firstLineNumber` is the line number of `lines[0]` in
  * the file, so a malformed line can be reported by its own number.
  *
  * Returns { fields, invalid }. `fields` is a Map of
- * key -> { value, raw, quoted, block }: `value` is the decoded text, and `raw`
- * is the significant text of a plain scalar, which the caller needs to tell an
- * unquoted YAML non-string form apart from the same characters inside quotes;
- * the two flags say which form the value took. `invalid` holds one entry per
+ * key -> { value, raw, quoted, block, collection }: `value` is the decoded
+ * text, and `raw` is the significant text of a plain scalar, which the caller
+ * needs to tell an unquoted YAML non-string form apart from the same
+ * characters inside quotes; `quoted` and `block` say which form the value
+ * took, and `collection` says the key has no inline value and the lines under
+ * it are a sequence or a mapping. `invalid` holds one entry per
  * refused line: the line number of a line this structural check cannot read,
  * or a ready message for a value whose own text is malformed, where the line
  * number alone would not say what is wrong.
@@ -630,11 +720,15 @@ function parseFrontmatter(lines, firstLineNumber) {
     if (BLOCK_SCALAR_RE.test(header)) {
       const block = readBlockScalar(header, lines, i);
       i = block.end;
+      if (block.invalid >= 0) {
+        invalid.push(firstLineNumber + block.invalid);
+      }
       fields.set(key, {
         value: block.value,
         raw: "",
         quoted: false,
         block: true,
+        collection: false,
       });
       continue;
     }
@@ -652,6 +746,7 @@ function parseFrontmatter(lines, firstLineNumber) {
         raw: rest,
         quoted: true,
         block: false,
+        collection: false,
       });
       continue;
     }
@@ -663,11 +758,18 @@ function parseFrontmatter(lines, firstLineNumber) {
       // a plain scalar would accept what every runtime rejects. The raw text
       // is kept as the value so the length check stays quiet about it.
       invalid.push(`"${key}" has an unterminated or malformed quoted scalar`);
-      fields.set(key, { value: rest, raw: rest, quoted: true, block: false });
+      fields.set(key, {
+        value: rest,
+        raw: rest,
+        quoted: true,
+        block: false,
+        collection: false,
+      });
       continue;
     }
 
     const plain = readPlainScalar(rest, lines, i);
+    const continuation = rest === "" ? firstContinuationText(lines, i) : "";
     i = plain.end;
     const flow = /^[[{]/.test(plain.value);
     if (flow && !flowCollectionCloses(plain.value)) {
@@ -690,6 +792,16 @@ function parseFrontmatter(lines, firstLineNumber) {
       raw: plain.value,
       quoted: false,
       block: false,
+      // A key with no inline value carries whatever the indented lines under
+      // it spell. When the first continuation line opens a sequence entry or a
+      // mapping entry, YAML hands the runtime a list or a mapping, not the text
+      // this parser folded. A continuation line that is a quoted scalar stays a
+      // string, so the indicator is read outside the quotes. Other keys may
+      // nest a collection; the two string fields refuse one.
+      collection:
+        rest === "" &&
+        (SEQUENCE_ENTRY_RE.test(continuation) ||
+          opensMappingEntry(continuation)),
     });
   }
   return { fields, invalid };
@@ -779,10 +891,12 @@ function validateSkill(name) {
   } else if (
     !nameField.quoted &&
     !nameField.block &&
-    isNonStringScalar(nameField.raw)
+    (nameField.collection || isNonStringScalar(nameField.raw))
   ) {
     // A directory called "true" or "123" takes a quoted name. Unquoted, YAML
-    // hands the runtime a boolean or a number, and the skill has no name.
+    // hands the runtime a boolean or a number, and the skill has no name. A
+    // name with no inline value over indented "key: value" lines is a mapping
+    // for the same reason.
     problems.push(`skills/${name}: "name" must be a plain string`);
   } else {
     if (nameValue !== name) {
@@ -807,11 +921,13 @@ function validateSkill(name) {
   } else if (
     !descriptionField.quoted &&
     !descriptionField.block &&
-    isNonStringScalar(descriptionField.raw)
+    (descriptionField.collection || isNonStringScalar(descriptionField.raw))
   ) {
     // The characters are the same in "[not a list]", but there the quotes make
     // them text. Unquoted, YAML hands the runtime a list, a mapping, null, a
-    // boolean, a number, a date, or whatever type an explicit tag names.
+    // boolean, a number, a date, or whatever type an explicit tag names. An
+    // empty "description:" over indented "- item" or "key: value" lines is a
+    // list or a mapping too, and the length check never sees it.
     problems.push(`skills/${name}: "description" must be a plain string`);
   } else {
     const trimmed = trimYamlSpace(descriptionField.value);
