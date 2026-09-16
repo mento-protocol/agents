@@ -121,7 +121,9 @@ Two files predate these limits and are listed in
 `scripts/link-skills.sh` and `scripts/test-link-skills.sh`. A change may not
 grow either of them. Add a case or a function by first splitting the topic it
 belongs to out of the monolith, then lower the baseline entry to the new
-count. Remove the entry once the file fits the limit.
+count: the check fails while the entry is above the file's real length, so
+the allowance only ratchets down. Remove the entry once the file fits the
+limit; the check refuses an entry at or below 500 lines.
 
 Run the check locally before opening a pull request:
 
