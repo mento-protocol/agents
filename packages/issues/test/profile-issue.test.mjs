@@ -398,8 +398,11 @@ test("a claim written by one profile is not readable as the other's mutex", asyn
           `${label}: expected ClaimRefInvalidError, got ${error?.name}`,
         );
         assert.equal(error.claimCode, "CLAIM_REF_INVALID");
-        // `readClaim` re-raises the parse refusal as its own class and keeps
-        // the original as `cause`, which is where `refInvalid` is set.
+        // `readClaim` re-raises the parse refusal as its own class, keeps the
+        // original as `cause`, and carries `refInvalid` forward: a library
+        // caller reads the flag off the error it was handed, not off a cause
+        // chain it cannot be expected to walk.
+        assert.equal(error.refInvalid, true);
         assert.equal(error.cause?.refInvalid, true);
         assert.equal(exitCodeForError(error), 16);
         assert.match(
@@ -431,6 +434,7 @@ test("a claim written by one profile is not readable as the other's mutex", asyn
           `${label} (${action}): expected ClaimRefInvalidError, got ${error?.name}`,
         );
         assert.equal(error.claimCode, "CLAIM_REF_INVALID");
+        assert.equal(error.refInvalid, true);
         assert.equal(error.cause?.refInvalid, true);
         assert.equal(exitCodeForError(error), 16);
         assert.equal(statusForError(error), "stale");

@@ -121,8 +121,22 @@ export class ClaimStaleError extends ClaimError {
   static defaultClaimCode = "CLAIM_STALE";
 }
 
-/** The ref does not hold a readable claim payload; exit 16. */
+/**
+ * The ref does not hold a readable claim payload; exit 16.
+ *
+ * `refInvalid === true` is part of this class, not of the one error that
+ * happens to start the chain. `parseClaimPayload` marks its own refusal with
+ * the flag, and every read path re-raises that refusal as this class; a
+ * re-raise that did not carry the flag forward left library callers — which
+ * read `err.refInvalid`, not `err.cause.refInvalid` — unable to tell a wedged
+ * reference from any other exit-16 state.
+ */
 export class ClaimRefInvalidError extends ClaimStaleError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.refInvalid = true;
+  }
+
   static defaultClaimCode = "CLAIM_REF_INVALID";
 }
 
