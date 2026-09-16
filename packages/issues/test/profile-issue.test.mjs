@@ -204,6 +204,12 @@ test("the issue profile validates the metadata a sweep must not redo", () => {
     ["branch", " sweep/4312"],
     ["branch", "b".repeat(121)],
     ["lastCommentUrl", "https://example.com/mento-protocol/x/issues/4312"],
+    // A github.com URL whose query carries a credential. The host prefix and
+    // the length cap both pass, so only the credential check refuses it.
+    [
+      "lastCommentUrl",
+      `https://github.com/mento-protocol/x/issues/4312?token=ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+    ],
   ];
   for (const [key, value] of refused) {
     assert.throws(
@@ -292,6 +298,102 @@ test("a branch that looks like a credential is refused before any ref write", as
   assert.equal(
     taking.server.getRefOid(refName),
     supersedes,
+    "the peer's LOCK is still the head",
+  );
+});
+
+test("a lastCommentUrl carrying a credential is refused before any ref write", async () => {
+  // The URL validator checked a `https://github.com/` prefix and a length, and
+  // neither looks past the host: `…/issues/4312?token=ghp_…` satisfied both.
+  // `collectSetFlags` refuses one at the flag grammar, but `acquireClaim`,
+  // `renewClaim` and `takeoverClaim` are exported, so the library path wrote
+  // the token into the claim commit. All three transitions now refuse it
+  // before they write, and the refusal describes the value instead of echoing
+  // it.
+  const TOKEN = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const TOKEN_URL = `https://github.com/mento-protocol/x/issues/4312?token=${TOKEN}`;
+  const COMMENT_URL =
+    "https://github.com/mento-protocol/x/issues/4312#issuecomment-1";
+  const refusal = (error, label) => {
+    assert.equal(error.claimCode, "CLAIM_CONFIG");
+    assert.match(
+      error.message,
+      /Metadata key lastCommentUrl has an invalid value/u,
+    );
+    assert.equal(
+      error.message.includes(
+        `[redacted-github-token] (${TOKEN_URL.length} characters)`,
+      ),
+      true,
+      `the ${label} refusal must describe the value`,
+    );
+    assert.equal(
+      error.message.includes(TOKEN),
+      false,
+      `the ${label} refusal must not echo the credential`,
+    );
+    return true;
+  };
+
+  const acquiring = createIssueContext();
+  await assert.rejects(
+    () => acquireClaim(acquiring.ctx, ISSUE, { lastCommentUrl: TOKEN_URL }),
+    (error) => refusal(error, "acquire"),
+  );
+  assert.equal(
+    acquiring.server.calls.commit.length,
+    0,
+    "not even the bootstrap UNLOCK is written",
+  );
+  assert.equal(acquiring.server.calls.cas.length, 0);
+
+  const { ctx, server } = createIssueContext({ uuidPrefix: "renew" });
+  const lease = await acquireClaim(ctx, ISSUE, {
+    lastCommentUrl: COMMENT_URL,
+  });
+  const held = server.calls.commit.length;
+  await assert.rejects(
+    () => renewClaim(lease, { set: { lastCommentUrl: TOKEN_URL } }),
+    (error) => refusal(error, "renew"),
+  );
+  assert.equal(
+    server.calls.commit.length,
+    held,
+    "a refused renew writes nothing",
+  );
+  assert.equal(
+    lease.payload.lastCommentUrl,
+    COMMENT_URL,
+    "the lease is untouched",
+  );
+
+  const taking = createIssueContext({ uuidPrefix: "taker" });
+  const takenRef = claimRefName(taking.ctx, ISSUE);
+  seedRef(
+    taking.server,
+    takenRef,
+    buildTestLock(taking.ctx, ISSUE, { ownerRunId: "peer-run-1" }),
+  );
+  // Past `expiresAt` plus grace, so only the metadata stands in the way.
+  taking.clock.advance(40 * 60_000);
+  const seededCommits = taking.server.calls.commit.length;
+  const priorOid = taking.server.getRefOid(takenRef);
+  await assert.rejects(
+    () =>
+      takeoverClaim(taking.ctx, ISSUE, {
+        supersedes: priorOid,
+        metadata: { lastCommentUrl: TOKEN_URL },
+      }),
+    (error) => refusal(error, "takeover"),
+  );
+  assert.equal(
+    taking.server.calls.commit.length,
+    seededCommits,
+    "a refused takeover writes nothing",
+  );
+  assert.equal(
+    taking.server.getRefOid(takenRef),
+    priorOid,
     "the peer's LOCK is still the head",
   );
 });

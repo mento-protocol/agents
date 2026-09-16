@@ -110,13 +110,27 @@ function isBranchNameOrNull(value) {
   return !containsSecret(value);
 }
 
+/**
+ * A github.com URL this package may persist, or null.
+ *
+ * The prefix and the length are the whole of the old check, and neither looks
+ * past the host: `https://github.com/o/r/issues/1?token=ghp_…` is a
+ * well-formed github.com URL that carries a credential in its query, and it
+ * satisfied both. `summaryCommentUrl` and `lastCommentUrl` are the only keys
+ * this validator guards, and both are written straight into a claim commit —
+ * so it refuses a credential for the same reason `isBranchNameOrNull` does,
+ * and on the same boundary, rather than trusting the URL grammar to have
+ * excluded one.
+ *
+ * @param {unknown} value the supplied URL.
+ * @returns {boolean}
+ */
 function isGithubUrlOrNull(value) {
-  return (
-    value === null ||
-    (typeof value === "string" &&
-      value.length <= MAX_SUMMARY_COMMENT_URL_LENGTH &&
-      value.startsWith("https://github.com/"))
-  );
+  if (value === null) return true;
+  if (typeof value !== "string") return false;
+  if (value.length > MAX_SUMMARY_COMMENT_URL_LENGTH) return false;
+  if (!value.startsWith("https://github.com/")) return false;
+  return !containsSecret(value);
 }
 
 /**
