@@ -1541,8 +1541,9 @@ Every failure exits 3 **before any network call**:
 - No string anywhere in the document may be a credential; see the redaction
   section. It is checked over the whole normalized shape rather than key by
   key, because a config value is written into payloads and commit messages.
-- `scopeTemplate` starts with `refs/`, contains `{pr}` exactly once, renders
-  through `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
+- `scopeTemplate` starts with `refs/`, contains the selected profile's
+  placeholder (`{pr}` or `{issue}`) exactly once, renders through
+  `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
   not the whole rule: the rendered name and the namespace are each checked
   against `transportRefNameProblem` too, the same grammar the transport applies
   before it splices one into a REST path. `#`, `%` and `&` are legal in a
