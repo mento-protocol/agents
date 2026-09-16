@@ -1,0 +1,4 @@
+# Resolve `source` targets relative to the sourcing script, so shellcheck
+# follows a modular script into its lib/ files.
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/lib

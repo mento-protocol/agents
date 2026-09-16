@@ -1,0 +1,5 @@
+# Legacy shell files that predate the size limits in AGENTS.md.
+# Format: <path> <line count>. A file may not grow past its count.
+# Lower the count as the file shrinks; delete the line once it fits.
+scripts/link-skills.sh 4066
+scripts/test-link-skills.sh 10192

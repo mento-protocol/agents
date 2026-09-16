@@ -76,3 +76,55 @@ shellcheck scripts/*.sh
 bash scripts/test-link-skills.sh
 BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 ```
+
+## Shell scripts
+
+Bash gets the same modularity rules as JavaScript. A script is a set of
+small files with one topic each, not one file that holds everything.
+`scripts/check-shell-size.sh` enforces the limits and CI runs it on every
+pull request.
+
+Limits:
+
+- A `.sh` file holds at most 500 lines.
+- A function holds at most 60 lines. A long here document or JSON snippet
+  belongs in `assets/` or a separate file, not inside a function.
+- A test file covers one topic of one subject. A subject written in
+  JavaScript is tested from JavaScript with `node:test`, never from a bash
+  harness.
+
+Layout for a script that outgrows one file:
+
+```text
+scripts/<tool>.sh              entry point: option parsing, sources lib/, calls main
+scripts/lib/<tool>/<topic>.sh  one topic per file; defines functions, runs nothing at load
+scripts/test-<tool>.sh         runner: sources tests/lib/, runs every tests/<tool>/*.sh
+scripts/tests/lib/<name>.sh    shared assertions, fixtures, and shims
+scripts/tests/<tool>/<topic>.sh cases for one topic, in the same order as lib/
+```
+
+Rules for a module file:
+
+- It is sourced, never executed: no shebang, no `set -e`, no code outside
+  function bodies except constants.
+- The entry point resolves its own directory with `pwd -P` and sources every
+  module by absolute path, so the installed hook and a symlinked clone both
+  work.
+- Each module names, in a comment at the top, the globals it reads and
+  writes. A module that needs a variable another module owns takes it as a
+  function argument instead where that is practical.
+- `.shellcheckrc` sets `source-path`, so `shellcheck scripts/*.sh` follows
+  the `source` lines. Do not add `# shellcheck disable=SC1091`.
+
+Two files predate these limits and are listed in
+`scripts/shell-size-baseline.txt` with their current line count:
+`scripts/link-skills.sh` and `scripts/test-link-skills.sh`. A change may not
+grow either of them. Add a case or a function by first splitting the topic it
+belongs to out of the monolith, then lower the baseline entry to the new
+count. Remove the entry once the file fits the limit.
+
+Run the check locally before opening a pull request:
+
+```bash
+bash scripts/check-shell-size.sh
+```

@@ -68,6 +68,9 @@ jobs:
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
 
+      - name: Check shell file and function sizes
+        run: bash scripts/check-shell-size.sh
+
       - name: Validate skills
         run: node scripts/validate-skills.mjs
 
