@@ -265,7 +265,7 @@ nothing. The recommended shape leaves the renew room to work:
 An hourly `renew --if-due` from cron moves the expiry an hour further out each
 time, until the ceiling binds. The claim becomes takeable at
 
-```
+```text
 min(lastRenew + ttlMinutes, claimedAt + maxTtlMinutes) + graceMinutes
 ```
 
