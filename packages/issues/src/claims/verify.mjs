@@ -540,7 +540,7 @@ export function normalizeGuardClaims(claims, numberFlag = "pr") {
   if (list.length === 0) {
     throw new ClaimUsageError(
       `guard needs at least one --${numberFlag}/--token pair`,
-      { details: { claims: [], flag: numberFlag } },
+      { details: { claims: [] } },
     );
   }
   const seen = new Set();

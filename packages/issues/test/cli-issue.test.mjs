@@ -293,31 +293,52 @@ test("every command that names an item refuses both flags and neither, before an
     assert.equal(withBoth.exitCode, 2, `${key} must refuse both flags`);
     const bothDocument = withBoth.document ?? withBoth.stderrDocuments[0];
     assert.equal(bothDocument.status, "usage");
-    assert.match(bothDocument.error.message, /, not both$/u);
+    // Pinned whole rather than matched loosely: these two refusals are the
+    // CLI's only word on a mistyped item, and their `details` key set is what
+    // a consuming skill reads.
+    assert.equal(
+      bothDocument.error.message,
+      `${key} takes ${pr} or ${issue}, not both`,
+    );
+    assert.deepEqual(bothDocument.error.details, {
+      command: key,
+      flags: [pr, issue],
+    });
     assert.equal(both.server.calls.read.length, 0, `${key}: no ref was read`);
     assert.equal(
       both.server.calls.commit.length,
       0,
       `${key}: no commit was created`,
     );
+    assert.equal(spawn.calls.length, 0, `${key}: no child was spawned`);
 
     // `claims list` names no item at all when it is filtering, which is a
     // listing of the whole namespace and not a refusal.
     if (mode === "filter") continue;
 
-    const neither = harness();
-    const without = await neither.run(argv, { spawn: spawn.spawn });
-    assert.equal(without.exitCode, 2, `${key} must refuse neither flag`);
-    const document = without.document ?? without.stderrDocuments[0];
-    assert.equal(document.status, "usage");
-    assert.match(
-      document.error.message,
-      /requires --\w+ or --\w+ \(the loaded config's profile decides which\)/u,
-    );
-    assert.equal(neither.server.calls.read.length, 0, `${key}: no ref read`);
-    assert.equal(neither.server.calls.commit.length, 0, `${key}: no commit`);
+    // Under both profiles, because this refusal is the parser's: the profile
+    // only decides which of the two flags the operator should have typed.
+    for (const document of [issueDocument(), prDocument()]) {
+      const neither = harness({ document });
+      const without = await neither.run(argv, { spawn: spawn.spawn });
+      assert.equal(without.exitCode, 2, `${key} must refuse neither flag`);
+      const refusal = without.document ?? without.stderrDocuments[0];
+      assert.equal(refusal.status, "usage");
+      // The item is named before the command's other required flags:
+      // `claims renew` given nothing at all asks for the item, not `--token`.
+      assert.equal(
+        refusal.error.message,
+        `${key} requires ${pr} or ${issue} (the loaded config's profile decides which)`,
+      );
+      assert.deepEqual(refusal.error.details, {
+        command: key,
+        flags: [pr, issue],
+      });
+      assert.equal(neither.server.calls.read.length, 0, `${key}: no ref read`);
+      assert.equal(neither.server.calls.commit.length, 0, `${key}: no commit`);
+      assert.equal(spawn.calls.length, 0, `${key}: no child was spawned`);
+    }
   }
-  assert.equal(recordingSpawn(0).calls.length, 0);
 });
 
 /** Put the number flags in, before any bare `--`. */

@@ -540,6 +540,12 @@ export function parseCommandLine(argv) {
  * Which of the two is right for the loaded profile is settled in
  * `resolveNumberFlags`, and is also exit 2.
  *
+ * It runs before the generic `spec.required` loop, because `"pr"`/`"prs"` led
+ * every `required` array this rule replaced. `claims renew` with nothing on
+ * the line named the number flag first; counting afterwards made it name
+ * `--token` instead, which sends an operator after the second missing flag
+ * while the first one is still missing.
+ *
  * @param {string} key the resolved command.
  * @param {object} spec its spec.
  * @param {object} flags the parsed flags.
@@ -673,12 +679,12 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
     }
   }
 
+  assertOneNumberFlag(key, spec, flags);
   for (const name of spec.required) {
     if (!Object.hasOwn(flags, name)) {
       throw usage(`${key} requires --${name}`, { command: key, flag: name });
     }
   }
-  assertOneNumberFlag(key, spec, flags);
   if (
     spec.childArgv === true &&
     (childArgv === null || childArgv.length === 0)
@@ -757,7 +763,7 @@ export function pairClaimFlags(order, numberFlag = "pr") {
       if (pending !== null) {
         throw usage(
           `--${numberFlag} ${pending} is not followed by its --token`,
-          { number: pending, flag: numberFlag },
+          { number: pending },
         );
       }
       pending = entry.value;
@@ -768,7 +774,6 @@ export function pairClaimFlags(order, numberFlag = "pr") {
         // commit oid rather than a credential.
         throw usage(`--token must follow the --${numberFlag} it belongs to`, {
           token: entry.value,
-          flag: numberFlag,
         });
       }
       pairs.push({ number: pending, token: entry.value });
@@ -778,7 +783,6 @@ export function pairClaimFlags(order, numberFlag = "pr") {
   if (pending !== null) {
     throw usage(`--${numberFlag} ${pending} is not followed by its --token`, {
       number: pending,
-      flag: numberFlag,
     });
   }
   return pairs;
