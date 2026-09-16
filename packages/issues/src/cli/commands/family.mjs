@@ -154,17 +154,29 @@ export async function runFamilyClaim(runtime) {
   // default. Above the dry-run branch, because a sweep plans the batch before
   // it commits to it: a plan that skipped the check called every pull-request
   // number in the batch claimable.
-  const subjectWarnings = [];
+  //
+  // The failure context is moved to each member before its own check, because
+  // the check throws about that member and the document is built from the
+  // context. While it stayed on `numbers[0]`, a family whose third member was
+  // a pull request printed the first member's `ref`, `scope`, inspection line
+  // and recovery commands beside an `error.details.number` naming the third —
+  // an operator sent to act on a claim that was never refused. Each failed
+  // read is recorded on the runtime by `assertSubjectKind` itself, so a
+  // warning about one member survives a refusal or a throw about a later one.
   for (const number of order) {
-    subjectWarnings.push(...(await assertSubjectKind(runtime, number)));
+    markFailureContext(runtime, number);
+    await assertSubjectKind(runtime, number);
   }
+  // Every member passed, so the context returns to the member the write path
+  // reports under: `claimFamily` fails as one family, not as one member.
+  markFailureContext(runtime, numbers[0]);
 
   if (ctx.options.dryRun === true) {
     const plans = [];
     for (const number of order) {
       plans.push(await planTransition(ctx, number, { action: "acquire" }));
     }
-    return { status: "ok", warnings: subjectWarnings, body: { plan: plans } };
+    return { status: "ok", body: { plan: plans } };
   }
 
   // Membership and metadata are checked; the write may now spend a round trip
@@ -190,7 +202,7 @@ export async function runFamilyClaim(runtime) {
     throw error;
   }
 
-  const warnings = [...subjectWarnings];
+  const warnings = [];
   const members = [];
   for (const number of family.order) {
     const lease = family.leases.get(number);

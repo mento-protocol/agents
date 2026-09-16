@@ -29,31 +29,39 @@ import { readIssueState } from "../github.mjs";
  * fails is a warning, never a refusal: a transport fault must not deny a claim
  * the operator is entitled to, and the listing still reports the hazard.
  *
+ * The warning is recorded on the runtime the moment it is produced, and the
+ * caller adds nothing of its own. A handler-local array reaches the document
+ * only when the handler returns, so anything that threw afterwards —
+ * `ensureLogin`, a compare-and-swap whose outcome is unknown and may have
+ * written a claim, the label projection, a later family member — printed a
+ * failure document that said nothing about the verification having failed.
+ * `runCli` reads `runtime.warnings` on both paths, so recording here is what
+ * makes the warning survive the throw.
+ *
  * @param {object} runtime the CLI runtime.
  * @param {number} number the claimed number.
- * @returns {Promise<Array<{stage: string, message: string}>>} warnings.
+ * @returns {Promise<void>} nothing; warnings go on `runtime.warnings`.
  * @throws {ClaimNotExpiredError} when the number is really a pull request.
  */
 export async function assertSubjectKind(runtime, number) {
   const { ctx, config } = runtime;
-  if (config?.claims?.verifySubjectKind !== true) return [];
+  if (config?.claims?.verifySubjectKind !== true) return;
   // Only a profile that claims issues can be handed a pull-request number in
   // the first place. Under the pr profile the endpoint already names the kind.
-  if (ctx.profile.itemKind !== "issue") return [];
+  if (ctx.profile.itemKind !== "issue") return;
 
   const read = runtime.operations.gh?.readIssueState ?? readIssueState;
   const observed = await read(ctx.options, number);
   if (observed.error) {
-    return [
-      {
-        stage: "verify-subject-kind",
-        message: `claims.verifySubjectKind could not read ${ctx.profile.subject(
-          ctx.profile.canonicalScope(ctx.options, number),
-        )}: ${observed.error}`,
-      },
-    ];
+    runtime.warnings.push({
+      stage: "verify-subject-kind",
+      message: `claims.verifySubjectKind could not read ${ctx.profile.subject(
+        ctx.profile.canonicalScope(ctx.options, number),
+      )}: ${observed.error}`,
+    });
+    return;
   }
-  if (observed.pullRequest !== true) return [];
+  if (observed.pullRequest !== true) return;
 
   throw new ClaimNotExpiredError(
     `${config.repository}#${number} is a pull request, not an issue, and claims.verifySubjectKind is on; an issue claim on a pull-request number is a second mutex over the same item`,

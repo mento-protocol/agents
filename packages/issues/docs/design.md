@@ -1625,10 +1625,15 @@ Every failure exits 3 **before any network call**:
   GitHub gives issues and pull requests one number space, so an issue claim can
   otherwise stand on a pull-request number another skill holds under the `pr`
   namespace. A family reads its members in claim order and stops at the first
-  refusal, so a refused family writes nothing. The check fails open: a read
-  that fails yields a `verify-subject-kind` warning and allows the claim,
-  because a transport fault must not deny a claim the operator is entitled to.
-  It is inert under `profile: "pr"`, where the endpoint already names the kind.
+  refusal, so a refused family writes nothing, and the refusal carries that
+  member's `ref`, `scope` and recovery commands rather than the first member's.
+  The check fails open: a read that fails yields a `verify-subject-kind`
+  warning and allows the claim, because a transport fault must not deny a claim
+  the operator is entitled to. The warning is recorded on the runtime as soon
+  as it is produced, so it reaches the failure document too when a later step —
+  the login, the compare-and-swap, the label projection, another family member
+  — throws. It is inert under `profile: "pr"`, where the endpoint already names
+  the kind.
 - `gh.timeoutSeconds`, when given, is the per-`gh` wall-clock default that
   `--timeout-seconds` overrides. Both are bounded the same way: more than 0 and
   at most 86400 seconds. `runGh` arms its timer only for a finite, positive

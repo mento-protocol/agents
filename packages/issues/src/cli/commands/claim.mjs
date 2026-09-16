@@ -50,15 +50,16 @@ export async function runClaim(runtime) {
   // run refuses with exit 10 `not-eligible`. It reads and never writes, so a
   // dry run may make it, and it needs no login of its own — the login this
   // command records belongs to the write path below. Under the pr profile it
-  // returns at once and costs nothing either way.
-  const subjectWarnings = await assertSubjectKind(runtime, number);
+  // returns at once and costs nothing either way. A failed read is recorded on
+  // the runtime rather than returned, so it reaches the document whether this
+  // command returns or something below it throws.
+  await assertSubjectKind(runtime, number);
 
   if (ctx.options.dryRun === true) {
     return {
       status: "ok",
       ref,
       scope,
-      warnings: subjectWarnings,
       body: {
         plan: await planTransition(ctx, number, {
           action: "acquire",
@@ -87,7 +88,7 @@ export async function runClaim(runtime) {
     status: lease.status,
     ref,
     scope,
-    warnings: [...subjectWarnings, ...label.warnings, ...state.warnings],
+    warnings: [...label.warnings, ...state.warnings],
     body: {
       claim: claimBlock(lease),
       label: { name: label.name, changed: label.changed, status: label.status },

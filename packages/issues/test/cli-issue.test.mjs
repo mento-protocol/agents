@@ -724,6 +724,123 @@ test("verifySubjectKind warns rather than refuses when the read fails", async ()
   assert.match(warning.message, /gh api failed/u);
 });
 
+test("a subject-kind warning reaches the document when the write then throws", async () => {
+  // The fail-open is only honest if the failure document says the check failed.
+  // While the warning lived in a handler-local array it reached the document
+  // only when the handler returned, so a compare-and-swap whose outcome is
+  // unknown — one that may already have written a claim — was reported with no
+  // sign that the number was never verified.
+  const reads = [];
+  const readIssueState = async (_options, number) => {
+    reads.push(number);
+    return {
+      number,
+      state: null,
+      stateReason: null,
+      pullRequest: null,
+      error: "gh api failed",
+    };
+  };
+  const settings = {
+    claims: { verifySubjectKind: true },
+    gh: { readIssueState },
+  };
+
+  for (const [label, argv, expected] of [
+    ["claims claim", ["claims", "claim", "--issue", String(ISSUE)], [ISSUE]],
+    [
+      "claims takeover",
+      [
+        "claims",
+        "takeover",
+        "--issue",
+        String(ISSUE),
+        "--supersedes",
+        hexOid(1),
+      ],
+      [ISSUE],
+    ],
+    [
+      // Every member is read before the first write, so a family carries one
+      // warning per member into whatever the write path throws.
+      "claims family claim",
+      ["claims", "family", "claim", "--issues", `4319,${ISSUE}`],
+      [ISSUE, 4319],
+    ],
+  ]) {
+    reads.length = 0;
+    const context = harness(settings);
+    // A fake server that answers the reads and then throws on the first write.
+    const failing = {
+      ...context.options.operations,
+      claims: {
+        ...context.options.operations.claims,
+        createStateCommit: async () => {
+          throw new Error("the transport went away mid-write");
+        },
+      },
+    };
+    const failed = await context.run(argv, { operations: failing });
+    assert.notEqual(failed.exitCode, 0, `${label} fails`);
+    assert.deepEqual(reads, expected, `${label} verifies every member first`);
+    const warnings = (failed.document.warnings ?? []).filter(
+      (entry) => entry.stage === "verify-subject-kind",
+    );
+    assert.equal(
+      warnings.length,
+      expected.length,
+      `${label} keeps every subject-kind warning on the failure document`,
+    );
+    for (const entry of warnings) assert.match(entry.message, /gh api failed/u);
+  }
+});
+
+test("a family refusal names the member it refused, not the first one", async () => {
+  // The refusal carries `error.details.number`, but the ref, the scope and the
+  // recovery commands come from the failure context. While that context stayed
+  // on the first member, the document told an operator to read and act on a
+  // claim that was never refused.
+  const readIssueState = async (_options, number) => ({
+    number,
+    state: number === 4400 ? "open" : null,
+    stateReason: null,
+    // 4400 is really a pull request; the read for 4312 fails outright.
+    pullRequest: number === 4400 ? true : null,
+    error: number === 4400 ? null : "gh api failed",
+  });
+  const context = harness({
+    claims: { verifySubjectKind: true },
+    gh: { readIssueState },
+  });
+  // 4312 leads the caller's list, so the context the refusal inherits is the
+  // wrong one unless each member sets its own before its check.
+  const refused = await context.run([
+    "claims",
+    "family",
+    "claim",
+    "--issues",
+    `${ISSUE},4400`,
+  ]);
+
+  assert.equal(refused.exitCode, 10);
+  assert.equal(refused.document.status, "not-eligible");
+  assert.equal(refused.document.error.details.number, 4400);
+  assert.equal(refused.document.ref, "refs/mento-claims/v1/issue/4400");
+  assert.deepEqual(refused.document.scope, {
+    repo: REPOSITORY,
+    issue: 4400,
+  });
+  assert.match(refused.document.next.read, /--issue 4400$/u);
+  // The earlier member's failed read is still reported, so the operator can
+  // see that 4312 was never verified either.
+  const warnings = (refused.document.warnings ?? []).filter(
+    (entry) => entry.stage === "verify-subject-kind",
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].message, /Issue #4312/u);
+  assert.equal(context.server.calls.commit.length, 0);
+});
+
 test("a --dry-run plan refuses the pull-request number its run refuses", async () => {
   // A sweep plans a batch before it commits to it. While the check sat below
   // the dry-run branch, the plan answered exit 0 `ok` with `would: acquire`
