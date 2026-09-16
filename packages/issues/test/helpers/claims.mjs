@@ -10,6 +10,7 @@ import { createClaimContext } from "../../src/claims/context.mjs";
 import { buildClaimPayload } from "../../src/claims/payload.mjs";
 import {
   issueBoardProfile,
+  issueClaimProfile,
   prClaimProfile,
 } from "../../src/claims/profile.mjs";
 import { createFakeClock } from "../../src/testing/fake-clock.mjs";
@@ -80,6 +81,24 @@ export function createTestContext(input = {}) {
     allowCloudWriters: input.allowCloudWriters ?? false,
   });
   return { ctx, server, clock };
+}
+
+/**
+ * Build an issue claim context wired to a fake reference server.
+ *
+ * The same helper as `createTestContext` with the issue profile, so an issue
+ * round trip is driven by exactly the mechanism a PR round trip is. The
+ * `profile` override is honoured, which is how the namespace-collision tests
+ * point a pr context and an issue context at one ref name.
+ *
+ * @param {object} [input] overrides.
+ * @returns {{ctx: object, server: object, clock: object}}
+ */
+export function createIssueContext(input = {}) {
+  return createTestContext({
+    ...input,
+    profile: input.profile ?? issueClaimProfile(),
+  });
 }
 
 /**

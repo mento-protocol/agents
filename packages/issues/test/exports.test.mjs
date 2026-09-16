@@ -140,3 +140,31 @@ test("the bin entry point loads and answers with the documented document", () =>
   assert.equal(document.schema, "mento-issues-result:v1");
   assert.equal(document.status, "usage");
 });
+
+test("the claims subpath exports every profile factory and the table naming them", async () => {
+  // A library consumer reaches the profiles through this subpath and nothing
+  // else. A factory the barrel forgets to re-export is invisible to every
+  // other suite here, which imports by relative path.
+  const claims = await import(
+    pathToFileURL(packagePath(MANIFEST.exports["./claims"])).href
+  );
+  for (const name of [
+    "prClaimProfile",
+    "issueClaimProfile",
+    "issueBoardProfile",
+    "claimProfile",
+    "CLAIM_PROFILES",
+  ]) {
+    assert.notEqual(
+      claims[name],
+      undefined,
+      `@mento-protocol/issues/claims must export ${name}`,
+    );
+  }
+  assert.deepEqual(Object.keys(claims.CLAIM_PROFILES), [
+    "pr",
+    "issue",
+    "issue-board",
+  ]);
+  assert.equal(claims.issueClaimProfile().id, "issue");
+});

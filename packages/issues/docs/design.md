@@ -156,21 +156,42 @@ recovery text assumes, so tuning it would make the printed advice wrong.
 
 ## Profiles
 
-A profile is the only thing that differs between the two namespaces.
+A profile is the only thing that differs between the three namespaces.
 
-| Field                       | `prClaimProfile()`                                           | `issueBoardProfile()`                                       |
-| --------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| `id`                        | `pr`                                                         | `issue-board`                                               |
-| `kind`                      | `mento-claim`                                                | `mento-issue-board-mutex`                                   |
-| `namespace`                 | `refs/mento-claims/v1/pr`                                    | `refs/mento-issue-board-locks/v1`                           |
-| reference name              | `<namespace>/<number>`                                       | `<namespace>/<sha256(repo\nissue)>`                         |
-| `author`                    | `Mento claims <claims@users.noreply.github.com>`             | `Mento issue board <issue-board@users.noreply.github.com>`  |
-| `leaseCapable`              | `true`                                                       | `false`                                                     |
-| `releaseRequiresOwnerCheck` | `true`                                                       | `false`                                                     |
-| `metadataKeys`              | `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl` | `branch`, `previousBranch`, `claimedAt`, `pr`, `previousPr` |
-| `errorCodes.conflict`       | `CLAIM_CONFLICT`                                             | `ISSUE_OWNERSHIP_CONFLICT`                                  |
-| `errorCodes.stale`          | `CLAIM_STALE`                                                | `ISSUE_MUTATION_LOCK_STALE`                                 |
-| `errorCodes.unknown`        | `CLAIM_UNKNOWN_OUTCOME`                                      | `ISSUE_MUTATION_LOCK_RECONCILIATION_UNKNOWN`                |
+| Field                       | `prClaimProfile()`                                           | `issueClaimProfile()`                            | `issueBoardProfile()`                                       |
+| --------------------------- | ------------------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------------------- |
+| `id`                        | `pr`                                                         | `issue`                                          | `issue-board`                                               |
+| `kind`                      | `mento-claim`                                                | `mento-claim`                                    | `mento-issue-board-mutex`                                   |
+| `namespace`                 | `refs/mento-claims/v1/pr`                                    | `refs/mento-claims/v1/issue`                     | `refs/mento-issue-board-locks/v1`                           |
+| reference name              | `<namespace>/<number>`                                       | `<namespace>/<number>`                           | `<namespace>/<sha256(repo\nissue)>`                         |
+| `numberKey`                 | `pr`                                                         | `issue`                                          | `issue`                                                     |
+| `numberToken`               | `{pr}`                                                       | `{issue}`                                        | `null`                                                      |
+| `itemKind`                  | `pullRequest`                                                | `issue`                                          | `null`                                                      |
+| `author`                    | `Mento claims <claims@users.noreply.github.com>`             | `Mento claims <claims@users.noreply.github.com>` | `Mento issue board <issue-board@users.noreply.github.com>`  |
+| `leaseCapable`              | `true`                                                       | `true`                                           | `false`                                                     |
+| `releaseRequiresOwnerCheck` | `true`                                                       | `true`                                           | `false`                                                     |
+| `metadataKeys`              | `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl` | `branch`, `pullRequest`, `lastCommentUrl`        | `branch`, `previousBranch`, `claimedAt`, `pr`, `previousPr` |
+| `errorCodes.conflict`       | `CLAIM_CONFLICT`                                             | `CLAIM_CONFLICT`                                 | `ISSUE_OWNERSHIP_CONFLICT`                                  |
+| `errorCodes.stale`          | `CLAIM_STALE`                                                | `CLAIM_STALE`                                    | `ISSUE_MUTATION_LOCK_STALE`                                 |
+| `errorCodes.unknown`        | `CLAIM_UNKNOWN_OUTCOME`                                      | `CLAIM_UNKNOWN_OUTCOME`                          | `ISSUE_MUTATION_LOCK_RECONCILIATION_UNKNOWN`                |
+
+`prClaimProfile` and `issueClaimProfile` are one body — `numberedClaimProfile`
+— with a different spec. They claim one decimal item number rendered into one
+readable ref name, and differ only in their namespace, their placeholder, the
+nouns their refusals use and the metadata they carry. `numberToken` exists
+because two sites take a template apart, `claimNumberPattern` and the config
+loader's `assertScopeTemplate`, and both once hardcoded `{pr}`.
+
+The nouns are separate spec fields rather than derived from `subjectNoun`: the
+pull-request construction refusals read "pull-request", hyphenated, while
+`subjectNoun` is "pull request", and `fixtures/pr-profile-shape.json` pins
+both.
+
+GitHub serves issues and pull requests from one number space, so
+`refs/mento-claims/v1/pr/872` and `refs/mento-claims/v1/issue/872` are two
+independent mutexes over at most one real item. They never collide — separate
+refs, separate state-file prefixes, separate guard slots, separate labels — and
+they never coordinate either.
 
 Every reference name passes `assertValidRefName` before any network call: it
 starts with `refs/`, has at least two `/`, and carries no empty or `.`-leading

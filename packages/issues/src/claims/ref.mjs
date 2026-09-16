@@ -304,7 +304,14 @@ export function claimLeaseView(ctx, payload) {
 
 function claimNumberPattern(profile) {
   if (typeof profile.refTemplate !== "string") return null;
-  const parts = profile.refTemplate.split("{pr}");
+  // The profile's own placeholder, not a literal `{pr}`: a second numbered
+  // profile renders `{issue}`, and a literal here would leave every
+  // `refs/mento-claims/v1/issue/<n>` unreadable to `listClaims` while the
+  // template itself was perfectly valid. A profile with no token answers null
+  // exactly as one with no template does, so the board profile's listing
+  // refusal is unchanged.
+  if (typeof profile.numberToken !== "string") return null;
+  const parts = profile.refTemplate.split(profile.numberToken);
   if (parts.length !== 2) return null;
   const escape = (value) => value.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`^${escape(parts[0])}(\\d+)${escape(parts[1])}$`, "u");
