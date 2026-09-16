@@ -1039,6 +1039,7 @@ ClaimError
 │   ├── ClaimSupersededError    CLAIM_SUPERSEDED          13
 │   ├── ClaimNotHeldError       CLAIM_NOT_HELD            14
 │   └── ClaimRenewRequiredError CLAIM_RENEW_REQUIRED      15
+├── ClaimSubjectKindError       CLAIM_SUBJECT_KIND        10
 ├── ClaimUnknownOutcomeError    profile.errorCodes.unknown 12
 ├── ClaimStaleError             profile.errorCodes.stale  16
 │   └── ClaimRefInvalidError    CLAIM_REF_INVALID         16
@@ -1622,6 +1623,11 @@ Every failure exits 3 **before any network call**:
 - `verifySubjectKind` (default `false`) makes `claim`, `takeover` and
   `family claim` read `repos/{owner}/{repo}/issues/{n}` after the login and
   refuse with exit 10 `not-eligible` when the number is really a pull request.
+  The refusal is a `ClaimSubjectKindError`, `CLAIM_SUBJECT_KIND`, and it is not
+  recoverable: exit 10 asks the caller to skip the item, and no retry turns a
+  pull-request number into an issue. Changed in 0.2.0: the refusal was a
+  `ClaimNotExpiredError`, so `CLAIM_NOT_EXPIRED` made every failure document
+  report a permanent policy refusal as a recoverable race.
   GitHub gives issues and pull requests one number space, so an issue claim can
   otherwise stand on a pull-request number another skill holds under the `pr`
   namespace. A family reads its members in claim order and stops at the first

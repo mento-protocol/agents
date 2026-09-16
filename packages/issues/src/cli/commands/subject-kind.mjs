@@ -16,9 +16,13 @@
  *
  * Exit 10, `not-eligible`: the claim was not taken, nothing was written, and
  * the caller should move on to the next item rather than retry this one.
+ *
+ * The refusal carries `CLAIM_SUBJECT_KIND`, which is not recoverable: the exit
+ * code invites the caller to skip the item, and no retry turns a pull-request
+ * number into an issue.
  */
 
-import { ClaimNotExpiredError } from "../../claims/errors.mjs";
+import { ClaimSubjectKindError } from "../../claims/errors.mjs";
 import { readIssueState } from "../github.mjs";
 
 /**
@@ -41,7 +45,7 @@ import { readIssueState } from "../github.mjs";
  * @param {object} runtime the CLI runtime.
  * @param {number} number the claimed number.
  * @returns {Promise<void>} nothing; warnings go on `runtime.warnings`.
- * @throws {ClaimNotExpiredError} when the number is really a pull request.
+ * @throws {ClaimSubjectKindError} when the number is really a pull request.
  */
 export async function assertSubjectKind(runtime, number) {
   const { ctx, config } = runtime;
@@ -63,7 +67,7 @@ export async function assertSubjectKind(runtime, number) {
   }
   if (observed.pullRequest !== true) return;
 
-  throw new ClaimNotExpiredError(
+  throw new ClaimSubjectKindError(
     `${config.repository}#${number} is a pull request, not an issue, and claims.verifySubjectKind is on; an issue claim on a pull-request number is a second mutex over the same item`,
     {
       details: {

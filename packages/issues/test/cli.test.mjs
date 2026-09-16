@@ -46,6 +46,7 @@ import {
   ClaimRefInvalidError,
   ClaimRenewRequiredError,
   ClaimStaleError,
+  ClaimSubjectKindError,
   ClaimSupersededError,
   ClaimUnknownOutcomeError,
 } from "../src/claims/errors.mjs";
@@ -1312,6 +1313,7 @@ test("the exit-code table matches the status table for every status and error cl
     [new ClaimContendedError("contended"), 10, "contended"],
     [new ClaimAlreadyHeldError("held"), 10, "already-held"],
     [new ClaimNotExpiredError("live"), 10, "not-eligible"],
+    [new ClaimSubjectKindError("pull request"), 10, "not-eligible"],
     [new ClaimClockSkewError("skew"), 10, "clock-skew"],
     [new ClaimExpiredError("expired"), 11, "expired"],
     [new ClaimUnknownOutcomeError("unknown"), 12, "unknown-outcome"],

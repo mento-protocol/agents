@@ -63,6 +63,7 @@ export const CLAIM_CODE_STATUSES = Object.freeze({
   CLAIM_ALREADY_HELD: "already-held",
   CLAIM_NOT_EXPIRED: "not-eligible",
   CLAIM_CLOCK_SKEW: "clock-skew",
+  CLAIM_SUBJECT_KIND: "not-eligible",
   CLAIM_FAMILY_ABORTED: "family-aborted",
   CLAIM_EXPIRED: "expired",
   CLAIM_UNKNOWN_OUTCOME: "unknown-outcome",

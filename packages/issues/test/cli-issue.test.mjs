@@ -609,6 +609,11 @@ test("verifySubjectKind refuses a pull-request number and costs nothing when off
     /is a pull request, not an issue/u,
   );
   assert.equal(refused.document.error.details.subjectKind, "pullRequest");
+  assert.equal(refused.document.error.details.number, 872);
+  // A policy refusal, not a race: `CLAIM_NOT_EXPIRED` made the document say
+  // `recoverable: true` for a number no retry can turn into an issue.
+  assert.equal(refused.document.error.claimCode, "CLAIM_SUBJECT_KIND");
+  assert.equal(refused.document.error.recoverable, false);
   assert.deepEqual(reads, [872]);
   assert.equal(
     on.server.calls.commit.length,
@@ -656,6 +661,8 @@ test("verifySubjectKind covers every command that acquires, and only the issue p
     refusedTakeover.document.error.details.subjectKind,
     "pullRequest",
   );
+  assert.equal(refusedTakeover.document.error.claimCode, "CLAIM_SUBJECT_KIND");
+  assert.equal(refusedTakeover.document.error.recoverable, false);
   assert.deepEqual(reads, [872]);
   assert.equal(takeover.server.calls.commit.length, 0);
 
@@ -676,6 +683,8 @@ test("verifySubjectKind covers every command that acquires, and only the issue p
   assert.equal(refusedFamily.exitCode, 10);
   assert.equal(refusedFamily.document.status, "not-eligible");
   assert.equal(refusedFamily.document.error.details.number, 4400);
+  assert.equal(refusedFamily.document.error.claimCode, "CLAIM_SUBJECT_KIND");
+  assert.equal(refusedFamily.document.error.recoverable, false);
   // Claim order, which is ascending, and the family stops at the first
   // member the check refuses.
   assert.deepEqual(reads, [ISSUE, 4400]);
@@ -881,6 +890,12 @@ test("a --dry-run plan refuses the pull-request number its run refuses", async (
     const plan = planned.document ?? planned.stderrDocuments[0];
     assert.equal(plan.status, "not-eligible");
     assert.equal(plan.error.details.number, 872);
+    assert.equal(
+      plan.error.claimCode,
+      "CLAIM_SUBJECT_KIND",
+      `${label}: the plan predicts the refusal the run raises`,
+    );
+    assert.equal(plan.error.recoverable, false);
     assert.deepEqual(reads, [872], `${label}: the plan makes the same read`);
     assert.equal(
       context.server.calls.commit.length,
@@ -897,6 +912,7 @@ test("a --dry-run plan refuses the pull-request number its run refuses", async (
     );
     const document = run.document ?? run.stderrDocuments[0];
     assert.equal(document.status, plan.status);
+    assert.equal(document.error.claimCode, plan.error.claimCode);
     assert.equal(context.server.calls.commit.length, 0);
   }
 

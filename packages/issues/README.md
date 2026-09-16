@@ -315,9 +315,11 @@ and no kind — nothing in the claim layer can tell the difference.
 Two things surface it. `claims list` reports a `pullRequest` boolean per issue
 entry, after the fact. And `claims.verifySubjectKind: true` refuses it before
 the first write: `claim`, `takeover` and `family claim` read the issue and exit
-10 `not-eligible` when the number is really a pull request. The read is part of
-each command's own input checks, so it happens under `--dry-run` too and a plan
-never calls a pull-request number claimable. A family reads its members in
+10 `not-eligible` when the number is really a pull request. The refusal carries
+`CLAIM_SUBJECT_KIND` and `recoverable: false`: exit 10 asks the caller to skip
+the item, and no retry turns a pull-request number into an issue. The read is
+part of each command's own input checks, so it happens under `--dry-run` too and
+a plan never calls a pull-request number claimable. A family reads its members in
 claim order and stops at the first refusal, so nothing is written at all. It is
 `false` by default because it costs a round trip on the hot path; an issue
 policy should set it to `true`.

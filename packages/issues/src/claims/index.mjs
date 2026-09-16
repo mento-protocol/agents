@@ -43,6 +43,7 @@ export {
   ClaimRefInvalidError,
   ClaimRenewRequiredError,
   ClaimStaleError,
+  ClaimSubjectKindError,
   ClaimSupersededError,
   ClaimUnknownOutcomeError,
   exitCodeForError,
