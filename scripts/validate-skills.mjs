@@ -1034,6 +1034,18 @@ function parseFrontmatter(lines, firstLineNumber) {
     const key = match[1];
     const rest = (match[2] ?? "").trim();
 
+    // YAML requires the keys of a mapping to be unique, so a frontmatter that
+    // sets the same key twice is not a document the spec allows: a strict
+    // loader refuses it, and a loader that reads it at all keeps only one of
+    // the two values, so the value this file spells is not the value the
+    // runtime gets. The line is reported here, once, and its value is then
+    // parsed like any other, so the lines it consumes are unchanged.
+    if (fields.has(key)) {
+      invalid.push(
+        `"${key}" is set more than once; a mapping key must be unique`,
+      );
+    }
+
     // A block scalar header may carry a trailing comment, as in
     // `description: >- # note`. The comment is removed before the header is
     // recognised, so such a line folds its indented body like any other block

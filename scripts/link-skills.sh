@@ -458,8 +458,10 @@ normalize_lexical() {
 # A segment that exists and is not a directory ends the path: a name below it
 # can never resolve, and a '..' after it must not pop through it. Popping would
 # answer with that file's parent directory, which is a directory the spelling
-# never names and the run would then write into. Such a path is refused, and
-# the caller stops the run.
+# never names and the run would then write into. Such a path is refused with a
+# return of 1 and nothing printed: the caller knows which path it asked about
+# and reports it. Printing here as well would put two diagnostics on one bad
+# path, and the session hook owes a session start one line.
 canonical_path() {
 	local p seg cur rest next phys had_noglob oldifs nondir
 	p=$1
@@ -496,7 +498,6 @@ canonical_path() {
 		# Past the last segment that exists: text alone from here on.
 		if [ -n "$rest" ]; then
 			if [ "$nondir" -eq 1 ]; then
-				err "not a directory: ${cur%/}$rest"
 				return 1
 			fi
 			if [ "$seg" = ".." ]; then
@@ -3071,14 +3072,19 @@ OPERAND_OPTIONS = ("-o", "-O", "--rcfile", "--init-file")
 # "--version" and "--help" print their text and exit. "-s" reads the commands
 # from standard input and leaves the script path as a positional parameter.
 # "-D", "--dump-strings" and "--dump-po-strings" print the translatable
-# strings of the script instead of running it. Any of them before the script
-# path means no hook ever runs and every session start prints something else,
-# so the entry names this script and does something else, which is the
-# malformed command the caller repairs.
+# strings of the script instead of running it. "-n" reads the script and
+# checks its syntax without executing it, and so does "-o noexec", which the
+# operand branch below catches. Any of them before the script path means no
+# hook ever runs and every session start prints something else, so the entry
+# names this script and does something else, which is the malformed command
+# the caller repairs. Bundled short options such as "-xn" stay unparsed on
+# purpose: the parser reads whole option words, and install-hooks never writes
+# bundled options.
 NEVER_RUN_OPTIONS = (
     "--version",
     "--help",
     "-s",
+    "-n",
     "-D",
     "--dump-strings",
     "--dump-po-strings",
@@ -3154,10 +3160,12 @@ def parse_command(value):
         #   NEVER_RUN_OPTIONS   the shell prints something and exits, or reads
         #                       its commands from standard input, and the
         #                       script is never run at all.
-        #   OPERAND_OPTIONS     only when the operand is this script path.
-        #                       Otherwise the option and its operand are
-        #                       skipped together and the script is read after
-        #                       them.
+        #   OPERAND_OPTIONS     only when the operand is this script path, or
+        #                       when the option is "-o" and its operand is
+        #                       "noexec", which reads the script without
+        #                       running it. Otherwise the option and its
+        #                       operand are skipped together and the script is
+        #                       read after them.
         #
         # Every other option, "-x" among them, is skipped alone and the script
         # is read after it.
@@ -3184,6 +3192,12 @@ def parse_command(value):
                     never_runs = True
                     break
                 index += 1
+                # "-o noexec" is the long spelling of "-n": the script is read
+                # and checked, never run. The index is left on the script so
+                # the malformed path below names this entry.
+                if option == "-o" and operand == "noexec":
+                    never_runs = True
+                    break
     if index >= len(parts):
         return None
     token = parts[index].strip(QUOTES)
@@ -3821,7 +3835,7 @@ remove_stamp_dir() {
 # ------------------------------------------------------------------ main ----
 
 main() {
-	local cmd arg rc
+	local cmd arg rc spelled
 	cmd=""
 	while [ $# -gt 0 ]; do
 		arg=$1
@@ -3922,8 +3936,11 @@ main() {
 	case "$(normalize_lexical "$SOURCES_FILE")" in
 	"" | "/") die "the sources file must not be / or empty" ;;
 	esac
-	if ! SOURCES_FILE=$(canonical_path "$SOURCES_FILE"); then
-		die "the sources file path cannot be resolved"
+	# canonical_path prints nothing, and a failed assignment would leave the
+	# spelling behind empty, so the path is held here for the refusal to name.
+	spelled=$SOURCES_FILE
+	if ! SOURCES_FILE=$(canonical_path "$spelled"); then
+		die "the sources file path $spelled runs through a name that is not a directory"
 	fi
 	case "$SOURCES_FILE" in
 	"" | "/") die "the sources file must not be / or empty" ;;
@@ -3944,8 +3961,9 @@ main() {
 	case "$(normalize_lexical "$ASSEMBLY_DIR")" in
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
 	esac
-	if ! ASSEMBLY_DIR=$(canonical_path "$ASSEMBLY_DIR"); then
-		die "the assembly directory path cannot be resolved"
+	spelled=$ASSEMBLY_DIR
+	if ! ASSEMBLY_DIR=$(canonical_path "$spelled"); then
+		die "the assembly directory path $spelled runs through a name that is not a directory"
 	fi
 	case "$ASSEMBLY_DIR" in
 	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;

@@ -999,6 +999,35 @@ hook_reports_unusable_manifest() {
 	assert_file_has "$CASE_DIR/elsewhere" "mine" "the symlink target is untouched"
 }
 
+# A stored hook command can name a sources file whose path runs through a
+# regular file. canonical_path prints nothing of its own, so a session start
+# gets the one line the hook owes it, and that line names the path the command
+# stored. Hook mode reports a refused configuration through the same notice and
+# exits 0, which is what a session start needs from a path this script cannot
+# use.
+hook_refuses_bad_sources_path_once() {
+	local sources lines
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	printf 'file content\n' >"$CASE_DIR/regular"
+	sources="$CASE_DIR/regular/list"
+
+	ls_run --sources "$sources" hook
+	assert_rc 0 "hook with a sources path through a regular file"
+	assert_out_has \
+		"the sources file path $sources runs through a name that is not a directory" \
+		"the refusal names the path"
+	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
+	if [ "$lines" != "1" ]; then
+		fail "expected one notice line, got $lines: $LS_OUT"
+	fi
+	assert_file_has "$CASE_DIR/regular" "file content" \
+		"the file in the way is untouched"
+	assert_absent "$CASE_DIR/regular/list" "no sources file was created"
+	assert_absent "$HOME/.agents/skills" "the assembly was never touched"
+}
+
 # A candidate the assembly does not hold is drift. The hook names it and
 # leaves the fix to the 'link' run it points at.
 hook_notifies_drift() {
@@ -2925,7 +2954,9 @@ regular_file_at_lock_path_refused() {
 }
 
 # A path segment that exists and is not a directory ends the path. A '..' after
-# it must not pop through it into a directory the spelling never names.
+# it must not pop through it into a directory the spelling never names. The
+# refusal is the caller's alone and names the path it was given, because
+# canonical_path reports nothing of its own.
 parent_traversal_through_file_refused() {
 	mkskill "$CASE_DIR/one" alpha
 	write_sources
@@ -2935,19 +2966,25 @@ parent_traversal_through_file_refused() {
 
 	ls_run --assembly "$CASE_DIR/parent/file/.." link
 	assert_rc 2 "--assembly through a file"
-	assert_out_has "not a directory" "refusal message"
+	assert_out_has \
+		"the assembly directory path $CASE_DIR/parent/file/.. runs through a name that is not a directory" \
+		"refusal message"
 	assert_absent "$CASE_DIR/parent/alpha" "no link in the popped directory"
 	assert_absent "$CASE_DIR/parent/.skill-links" "no manifest in the popped directory"
 	assert_file_has "$CASE_DIR/parent/file" "file content" "the file is untouched"
 
 	ls_run --assembly "$CASE_DIR/parent/file/below" link
 	assert_rc 2 "--assembly below a file"
-	assert_out_has "not a directory" "refusal message"
+	assert_out_has \
+		"the assembly directory path $CASE_DIR/parent/file/below runs through a name that is not a directory" \
+		"refusal message"
 	assert_absent "$CASE_DIR/parent/file/below" "nothing was created below the file"
 
 	ls_run --sources "$CASE_DIR/parent/file/../sources" link
 	assert_rc 2 "--sources through a file"
-	assert_out_has "not a directory" "refusal message"
+	assert_out_has \
+		"the sources file path $CASE_DIR/parent/file/../sources runs through a name that is not a directory" \
+		"refusal message"
 	assert_absent "$CASE_DIR/parent/sources" "no sources file in the popped directory"
 
 	assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
@@ -5810,12 +5847,13 @@ install_hooks_replaces_operand_option_command() {
 
 # Some shell options leave the shell with no script to run. "--version" and
 # "--help" print their text and exit, "-s" reads the commands from standard
-# input and leaves the script path as a positional parameter, and "-D",
+# input and leaves the script path as a positional parameter, "-D",
 # "--dump-strings" and "--dump-po-strings" print the translatable strings of
-# the script instead of running it. An entry with one of them before the
-# script names this script and never runs the hook, so it is the malformed
-# command install-hooks replaces. An ordinary option that takes no operand
-# still leaves a hook run and counts as installed.
+# the script instead of running it, and "-n", spelled "-o noexec" as well,
+# reads the script and checks its syntax without executing it. An entry with
+# one of them before the script names this script and never runs the hook, so
+# it is the malformed command install-hooks replaces. An ordinary option that
+# takes no operand still leaves a hook run and counts as installed.
 install_hooks_replaces_terminal_option_command() {
 	local file opt n
 	if ! have_python3; then
@@ -5828,10 +5866,16 @@ install_hooks_replaces_terminal_option_command() {
 	mkdir -p "$HOME/.claude"
 	file="$HOME/.claude/settings.json"
 
-	for opt in --version --help -s -D --dump-strings --dump-po-strings; do
+	for opt in --version --help -s -n -D --dump-strings --dump-po-strings; do
 		check_malformed_hook_command "$file" "bash $opt $LS hook" \
 			"the shell option $opt leaving no script to run"
 	done
+
+	# The same option written the long way. "-o" takes its own operand, so
+	# this one comes through the operand branch of the parser, and the script
+	# after it is still only read, never run.
+	check_malformed_hook_command "$file" "bash -o noexec $LS hook" \
+		"the shell option -o noexec leaving no script to run"
 
 	rm -f "$file" "$file".bak-*
 	write_installed_hook_settings "$file" "bash --norc $LS hook"
@@ -8439,6 +8483,81 @@ validator_accepts_hash_inside_quoted_flow_member() {
 	esac
 }
 
+# YAML requires the keys of a mapping to be unique. That is the spec's rule for
+# a mapping node, not one loader's habit: PyYAML reads such a document without
+# complaint and keeps the last value, and a strict loader refuses it. Either
+# way the value the file spells is not the value the runtime gets, so the
+# validator reports the repeat instead of measuring whichever value won.
+validator_rejects_duplicate_top_level_key() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# Two "description" lines: the second silently replaced the first and the
+	# validator measured only it.
+	mkdir -p "$CASE_DIR/dup-description/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: first description\n'
+		printf 'description: second description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/dup-description/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/dup-description" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "two description lines must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: "description" is set more than once; a mapping key must be unique') ;;
+	*) fail "the failure must name the repeated description key: $out" ;;
+	esac
+
+	# An optional key is a mapping key like any other.
+	mkdir -p "$CASE_DIR/dup-metadata/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: one\n'
+		printf 'metadata: two\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/dup-metadata/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/dup-metadata" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "two metadata lines must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: "metadata" is set more than once; a mapping key must be unique') ;;
+	*) fail "the failure must name the repeated metadata key: $out" ;;
+	esac
+
+	# The body is not the mapping, so the same word after the closing "---" is
+	# text and the frontmatter holds one description.
+	mkdir -p "$CASE_DIR/dup-body-only/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'description: this line is prose.\n'
+	} >"$CASE_DIR/dup-body-only/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/dup-body-only" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a key repeated in the body must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output for the repeat in the body: $out" ;;
+	esac
+}
+
 # A control character makes the document unreadable for every YAML loader, so
 # the frontmatter reaches no runtime. Measuring a description that holds one
 # reports a length nothing ever sees.
@@ -9086,7 +9205,9 @@ dangling_symlink_component_refused() {
 
 	ls_run --assembly "$CASE_DIR/parent/dangling/.." link
 	assert_rc 2 "--assembly through a dangling symlink"
-	assert_out_has "cannot be resolved" "refusal message"
+	assert_out_has \
+		"the assembly directory path $CASE_DIR/parent/dangling/.. runs through a name that is not a directory" \
+		"refusal message"
 	assert_absent "$CASE_DIR/parent/alpha" "no link beside the dangling symlink"
 	assert_absent "$CASE_DIR/parent/.skill-links" "no manifest beside the dangling symlink"
 	assert_absent "$CASE_DIR/parent/gone" "the missing target is not created"
@@ -9820,6 +9941,7 @@ main() {
 	run_case hook_pull_advice_uses_refspec_for_dash_branch
 	run_case hook_finds_master_default_without_origin_head
 	run_case hook_reports_unusable_manifest
+	run_case hook_refuses_bad_sources_path_once
 	run_case hook_notifies_drift
 	run_case hook_notifies_collision
 	run_case hook_notifies_stale_link
@@ -9969,6 +10091,7 @@ main() {
 	run_case validator_rejects_orphan_indented_line
 	run_case validator_accepts_top_level_comment_before_value
 	run_case validator_accepts_hash_inside_quoted_flow_member
+	run_case validator_rejects_duplicate_top_level_key
 	run_case validator_rejects_control_character
 	run_case validator_rejects_invalid_utf8
 	run_case validator_rejects_raw_nel

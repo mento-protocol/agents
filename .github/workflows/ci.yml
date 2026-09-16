@@ -44,7 +44,8 @@ jobs:
   skills:
     name: Validate and test skills (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # The harness runs twice on macOS, once per bash, at about five minutes each.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
