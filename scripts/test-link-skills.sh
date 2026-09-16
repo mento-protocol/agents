@@ -3738,6 +3738,8 @@ manifest_write_failure_keeps_old_manifest() {
 	# The run is one transaction: a link no manifest records is a link no later
 	# run could prune, so beta goes away again while alpha stays.
 	assert_out_has "link(s) this run created were removed" "the rollback is reported"
+	assert_out_has "linked 0, unchanged 1, pruned 0" \
+		"the summary counts no link, since none survived the rollback"
 	assert_absent "$HOME/.agents/skills/beta" "the link this run created is rolled back"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link recorded before this run survives"
 }
@@ -5505,6 +5507,8 @@ manifest_write_failure_restores_repointed_link() {
 	assert_rc 1 "link with an unwritable temporary file"
 	assert_out_has "could not write the manifest" "the failure is reported"
 	assert_out_has "were restored to their previous target" "the restore is reported"
+	assert_out_has "linked 0, unchanged 0, pruned 0" \
+		"the summary counts no change, since none survived the rollback"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the repointed link carries its old target again"
 	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"
 }
@@ -5545,6 +5549,8 @@ manifest_write_failure_restores_pruned_links() {
 	assert_rc 1 "link with an unwritable temporary file"
 	assert_out_has "could not write the manifest" "the failure is reported"
 	assert_out_has "were created again at their recorded target" "the restore is reported"
+	assert_out_has "linked 0, unchanged 1, pruned 0" \
+		"the summary counts no prune, since none survived the rollback"
 	assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/two/beta" "the pruned link points at its old target again"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link this run left alone survives"
 	assert_same_bytes "$HOME/.agents/skills/.skill-links" "$before" "the old manifest survives"

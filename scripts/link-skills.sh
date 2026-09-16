@@ -2122,6 +2122,12 @@ run_link() {
 		restore_repointed_links
 		restore_pruned_links
 		rollback_new_links
+		# The assembly is back to what the manifest describes, so nothing
+		# this run linked, relinked or pruned survived; the summary must not
+		# count changes that were undone. A restore that failed reported the
+		# link it left behind in its own words.
+		LINKED=0
+		PRUNED=0
 		return 1
 	fi
 	ensure_runtime_links
