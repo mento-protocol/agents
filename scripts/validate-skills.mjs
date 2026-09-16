@@ -162,15 +162,17 @@ const COMPLEX_VALUE_RE = /^:(?:[ \t]|$)/;
 
 /**
  * A reserved indicator at the head of a plain scalar: "-", "?" or ":" that a
- * space, a tab or the end of the value follows, and ",", "@", "`", "%", "]"
- * or "}" anywhere at the head. YAML reads the first three as a sequence entry,
- * a complex key and a mapping value, and refuses the other six outright, so
- * none of these is the text it looks like: "]" and "}" close a flow collection
- * that never opened. Followed by another character the first three are
- * ordinary text, as in "-foo" or "?x", and a closing bracket inside the value,
- * as in "a]b", is text as well.
+ * space, a tab or the end of the value follows, and ",", "@", "`", "%", "]",
+ * "}", "&" or "*" anywhere at the head. YAML reads the first three as a
+ * sequence entry, a complex key and a mapping value, and refuses the next four
+ * outright, so none of these is the text it looks like: "]" and "}" close a
+ * flow collection that never opened. "&" opens an anchor and "*" an alias, and
+ * a loader hands the runtime the anchored or aliased node, never the text.
+ * Followed by another character the first three are ordinary text, as in
+ * "-foo" or "?x", and an indicator inside the value, as in "a]b" or "a&b", is
+ * text as well.
  */
-const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%\]}])/;
+const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%\]}&*])/;
 
 /**
  * Raw unquoted values that YAML reads as something other than a string: the
@@ -178,6 +180,13 @@ const RESERVED_LEADING_RE = /^(?:[-?:](?:[ \t]|$)|[,@`%\]}])/;
  * is any of these reaches a runtime as null or as a list, not as text.
  */
 const NON_STRING_VALUES = new Set(["[]", "{}", "null", "~", "Null", "NULL"]);
+
+/**
+ * The frontmatter keys whose value must be a plain string. Each carries its
+ * own message for a value YAML reads as another type, so the line check leaves
+ * such a value to that message instead of also refusing the line.
+ */
+const STRING_FIELDS = new Set(["name", "description"]);
 
 /**
  * Unquoted scalars that YAML resolves to a type other than string. A runtime
@@ -804,12 +813,21 @@ function flowCollectionEnd(text, start) {
 }
 
 /**
+ * What may follow the delimiter that closes a flow collection on its line:
+ * spaces, tabs, and a comment. Anything else is text after the collection,
+ * which no loader reads: PyYAML refuses "[a] garbage" while parsing the block
+ * mapping the line sits in.
+ */
+const AFTER_FLOW_COLLECTION_RE = /^[ \t]*(?:#.*)?$/;
+
+/**
  * True when every flow collection the text opens is closed in it by its own
- * delimiter and holds the entries a collection holds. Quoted sections are
- * skipped, so a bracket between quotes is text. An unquoted value that opens
- * "[" or "{" and never closes it, or closes it with the other delimiter as in
- * "[Read}", is not the scalar it looks like: real YAML reads on into the next
- * lines and fails somewhere else.
+ * delimiter, holds the entries a collection holds, and carries nothing but a
+ * comment after its closing delimiter. Quoted sections are skipped, so a
+ * bracket between quotes is text. An unquoted value that opens "[" or "{" and
+ * never closes it, or closes it with the other delimiter as in "[Read}", is
+ * not the scalar it looks like: real YAML reads on into the next lines and
+ * fails somewhere else.
  */
 function flowCollectionCloses(text) {
   const openers = [];
@@ -843,7 +861,11 @@ function flowCollectionCloses(text) {
   // The delimiters match, so the entries between them decide: a collection
   // that closes can still be one no loader reads.
   if (text[0] !== "[" && text[0] !== "{") return true;
-  return flowCollectionEnd(text, 0) !== -1;
+  const end = flowCollectionEnd(text, 0);
+  if (end === -1) return false;
+  // The collection closes, so what follows it decides: a flow collection ends
+  // the value, and only a comment may follow it.
+  return AFTER_FLOW_COLLECTION_RE.test(text.slice(end + 1));
 }
 
 /**
@@ -1091,10 +1113,17 @@ function parseFrontmatter(lines, firstLineNumber) {
       // value that still starts with "|" or ">" is a malformed header such as
       // "|0". No plain scalar may start with an indicator character either.
       invalid.push(lineNumber);
-    } else if (!collection && RESERVED_LEADING_RE.test(plain.value)) {
+    } else if (
+      !collection &&
+      RESERVED_LEADING_RE.test(plain.value) &&
+      !(STRING_FIELDS.has(key) && isNonStringScalar(plain.value))
+    ) {
       // "- ", "? " and ": " open a sequence entry, a complex key and a mapping
-      // value here, and ",", "@", "`" and "%" are reserved, so YAML refuses
-      // the line instead of reading it as the text it looks like.
+      // value here, ",", "@", "`" and "%" are reserved, and "&" and "*" open
+      // an anchor and an alias, so YAML refuses the line or reads it as
+      // something other than the text it looks like. The two string fields
+      // report an anchor or an alias as the non-string it is, with the field's
+      // own message, so the line is not refused twice.
       invalid.push(lineNumber);
     } else if (!collection && !flow && MAPPING_INDICATOR_RE.test(plain.value)) {
       // YAML reads ": " and a trailing ":" as a mapping indicator, so this
@@ -1190,7 +1219,22 @@ function validateSkill(name) {
     }
   }
 
-  const raw = readFileSync(skillMdPath, "utf8");
+  // Reading the file as "utf8" replaces every invalid byte with U+FFFD, so a
+  // broken file reads as text and passes every check below on characters it
+  // does not hold. A strict decoder throws on the first invalid byte instead.
+  // "ignoreBOM" keeps a leading U+FEFF in the text, which is what
+  // readFileSync(path, "utf8") and Python's open(encoding="utf-8") both do; a
+  // decoder that strips it would find frontmatter that no loader can see.
+  const bytes = readFileSync(skillMdPath);
+  let raw;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch {
+    problems.push(`skills/${name}: SKILL.md is not valid UTF-8`);
+    return;
+  }
   const lines = raw.split("\n");
 
   // The split leaves an empty last element for a file that ends with a

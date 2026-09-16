@@ -686,16 +686,17 @@ sources_path_usable() {
 }
 
 # True when a path names one of the paths this script keeps for its own
-# bookkeeping inside the assembly: the manifest, the lock directory, the stamp
-# directory or anything below it, and any entry in the assembly root whose
-# name starts with '.skill-links'. The comparison is textual, so the caller
-# decides which spelling of the sources path to hand in.
+# bookkeeping inside the assembly: the manifest, the lock directory or the
+# stamp directory, anything below either of them, and any entry in the
+# assembly root whose name starts with '.skill-links'. The comparison is
+# textual, so the caller decides which spelling of the sources path to hand
+# in.
 control_path_matches() {
 	local p base dir
 	p=$1
 	case "$p" in
 	"$MANIFEST" | "$LOCK_DIR" | "$STAMP_DIR") return 0 ;;
-	"$STAMP_DIR"/*) return 0 ;;
+	"$STAMP_DIR"/* | "$LOCK_DIR"/*) return 0 ;;
 	esac
 	dir=$(dirname "$p")
 	if [ "$dir" != "$ASSEMBLY_DIR" ]; then
@@ -1481,8 +1482,14 @@ lock_path_usable() {
 # differs between the two, so the text is squeezed to single spaces and
 # trimmed: what matters is that the two readings of one process match, and
 # that the line holds no tab and no newline of its own.
+#
+# The field is a formatted date, so its text follows the time zone and the
+# locale of the run that reads it. Two runs under different TZ values would
+# then disagree about one live process, and the second would clear a lock its
+# owner still holds. 'ps' is given TZ=UTC and LC_ALL=C for that one command,
+# so every run reads the same text for the same process.
 proc_start_time() {
-	ps -o lstart= -p "$1" 2>/dev/null |
+	TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null |
 		tr -s '[:space:]' ' ' |
 		sed -e 's/^ //' -e 's/ $//'
 }

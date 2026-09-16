@@ -1338,6 +1338,26 @@ sources_path_inside_assembly_refused() {
 	assert_link "$assembly/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
+# The lock directory holds the pid file of whichever run writes the assembly.
+# A sources path below it would have a first run bootstrap its sources file
+# inside its own lock directory and then wait on itself.
+sources_under_lock_dir_refused() {
+	local assembly
+	assembly="$HOME/.agents/skills"
+
+	ls_run --sources "$assembly/.skill-links.lock/pid" link
+	assert_rc 2 "--sources inside the lock directory"
+	assert_out_has "must not be an assembly control file" "refusal message"
+	assert_absent "$assembly/.skill-links.lock" "no lock directory was created"
+	assert_absent "$assembly" "nothing was created at all"
+
+	# The same path given to a command that only reads the sources file.
+	ls_run --sources "$assembly/.skill-links.lock/pid" check
+	assert_rc 2 "check with the same sources path"
+	assert_out_has "must not be an assembly control file" "check names the refusal"
+	assert_absent "$assembly" "check created nothing"
+}
+
 # A final symlink component is left as it is spelled, so an alias to the
 # manifest passed every textual control-path test while naming the manifest
 # itself: the run then read the manifest's own records as missing sources and
@@ -2537,6 +2557,49 @@ aged_lock_with_live_owner_is_kept() {
 	assert_rc 0 "link once the owner is gone"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 	assert_absent "$lock" "the lock is gone"
+}
+
+# The start time in a pid file is a formatted date. A run that read it in its
+# own time zone would disagree with the run that wrote it and clear a lock its
+# owner still holds. The reading is taken under a fixed zone and locale, so a
+# record written in one zone is still read as live in another.
+lock_owner_survives_timezone_change() {
+	local lock start other
+	if ! ps_reports_start_time; then
+		printf '    (skipped: ps does not report process start times here)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+
+	# The record a run under UTC writes for a live owner. The harness itself
+	# is that owner: it runs for the whole case.
+	start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null |
+		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
+	other=$(TZ=America/New_York LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null |
+		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
+	if [ -z "$start" ] || [ "$start" = "$other" ]; then
+		printf '    (skipped: ps start times do not follow TZ here)\n'
+		return
+	fi
+	mkdir "$lock"
+	printf '%s\t%s\n' "$$" "$start" >"$lock/pid"
+
+	# The same two lines as ls_run, with the zone of the run changed. The
+	# assignment stays with the command it prefixes.
+	LS_OUT=$(TZ=America/New_York "$BASH_BIN" "$LS" link 2>&1)
+	LS_RC=$?
+	assert_rc 1 "link from another time zone over a live owner's lock"
+	assert_out_has "holds the lock" "lock message"
+	assert_exists "$lock/pid" "the live owner keeps its lock"
+	assert_file_has "$lock/pid" "$start" "the recorded start time is intact"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+	rm -f "$lock/pid"
+	rmdir "$lock"
 }
 
 # The pid file is created before its line is written, so a run that starts
@@ -4274,6 +4337,62 @@ validator_rejects_malformed_anchor() {
 	esac
 }
 
+# An anchor and an alias are refused as non-strings on "name" and
+# "description", but an optional key never reaches that check, so the line
+# itself has to refuse them. PyYAML refuses both fixtures below while scanning
+# the anchor and the alias, and reads "a&b" as the three characters it spells.
+validator_rejects_anchor_on_optional_key() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	n=0
+	for form in '& foo' '*'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/anchor-optional-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'metadata: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/anchor-optional-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/anchor-optional-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			fail "optional value '$form' must fail: $out"
+			continue
+		fi
+		case "$out" in
+		'skills/noted: frontmatter line 4 is not valid YAML') ;;
+		*) fail "optional value '$form' must be reported by its line: $out" ;;
+		esac
+	done
+
+	# An ampersand inside the value is ordinary text.
+	mkdir -p "$CASE_DIR/anchor-optional-text/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: a&b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/anchor-optional-text/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/anchor-optional-text" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "an ampersand inside the value must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A flow collection closes with its own delimiter. Counting brackets instead
 # takes "[Read}" and "{key]" for closed collections, while PyYAML refuses both.
 # Nesting still has to pass, and an opener that never closes still fails.
@@ -4386,6 +4505,63 @@ validator_rejects_malformed_flow_collection() {
 			printf 'Body.\n'
 		} >"$CASE_DIR/flow-entry-good-$n/skills/noted/SKILL.md"
 		out=$(node "$VALIDATOR" "$CASE_DIR/flow-entry-good-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "flow collection '$form' must validate: $out"
+			continue
+		fi
+		case "$out" in
+		"validated 1 skills") ;;
+		*) fail "unexpected validator output for '$form': $out" ;;
+		esac
+	done
+}
+
+# A flow collection ends the value it opens. Checking only that it closes
+# takes "[a] garbage" for a list, while PyYAML refuses that line while parsing
+# the block mapping around it. A comment after the closing delimiter is the one
+# thing that may follow it.
+validator_rejects_text_after_flow_collection() {
+	local out rc form n
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# On the string fields a flow collection is refused as a non-string before
+	# its delimiters are read, so the fixtures sit under an optional key.
+	mkdir -p "$CASE_DIR/flow-trailing-bad/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: [a] garbage\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-trailing-bad/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-trailing-bad" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "text after a flow collection must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter line 4 is not valid YAML') ;;
+	*) fail "text after a flow collection must be reported by its line: $out" ;;
+	esac
+
+	n=0
+	for form in '[a] # note' '[a]'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-trailing-good-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'metadata: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-trailing-good-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-trailing-good-$n" 2>&1)
 		rc=$?
 		if [ "$rc" -ne 0 ]; then
 			fail "flow collection '$form' must validate: $out"
@@ -7692,6 +7868,77 @@ validator_rejects_control_character() {
 	esac
 }
 
+# An invalid byte is not text. Reading the file leniently replaces it with
+# U+FFFD, so the frontmatter passes on characters the file does not hold, while
+# every YAML loader refuses the bytes themselves. A valid multibyte character
+# still reads as the one character it spells.
+validator_rejects_invalid_utf8() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	mkdir -p "$CASE_DIR/utf8-bad/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a\377b description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/utf8-bad/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/utf8-bad" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an invalid UTF-8 byte must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: SKILL.md is not valid UTF-8') ;;
+	*) fail "the invalid byte must be reported as such: $out" ;;
+	esac
+
+	# U+00E9, spelled by the two bytes 0xC3 0xA9, is valid UTF-8.
+	mkdir -p "$CASE_DIR/utf8-good/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a\303\251b description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/utf8-good/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/utf8-good" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a valid multibyte character must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	# A leading U+FEFF, the three bytes 0xEF 0xBB 0xBF, is valid UTF-8 but it is
+	# not a delimiter. Node and PyYAML both keep it in the text, so the loader
+	# never finds the frontmatter; the strict decoder must keep it too instead of
+	# stripping it and reporting the file clean.
+	mkdir -p "$CASE_DIR/utf8-bom/skills/noted"
+	{
+		printf -- '\357\273\277---\n'
+		printf 'name: noted\n'
+		printf 'description: a plain description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/utf8-bom/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/utf8-bom" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a byte order mark before the frontmatter must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter must start with "---" on the first line') ;;
+	*) fail "the byte order mark must hide the frontmatter: $out" ;;
+	esac
+}
+
 # A raw U+0085 is a line break to a YAML 1.1 loader, which then refuses the
 # unindented rest, and text to a YAML 1.2 loader. PyYAML refuses the plain
 # fixture below and reads the quoted one as "a b", so the runtimes disagree on
@@ -8112,7 +8359,9 @@ stale_lock_with_reused_pid_is_cleared() {
 	mkdir "$lock"
 	sleep 60 &
 	pid=$!
-	start=$(ps -o lstart= -p "$pid" 2>/dev/null |
+	# The same fixed zone and locale the script reads under, so the record
+	# here is the text a run of the script would write.
+	start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null |
 		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
 	printf '%s\t%s\n' "$pid" "$start" >"$lock/pid"
 	ls_run link
@@ -8821,6 +9070,7 @@ main() {
 	run_case install_hooks_idempotent
 	run_case install_hooks_embeds_custom_paths
 	run_case sources_path_inside_assembly_refused
+	run_case sources_under_lock_dir_refused
 	run_case sources_symlink_to_manifest_refused
 	run_case install_hooks_replaces_other_installation
 	run_case install_hooks_replaces_malformed_option_command
@@ -8880,6 +9130,7 @@ main() {
 	run_case unreadable_name_not_repointed
 	run_case stale_lock_is_removed
 	run_case aged_lock_with_live_owner_is_kept
+	run_case lock_owner_survives_timezone_change
 	run_case lock_with_empty_pid_record_is_kept
 	run_case symlinked_lock_refused
 	run_case regular_file_at_lock_path_refused
@@ -8945,6 +9196,7 @@ main() {
 	run_case validator_rejects_missing_separation_after_colon
 	run_case validator_rejects_orphan_indented_line
 	run_case validator_rejects_control_character
+	run_case validator_rejects_invalid_utf8
 	run_case validator_rejects_raw_nel
 	run_case validator_rejects_nested_references_dir
 	run_case validator_folded_block_leading_blank
@@ -8956,8 +9208,10 @@ main() {
 	run_case validator_rejects_continuation_after_comment
 	run_case validator_rejects_nested_collection_value
 	run_case validator_rejects_malformed_anchor
+	run_case validator_rejects_anchor_on_optional_key
 	run_case validator_rejects_mismatched_flow_close
 	run_case validator_rejects_malformed_flow_collection
+	run_case validator_rejects_text_after_flow_collection
 	run_case validator_rejects_escape_inside_flow_collection
 	run_case validator_rejects_malformed_nested_collection
 	run_case validator_decodes_quoted_continuation_value
