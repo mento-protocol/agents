@@ -87,11 +87,13 @@ pull request.
 Limits:
 
 - A `.sh` file holds at most 500 lines.
-- A function holds at most 60 lines. A long here document or JSON snippet
-  belongs in `assets/` or a separate file, not inside a function.
-- A test file covers one topic of one subject. A subject written in
-  JavaScript is tested from JavaScript with `node:test`, never from a bash
-  harness.
+- A function holds at most 50 lines, the ESLint default for JavaScript. A
+  long here document or JSON snippet belongs in `assets/` or a separate
+  file, not inside a function.
+- A test file covers one topic of one subject. A bash harness may drive a
+  program written in another language as a black box, through its command
+  line. Tests of that program's internals, such as how a JavaScript module
+  parses one YAML construct, belong next to the module in `node:test`.
 
 Layout for a script that outgrows one file:
 
@@ -107,9 +109,12 @@ Rules for a module file:
 
 - It is sourced, never executed: no shebang, no `set -e`, no code outside
   function bodies except constants.
-- The entry point resolves its own directory with `pwd -P` and sources every
-  module by absolute path, so the installed hook and a symlinked clone both
-  work.
+- The entry point resolves its own directory with `pwd -P` and sources each
+  module by absolute path from an explicit list in a fixed order, the way
+  Kubernetes `hack/lib/init.sh` and `sdkman-init.sh` do. Do not source by
+  glob: glob order depends on the locale and hides which module needs which.
+- A module's public functions carry the module name as a prefix, for
+  example `lock_take`; helpers private to the module start with `_`.
 - Each module names, in a comment at the top, the globals it reads and
   writes. A module that needs a variable another module owns takes it as a
   function argument instead where that is practical.

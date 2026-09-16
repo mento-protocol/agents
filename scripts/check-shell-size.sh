@@ -15,7 +15,7 @@
 set -euo pipefail
 
 MAX_FILE_LINES=${MAX_FILE_LINES:-500}
-MAX_FUNCTION_LINES=${MAX_FUNCTION_LINES:-60}
+MAX_FUNCTION_LINES=${MAX_FUNCTION_LINES:-50}
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=$(cd "$HERE/.." && pwd -P)
