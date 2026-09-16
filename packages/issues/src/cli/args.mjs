@@ -546,6 +546,14 @@ export function parseCommandLine(argv) {
  * `--token` instead, which sends an operator after the second missing flag
  * while the first one is still missing.
  *
+ * The missing-flag refusal keeps the `details.flag` key the generic
+ * `spec.required` loop wrote before this rule replaced it, carrying the
+ * pull-request spelling this command used to require (`"pr"`, `"prs"` — the
+ * bare name, as that loop wrote it). A consuming skill that reads
+ * `error.details.flag` read `undefined` the moment the key was renamed, and
+ * nothing in this feature needs that key gone. `details.flags` is the new
+ * key, listing both spellings with their dashes.
+ *
  * @param {string} key the resolved command.
  * @param {object} spec its spec.
  * @param {object} flags the parsed flags.
@@ -557,16 +565,20 @@ function assertOneNumberFlag(key, spec, flags) {
   if (mode === null) return;
   const supplied = mode.names.filter((name) => Object.hasOwn(flags, name));
   const rendered = mode.names.map((name) => `--${name}`).join(" or ");
+  const spelled = mode.names.map((name) => `--${name}`);
   if (supplied.length > 1) {
+    // No `flag` row here: this refusal is about the pair, and the line named
+    // both of them. The refusal below is the one that replaced a `required`
+    // row, so it is the one that owes the old key.
     throw usage(`${key} takes ${rendered}, not both`, {
       command: key,
-      flags: mode.names.map((name) => `--${name}`),
+      flags: spelled,
     });
   }
   if (supplied.length === 0 && mode.required) {
     throw usage(
       `${key} requires ${rendered} (the loaded config's profile decides which)`,
-      { command: key, flags: mode.names.map((name) => `--${name}`) },
+      { command: key, flag: mode.names[0], flags: spelled },
     );
   }
 }

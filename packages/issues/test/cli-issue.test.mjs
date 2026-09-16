@@ -336,8 +336,13 @@ test("every command that names an item refuses both flags and neither, before an
         refusal.error.message,
         `${key} requires ${pr} or ${issue} (the loaded config's profile decides which)`,
       );
+      // `flag` is the key the generic `required` loop wrote before this rule
+      // replaced it, and it still carries the bare pull-request spelling that
+      // loop wrote, so a skill reading `details.flag` keeps reading a name.
+      // `flags` is the new key beside it.
       assert.deepEqual(refusal.error.details, {
         command: key,
+        flag: pr.slice(2),
         flags: [pr, issue],
       });
       assert.equal(neither.server.calls.read.length, 0, `${key}: no ref read`);
