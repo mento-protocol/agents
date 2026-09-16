@@ -3029,6 +3029,19 @@ def parse_command(value):
             return None
         index = 1
         interpreter = interpreter_name(first)
+        # A shell takes its own options before the script, so "bash -x
+        # <script> hook" runs the same hook as "bash <script> hook". Those
+        # words are skipped to find the script, and a lone "--" ends them:
+        # the token after it is the script whatever it spells. Nothing left
+        # after them is a shell reading its input from somewhere else, which
+        # is not this entry.
+        while index < len(parts):
+            option = parts[index].strip(QUOTES)
+            if not option.startswith("-"):
+                break
+            index += 1
+            if option == "--":
+                break
     if index >= len(parts):
         return None
     token = parts[index].strip(QUOTES)

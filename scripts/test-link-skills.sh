@@ -4135,6 +4135,80 @@ validator_rejects_continuation_after_comment() {
 	esac
 }
 
+# A comment ends nothing inside a flow collection that has not closed yet: the
+# entries go on over the following lines and YAML reads every one of them, so
+# reporting the closing line refuses input the runtime reads. A collection
+# that never closes is still refused, and outside a flow collection a comment
+# still ends the value.
+validator_accepts_comment_inside_flow_collection() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/flow-comment/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: [a,\n'
+		printf ' # note\n'
+		printf ' b]\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-comment/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-comment" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment inside a flow collection must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/flow-comment-open/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: [a,\n'
+		printf ' # note\n'
+		printf ' b\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-comment-open/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-comment-open" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a flow collection that never closes must fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 4 is not valid YAML"*) ;;
+	*) fail "the unclosed collection must be named by line: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/flow-comment-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: foo\n'
+		printf ' # note\n'
+		printf ' bar\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-comment-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-comment-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a continuation under a comment must still fail: $out"
+	fi
+	case "$out" in
+	*"frontmatter line 5 is not valid YAML"*) ;;
+	*) fail "the continuation line must still be named: $out" ;;
+	esac
+}
+
 # Under "description:" a "foo: bar" line is a mapping and a "- item" line is a
 # list, so a runtime that reads either gets no text at all. Folding them into
 # a string hides that. Other keys may nest a collection, and a continuation
@@ -5392,6 +5466,59 @@ install_hooks_leaves_unrelated_command_alone() {
 		"the zsh entry is replaced"
 	assert_file_has "$file" "bash $LS hook" "the generated command is installed"
 	assert_file_lacks "$file" "\"zsh $LS hook\"" "the zsh command is gone"
+}
+
+# A shell takes its own options before the script, so "bash -x <script> hook"
+# and "bash -- <script> hook" run this hook like the plain spelling. Reading
+# the script at one fixed position would call both of them unrelated, and
+# install-hooks would add a second entry beside them: the hook would then run
+# twice at every session start.
+install_hooks_recognizes_shell_options_before_script() {
+	local file n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	write_installed_hook_settings "$file" "bash -x $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a -x entry"
+	assert_out_has "already runs the hook" "-x counts as installed"
+	assert_out_lacks "added the SessionStart hook" "no entry is added beside -x"
+	assert_file_has "$file" "bash -x $LS hook" "the -x entry stands as written"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command beside -x, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "the -x entry is untouched, so nothing is backed up, found $n"
+	fi
+
+	write_installed_hook_settings "$file" "bash -- $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a -- entry"
+	assert_out_has "already runs the hook" "-- counts as installed"
+	assert_out_lacks "added the SessionStart hook" "no entry is added beside --"
+	assert_file_has "$file" "bash -- $LS hook" "the -- entry stands as written"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command beside --, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "the -- entry is untouched, so nothing is backed up, found $n"
+	fi
+
+	# Finding the script past the shell options is not the end of the
+	# reading: the tail after the script still has to be a hook run.
+	check_malformed_hook_command "$file" "bash -x $LS --sources hook" \
+		"a shell option before a missing option operand"
 }
 
 # An explicit YAML tag names the type of a value, so the text after it is not
@@ -8095,6 +8222,55 @@ validator_rejects_nested_references_dir() {
 	esac
 }
 
+# A symlink is neither a directory nor a file to the Dirent test, so a link
+# named SKILL.md below the skill root passed the walk and the skill shipped a
+# second SKILL.md the runtimes read. A link that points at nothing is no file
+# of any name, so it is left alone.
+validator_rejects_symlinked_nested_skill_md() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/nested-link/skills/noted/assets"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/nested-link/skills/noted/SKILL.md"
+	ln -s ../SKILL.md "$CASE_DIR/nested-link/skills/noted/assets/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/nested-link" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a symlinked nested SKILL.md must fail: $out"
+	fi
+	case "$out" in
+	*"unexpected nested SKILL.md at assets/SKILL.md"*) ;;
+	*) fail "the symlinked nested SKILL.md must be named: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/dangling-link/skills/noted/assets"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/dangling-link/skills/noted/SKILL.md"
+	ln -s nowhere.md "$CASE_DIR/dangling-link/skills/noted/assets/other.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/dangling-link" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a dangling link under the skill must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
 # A blank line before the first content line of a folded block is content: the
 # value starts with one newline for each of them. Dropping those newlines
 # measures a value the runtime never sees. The description length cannot show
@@ -9159,6 +9335,7 @@ main() {
 	run_case install_hooks_rewrites_relative_script_path
 	run_case install_hooks_ignores_similar_named_script
 	run_case install_hooks_leaves_unrelated_command_alone
+	run_case install_hooks_recognizes_shell_options_before_script
 	run_case install_hooks_replaces_sh_invocation
 	run_case install_hooks_replaces_missing_interpreter
 	run_case install_hooks_replaces_non_executable_direct_script
@@ -9199,6 +9376,7 @@ main() {
 	run_case validator_rejects_invalid_utf8
 	run_case validator_rejects_raw_nel
 	run_case validator_rejects_nested_references_dir
+	run_case validator_rejects_symlinked_nested_skill_md
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
@@ -9206,6 +9384,7 @@ main() {
 	run_case validator_rejects_reserved_leading_indicator
 	run_case validator_rejects_closing_flow_indicator_start
 	run_case validator_rejects_continuation_after_comment
+	run_case validator_accepts_comment_inside_flow_collection
 	run_case validator_rejects_nested_collection_value
 	run_case validator_rejects_malformed_anchor
 	run_case validator_rejects_anchor_on_optional_key

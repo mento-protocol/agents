@@ -85,7 +85,7 @@
 // The optional argument names the directory that holds skills/. It defaults to
 // the repository this script lives in; the test harness passes a fixture.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -703,7 +703,10 @@ function readBlockScalar(header, lines, start) {
  * comment as the end of the value, so an indented line after it belongs to no
  * value and no loader reads the document. A header with an empty inline value
  * has no content yet, so comment lines before its first continuation are
- * skipped as before.
+ * skipped as before. Inside a flow collection that has not closed yet a
+ * comment ends nothing either: YAML reads "[a," over " # note" over " b]" as
+ * the two entries it spells, so the comment line is skipped and the folding
+ * goes on.
  *
  * Returns { value, end, invalid }, where `end` is the index of the last line
  * consumed and `invalid` holds the index of every line that follows the
@@ -728,7 +731,7 @@ function readPlainScalar(first, lines, start) {
       // The value ended at the comment above, so only another comment may
       // follow it here.
       if (part !== "") invalid.push(i);
-    } else if (part === "" && value !== "") {
+    } else if (part === "" && value !== "" && !opensOpenFlowCollection(value)) {
       ended = true;
     } else if (part !== "") {
       if (value === "") {
@@ -810,6 +813,16 @@ function flowCollectionEnd(text, start) {
     filled = true;
   }
   return -1;
+}
+
+/**
+ * True when the text opens a flow collection that is still open at its end.
+ * The entries of such a collection go on over the following lines, so the
+ * rules that end a plain scalar do not reach them.
+ */
+function opensOpenFlowCollection(text) {
+  if (text[0] !== "[" && text[0] !== "{") return false;
+  return flowCollectionEnd(text, 0) === -1;
 }
 
 /**
@@ -1146,13 +1159,36 @@ function parseFrontmatter(lines, firstLineNumber) {
   return { fields, invalid };
 }
 
-function findNestedSkillMd(dir, baseDir) {
+/**
+ * Every SKILL.md below `dir`, as a path relative to `baseDir`. A symlink is
+ * neither a directory nor a file to the Dirent test, so it is resolved here: a
+ * link named SKILL.md is a nested SKILL.md whatever it points at, and a link
+ * to a directory is walked like the directory it names. A link that points at
+ * nothing is skipped, and so is a link back into a directory already walked,
+ * so a loop of links ends the walk instead of running on.
+ */
+function findNestedSkillMd(dir, baseDir, seen = new Set()) {
   const nested = [];
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      nested.push(...findNestedSkillMd(full, baseDir));
+    if (entry.isSymbolicLink()) {
+      if (entry.name === "SKILL.md") {
+        nested.push(relative(baseDir, full));
+        continue;
+      }
+      let real;
+      try {
+        if (!statSync(full).isDirectory()) continue;
+        real = realpathSync(full);
+      } catch {
+        continue;
+      }
+      if (seen.has(real)) continue;
+      seen.add(real);
+      nested.push(...findNestedSkillMd(full, baseDir, seen));
+    } else if (entry.isDirectory()) {
+      nested.push(...findNestedSkillMd(full, baseDir, seen));
     } else if (entry.isFile() && entry.name === "SKILL.md") {
       nested.push(relative(baseDir, full));
     }
