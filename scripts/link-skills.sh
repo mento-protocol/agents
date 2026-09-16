@@ -1524,8 +1524,12 @@ proc_start_time() {
 lock_recorded_pid() {
 	local field
 	field=$(head -n 1 "$1" 2>/dev/null | cut -f1)
+	# A leading zero is refused with the rest: no shell writes its pid that
+	# way, and "0" names no process at all. kill -0 0 signals the caller's
+	# own process group and answers alive, so a record of "0" would keep
+	# the lock for as long as the machine runs, exactly like "owner=1".
 	case "$field" in
-	"" | *[!0-9]*) return 0 ;;
+	"" | *[!0-9]* | 0*) return 0 ;;
 	esac
 	printf '%s\n' "$field"
 }

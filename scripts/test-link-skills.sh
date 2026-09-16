@@ -2856,30 +2856,36 @@ lock_with_empty_pid_record_is_kept() {
 # record is judged like an empty one instead: kept while it is fresh, cleared
 # once it is older than the stale age.
 malformed_pid_record_ages_out() {
-	local lock
+	local lock record
 	mkskill "$CASE_DIR/one" alpha
 	write_sources
 	add_source "$CASE_DIR/one"
 	mkdir -p "$HOME/.agents/skills"
 	lock="$HOME/.agents/skills/.skill-links.lock"
-	mkdir "$lock"
-	printf 'owner=1\n' >"$lock/pid"
+	# "0" is a record of digits that names no process: kill -0 0 answers for
+	# the caller's own process group, so it would read as a live owner.
+	for record in 'owner=1' '0' '000'; do
+		rm -f "$HOME/.agents/skills/alpha" "$HOME/.agents/skills/.skill-links"
+		rm -rf "$lock"
+		mkdir "$lock"
+		printf '%s\n' "$record" >"$lock/pid"
 
-	ls_run link
-	assert_rc 1 "link over a fresh lock whose pid record is malformed"
-	assert_out_has "holds the lock" "lock message"
-	assert_exists "$lock" "the fresh lock is kept"
-	assert_exists "$lock/pid" "its pid file is kept"
-	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
-	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+		ls_run link
+		assert_rc 1 "link over a fresh lock whose pid record is '$record'"
+		assert_out_has "holds the lock" "lock message for '$record'"
+		assert_exists "$lock" "the fresh lock is kept for '$record'"
+		assert_exists "$lock/pid" "its pid file is kept for '$record'"
+		assert_absent "$HOME/.agents/skills/alpha" "nothing was linked for '$record'"
+		assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written for '$record'"
 
-	# The same record, once the lock is older than the stale age.
-	touch -t 200001010000 "$lock/pid"
-	touch -t 200001010000 "$lock"
-	ls_run link
-	assert_rc 0 "link over an aged lock whose pid record is malformed"
-	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-	assert_absent "$lock" "the aged lock is gone"
+		# The same record, once the lock is older than the stale age.
+		touch -t 200001010000 "$lock/pid"
+		touch -t 200001010000 "$lock"
+		ls_run link
+		assert_rc 0 "link over an aged lock whose pid record is '$record'"
+		assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link for '$record'"
+		assert_absent "$lock" "the aged lock is gone for '$record'"
+	done
 }
 
 # A symlink at the lock path names files this script does not own. Nothing
