@@ -2176,7 +2176,13 @@ git_is_dirty() {
 git_default_branch() {
 	local root ref name only
 	root=$1
-	if ref=$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null); then
+	# The symbolic ref names a branch; it does not promise the branch is
+	# still there. After the remote renamed its default branch, a clone that
+	# never ran 'git remote set-head' still points at the old name, and
+	# measuring against a ref that is gone answers nothing. Such a ref is
+	# passed over and the refs in the clone decide, as when it is missing.
+	if ref=$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) &&
+		git -C "$root" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
 		printf '%s\n' "${ref#refs/remotes/origin/}"
 		return 0
 	fi

@@ -955,6 +955,53 @@ hook_finds_master_default_without_origin_head() {
 		"the source it can measure is still reported"
 }
 
+# refs/remotes/origin/HEAD can name a branch the remote no longer has: after
+# the remote renamed its default branch, a clone that never ran 'git remote
+# set-head' still points at the old name. The ref is then passed over and the
+# refs in the clone decide, as when it is missing.
+hook_ignores_stale_origin_head() {
+	local bare seed clone
+	bare="$CASE_DIR/remote.git"
+	seed="$CASE_DIR/seed"
+	clone="$CASE_DIR/company"
+	git init --bare --quiet "$bare"
+	git -C "$bare" symbolic-ref HEAD refs/heads/main
+	git clone --quiet "$bare" "$seed" 2>/dev/null
+	git -C "$seed" symbolic-ref HEAD refs/heads/main
+	mkskill "$seed/skills" alpha
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "init"
+	git -C "$seed" push -q origin main
+	git clone --quiet "$bare" "$clone"
+	git -C "$clone" config remote.origin.followRemoteHEAD never
+	git -C "$clone" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/gone
+	git -C "$clone" branch --unset-upstream >/dev/null 2>&1
+
+	write_sources
+	add_source "$clone/skills"
+	ls_run link
+	assert_rc 0 "link"
+
+	mkskill "$seed/skills" beta
+	gitc "$seed" add -A
+	gitc "$seed" commit -q -m "add beta"
+	git -C "$seed" push -q origin main
+
+	ls_run hook
+	assert_rc 0 "hook with a stale origin/HEAD"
+	assert_out_has "$clone is 1 commit(s) behind" \
+		"the main remote is measured despite the stale ref"
+	assert_out_has "git pull --ff-only origin main" \
+		"the advice names the branch that exists"
+
+	ls_run check
+	assert_rc 0 "check with a stale origin/HEAD"
+	assert_out_has "behind 1" "check measures against origin/main"
+	assert_out_lacks "behind unknown" "the stale ref does not leave the count unknown"
+	assert_out_lacks "default branch unknown" \
+		"the refs settled the default branch"
+}
+
 # The manifest is what 'link' rewrites, and 'link' refuses a path that is not a
 # regular file. Reading that path as an empty list would have the hook call
 # every skill unlinked and recommend a run that cannot happen.
@@ -9952,6 +9999,7 @@ main() {
 	run_case hook_pull_advice_quotes_branch
 	run_case hook_pull_advice_uses_refspec_for_dash_branch
 	run_case hook_finds_master_default_without_origin_head
+	run_case hook_ignores_stale_origin_head
 	run_case hook_reports_unusable_manifest
 	run_case hook_refuses_bad_sources_path_once
 	run_case hook_notifies_drift
