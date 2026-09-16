@@ -1049,6 +1049,18 @@ Every error carries **both** `err.code` — profile-mapped, so monitoring's
 existing string matching keeps working, unknown outcomes included — and
 `err.claimCode`, the canonical vocabulary the CLI's exit table reads.
 
+`ClaimRefInvalidError` carries `refInvalid === true` as well. `parseClaimPayload`
+marks its own refusal with that flag and every read path re-raises the refusal
+as this class, so the flag belongs to the class rather than to whichever error
+started the chain. Changed in 0.2.0: `acquireClaim` (through
+`initializeClaimRef`) and `takeoverClaim` used a raw read, so a payload the
+loaded profile cannot parse left them as a bare `ClaimConflictError` —
+`CLAIM_CONFLICT`, which the CLI exit table does not list, so exit 1 `usage`.
+Both now re-raise as `ClaimRefInvalidError`: exit 16 `stale`, the answer
+`readClaim`, `renewClaim` and `listClaims` always gave on the same reference.
+The `pr` profile changes with them, deliberately: one wedged reference must not
+answer two ways depending on which command found it.
+
 `isRecoverableClaimRaceError(err)` walks **only** `err.cause`, never
 `AggregateError.errors`. It returns `false` immediately on
 `claimCode ∈ {CLAIM_UNKNOWN_OUTCOME, CLAIM_STALE, CLAIM_REF_INVALID}`, on

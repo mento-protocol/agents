@@ -643,6 +643,19 @@ any compare-and-swap, so a timeout or a 5xx there changed nothing and the caller
 still holds its claim. Exit 16 `stale` is reserved for a reference this package
 proves it can no longer release from.
 
+**A payload this profile cannot read is exit 16 from every command (changed in
+0.2.0).** `claims read`, `claims renew` and `claims list` always answered exit
+16 `stale` on such a reference. `claims claim` and `claims takeover` read the
+same head through a raw read, so the parse refusal reached the CLI as a bare
+`CLAIM_CONFLICT` the exit table did not list, and they answered exit 1 `usage`
+— "fix the command", which names a fix no caller can make. They now answer exit
+16 `stale`, "stop and report to the operator", like every other command on that
+reference. The message text and `err.code` are unchanged; the exit code, the
+`status` slug and the advice line are not. A caller that branches on exit 1
+from `claim` or `takeover` — nothing in this repository does — must read 16
+instead. At the library level the error is a `ClaimRefInvalidError` carrying
+`refInvalid === true` on the error itself.
+
 ## Threat model
 
 The claim reference coordinates **cooperating** writers. Both halves of the
@@ -751,6 +764,11 @@ sibling namespace of its own (`refs/mento-claims/v1/pr`, which is the default,
 or any name that is neither a parent nor a child of another profile's) before
 upgrading. The production `dependabot-prep-policy:v4` document is unaffected:
 `refs/mento-claims/v1/pr` is a sibling already.
+
+The other 0.2.0 behaviour change is an exit code: `claims claim` and `claims
+takeover` on a reference whose payload the loaded profile cannot read answer
+exit 16 `stale` where 0.1.0 answered exit 1 `usage`. See
+[Exit codes](#exit-codes). It applies to the `pr` profile too.
 
 `profile: "issue-board"` is a valid **library** profile — it is the executable
 proof that this package is a byte-for-byte drop-in for monitoring's mutex — but
