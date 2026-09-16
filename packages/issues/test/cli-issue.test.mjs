@@ -480,6 +480,13 @@ test("the loader refuses a namespace that overlaps the other profile's", () => {
       namespace: "refs/mento-claims/v1/pr/v2",
       scopeTemplate: "refs/mento-claims/v1/pr/v2/{issue}",
     },
+    // A parent of both defaults. Only the "is a prefix of" direction of the
+    // rule catches this one, and it is the worst of the three: the issue
+    // sweep would sit above dependabot-prep's whole namespace.
+    {
+      namespace: "refs/mento-claims/v1",
+      scopeTemplate: "refs/mento-claims/v1/{issue}",
+    },
   ];
   for (const claims of overlapping) {
     assert.throws(
@@ -591,6 +598,108 @@ test("verifySubjectKind refuses a pull-request number and costs nothing when off
   assert.equal(accepted.exitCode, 0);
   assert.equal(accepted.document.status, "acquired");
   assert.deepEqual(reads, [872, ISSUE]);
+});
+
+test("verifySubjectKind covers every command that acquires, and only the issue profile", async () => {
+  const reads = [];
+  const readIssueState = async (_options, number) => {
+    reads.push(number);
+    return {
+      number,
+      state: "open",
+      stateReason: null,
+      // 872 and 4400 are really pull requests; 4312 and 4319 are issues.
+      pullRequest: number === 872 || number === 4400,
+      error: null,
+    };
+  };
+
+  // `takeover` writes the same LOCK `claim` writes, so it makes the same
+  // check. Its `--supersedes` is never read: the refusal precedes the ref.
+  const takeover = harness({
+    claims: { verifySubjectKind: true },
+    gh: { readIssueState },
+  });
+  const refusedTakeover = await takeover.run([
+    "claims",
+    "takeover",
+    "--issue",
+    "872",
+    "--supersedes",
+    hexOid(1),
+  ]);
+  assert.equal(refusedTakeover.exitCode, 10);
+  assert.equal(refusedTakeover.document.status, "not-eligible");
+  assert.equal(
+    refusedTakeover.document.error.details.subjectKind,
+    "pullRequest",
+  );
+  assert.deepEqual(reads, [872]);
+  assert.equal(takeover.server.calls.commit.length, 0);
+
+  // The bulk path is the one most likely to be handed a pull-request number,
+  // and a refusal mid-family would leave the earlier members to the rollback.
+  reads.length = 0;
+  const family = harness({
+    claims: { verifySubjectKind: true },
+    gh: { readIssueState },
+  });
+  const refusedFamily = await family.run([
+    "claims",
+    "family",
+    "claim",
+    "--issues",
+    `4400,${ISSUE}`,
+  ]);
+  assert.equal(refusedFamily.exitCode, 10);
+  assert.equal(refusedFamily.document.status, "not-eligible");
+  assert.equal(refusedFamily.document.error.details.number, 4400);
+  // Claim order, which is ascending, and the family stops at the first
+  // member the check refuses.
+  assert.deepEqual(reads, [ISSUE, 4400]);
+  assert.equal(
+    family.server.calls.commit.length,
+    0,
+    "not one member of a refused family is written",
+  );
+
+  // Under the pr profile the endpoint already names the kind, so the flag is
+  // inert and must not put a round trip on that hot path.
+  reads.length = 0;
+  const pr = harness({
+    document: prDocument({ verifySubjectKind: true }),
+    gh: { readIssueState },
+  });
+  const claimed = await pr.run(["claims", "claim", "--pr", "872"]);
+  assert.equal(claimed.exitCode, 0);
+  assert.equal(claimed.document.status, "acquired");
+  assert.deepEqual(reads, [], "the pr profile reads no issue at all");
+});
+
+test("verifySubjectKind warns rather than refuses when the read fails", async () => {
+  // A transport fault must not deny a claim the operator is entitled to. The
+  // hazard is still reported, as a warning and in `claims list`, so this is a
+  // deliberate fail-open and the only one on the acquire path.
+  const context = harness({
+    claims: { verifySubjectKind: true },
+    gh: {
+      readIssueState: async (_options, number) => ({
+        number,
+        state: null,
+        stateReason: null,
+        pullRequest: null,
+        error: "gh api failed",
+      }),
+    },
+  });
+  const claimed = await context.run(["claims", "claim", "--issue", "872"]);
+  assert.equal(claimed.exitCode, 0);
+  assert.equal(claimed.document.status, "acquired");
+  const warning = (claimed.document.warnings ?? []).find(
+    (entry) => entry.stage === "verify-subject-kind",
+  );
+  assert.ok(warning, "the failed read is reported as a warning");
+  assert.match(warning.message, /gh api failed/u);
 });
 
 // ---------------------------------------------------------------- the loop

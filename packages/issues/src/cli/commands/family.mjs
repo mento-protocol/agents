@@ -36,6 +36,7 @@ import {
   recordLeaseState,
   recordUnknownOutcome,
 } from "./common.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 
 /**
  * Which collected release failure speaks for the whole family.
@@ -157,6 +158,17 @@ export async function runFamilyClaim(runtime) {
   // on the login it records.
   await runtime.ensureLogin();
 
+  // The same acquire-time check `claim` and `takeover` make, for every member,
+  // in claim order and before the first write. A family is the path most
+  // likely to be handed a pull-request number — a list of numbers is pasted,
+  // not typed — and a refusal in the middle of one leaves the earlier members
+  // to the rollback. Off unless the config asks, so it costs nothing by
+  // default.
+  const subjectWarnings = [];
+  for (const number of order) {
+    subjectWarnings.push(...(await assertSubjectKind(runtime, number)));
+  }
+
   let family;
   try {
     family = await claimFamily(ctx, order, metadata, {
@@ -176,7 +188,7 @@ export async function runFamilyClaim(runtime) {
     throw error;
   }
 
-  const warnings = [];
+  const warnings = [...subjectWarnings];
   const members = [];
   for (const number of family.order) {
     const lease = family.leases.get(number);

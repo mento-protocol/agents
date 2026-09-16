@@ -257,7 +257,7 @@ const README_POLICY = Object.freeze({
       allowOverrides: false,
       allowCloudWriters: false,
       command: ["pnpm", "dependabot:claim", "--"],
-      package: { name: "@mento-protocol/issues", version: "0.1.0" },
+      package: { name: "@mento-protocol/issues", version: "0.2.0" },
     },
   },
   forbiddenActions: ["delete-claim-refs"],
@@ -296,7 +296,7 @@ const README_POLICY_NORMALIZED = Object.freeze({
     renewMinutes: 10,
     graceMinutes: 10,
     label: "dependabot-prep:claimed",
-    package: { name: "@mento-protocol/issues", version: "0.1.0" },
+    package: { name: "@mento-protocol/issues", version: "0.2.0" },
   },
   fencePurposes: {
     push: "mandatory",
@@ -318,6 +318,29 @@ const README_POLICY_NORMALIZED = Object.freeze({
     minRemainingMs: 360_000,
     skewToleranceMs: 300_000,
   },
+});
+
+test("the policy snapshot is still the document README publishes", () => {
+  // The snapshot claims to be README.md's block verbatim, and a version sweep
+  // moved README without moving it: `describeConfig` copies `package` through,
+  // so the drift passed silently. The two literals are checked against the
+  // published document and against the package they pin.
+  const version = README_POLICY.coordination.claims.package.version;
+  const packageJson = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url))),
+  );
+  assert.equal(version, packageJson.version, "the snapshot pins this package");
+  assert.equal(version, README_POLICY_NORMALIZED.claims.package.version);
+  const readme = readFileSync(
+    fileURLToPath(new URL("../README.md", import.meta.url)),
+    "utf8",
+  );
+  assert.ok(
+    readme.includes(
+      `"package": { "name": "@mento-protocol/issues", "version": "${version}" }`,
+    ),
+    `README.md publishes a policy pinning ${version}`,
+  );
 });
 
 test("the production dependabot policy still normalizes to the same document", () => {
