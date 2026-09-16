@@ -28,23 +28,29 @@ const ISSUE = 4312;
 const MINUTE = 60_000;
 
 /**
- * The lease shape an issue policy should carry.
+ * The lease shape an issue policy should carry — README.md's, exactly.
  *
- * The longest TTL `assertLeaseInvariants` permits, because
- * `MAX_TTL_CEILING_MINUTES` is 360: a multi-hour hold is a renew cadence and
- * never a long TTL. `renewMinutes * 2 = 240 <= 360`, `graceMinutes 60` is the
- * ceiling, `minRemainingMs 3_600_000 < renewMs 7_200_000`, and
- * `minRemainingMs + graceMs = 7_200_000 >= renewMs`.
+ * `ttlMinutes` is deliberately **below** `maxTtlMinutes`, and that is the
+ * whole point of the shape. `buildLeaseBlock` clamps every expiry to
+ * `claimedAt + maxTtl`, so a policy whose TTL equals its ceiling reaches that
+ * ceiling on the very first acquire and every later renew returns the same
+ * `expiresAt` — a renew that renews nothing. With 120 against 360 a renew
+ * really does move the expiry, up to six hours from the acquire.
+ *
+ * The invariants: `renewMinutes * 2 = 120 <= 120`, `graceMinutes 60` is the
+ * ceiling, `ttlMinutes 120 <= maxTtlMinutes 360 <= 360`,
+ * `minRemainingMs 1_800_000 < renewMs 3_600_000`, and
+ * `minRemainingMs + graceMs = 5_400_000 >= renewMs`.
  */
 const BASE_ISSUE_CLAIMS = Object.freeze({
   schema: CONFIG_SCHEMAS.CLAIMS,
   profile: "issue",
   namespace: "refs/mento-claims/v1/issue",
   scopeTemplate: "refs/mento-claims/v1/issue/{issue}",
-  ttlMinutes: 360,
-  renewMinutes: 120,
+  ttlMinutes: 120,
+  renewMinutes: 60,
   graceMinutes: 60,
-  minRemainingSeconds: 3600,
+  minRemainingSeconds: 1800,
   maxTtlMinutes: 360,
   label: "issue-sweep:claimed",
   verifySubjectKind: false,
@@ -515,8 +521,9 @@ test("the issue profile is configurable, issue-board still is not", () => {
   assert.equal(config.profileId, "issue");
   assert.equal(config.profile.numberKey, "issue");
   assert.equal(config.claims.verifySubjectKind, false);
-  assert.equal(config.lease.ttlMinutes, 360);
-  assert.equal(config.lease.minRemainingMs, 3_600_000);
+  assert.equal(config.lease.ttlMinutes, 120);
+  assert.equal(config.lease.maxTtlMinutes, 360);
+  assert.equal(config.lease.minRemainingMs, 1_800_000);
 
   assert.throws(
     () => normalizeConfigDocument(issueDocument({ profile: "issue-board" })),
@@ -538,12 +545,22 @@ test("the issue profile is configurable, issue-board still is not", () => {
     });
   }, /claims\.ttlMinutes is required/u);
 
-  // One minute less grace breaks the renew-window rule, which is what makes
-  // the recommended shape maximal rather than arbitrary.
+  // The two rules that bound `minRemainingSeconds`, which is what makes 1800
+  // the recommended value rather than an arbitrary one. It must sit below the
+  // renew window, and it plus the grace must cover it.
   assert.throws(
-    () => normalizeConfigDocument(issueDocument({ graceMinutes: 59 })),
+    () => normalizeConfigDocument(issueDocument({ minRemainingSeconds: 3600 })),
     (error) => {
       assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.match(error.message, /must be below the renew window/u);
+      return true;
+    },
+  );
+  assert.throws(
+    () => normalizeConfigDocument(issueDocument({ graceMinutes: 29 })),
+    (error) => {
+      assert.equal(error.claimCode, "CLAIM_CONFIG");
+      assert.match(error.message, /must cover the renew window/u);
       return true;
     },
   );
@@ -741,7 +758,7 @@ test("the issue claim loop runs end to end and prints --issue everywhere", async
   const token = claimed.document.claim.token;
   const runId = claimed.document.claim.runId;
 
-  // Two hours is the renew cadence this lease is built for.
+  // One hour is the renew cadence this lease is built for.
   const notDue = await context.run([
     "claims",
     "renew",
@@ -756,7 +773,7 @@ test("the issue claim loop runs end to end and prints --issue everywhere", async
   assert.equal(notDue.exitCode, 0);
   assert.equal(notDue.document.status, "not-due");
 
-  context.clock.advance(121 * MINUTE);
+  context.clock.advance(61 * MINUTE);
   const renewed = await context.run([
     "claims",
     "renew",
@@ -838,6 +855,123 @@ test("the issue claim loop runs end to end and prints --issue everywhere", async
   }
 });
 
+test("the documented cadence really extends the lease, up to the ceiling", async () => {
+  // The one property the recommended policy exists for. `buildLeaseBlock`
+  // clamps every expiry to `claimedAt + maxTtl`, so a policy whose TTL equals
+  // its ceiling renews without extending anything. These numbers are
+  // README.md's, and this is the test that keeps them honest.
+  const context = harness();
+  const claimed = await context.run([
+    "claims",
+    "claim",
+    "--issue",
+    String(ISSUE),
+  ]);
+  assert.equal(claimed.exitCode, 0);
+  const runId = claimed.document.claim.runId;
+  const claimedAtMs = Date.parse(claimed.document.claim.claimedAt);
+  const ceilingMs = claimedAtMs + 360 * MINUTE;
+  let token = claimed.document.claim.token;
+  let expiresAtMs = Date.parse(claimed.document.claim.expiresAt);
+  assert.equal(expiresAtMs, claimedAtMs + 120 * MINUTE);
+
+  const renew = async () => {
+    const result = await context.run([
+      "claims",
+      "renew",
+      "--issue",
+      String(ISSUE),
+      "--token",
+      token,
+      "--run-id",
+      runId,
+    ]);
+    if (result.exitCode === 0) token = result.document.claim.token;
+    return result;
+  };
+
+  // Two renews on the hour, each one moving the expiry a full hour out.
+  for (const elapsed of [60, 120]) {
+    context.clock.advance(60 * MINUTE);
+    const renewed = await renew();
+    assert.equal(renewed.exitCode, 0);
+    assert.equal(renewed.document.status, "renewed");
+    const moved = Date.parse(renewed.document.claim.expiresAt);
+    assert.equal(
+      moved,
+      claimedAtMs + (elapsed + 120) * MINUTE,
+      `the renew at +${elapsed}m must move the expiry, not reprint it`,
+    );
+    assert.ok(moved > expiresAtMs, "every renew extends the lease");
+    expiresAtMs = moved;
+  }
+
+  // And the takeover window a sweep sizes its crash recovery from:
+  // min(lastRenew + TTL, claimedAt + maxTtl) + grace, never lastRenew + TTL
+  // + grace once the ceiling binds.
+  const listed = await context.run(
+    ["claims", "list", "--issues", String(ISSUE)],
+    {
+      operations: {
+        ...context.options.operations,
+        gh: {
+          ...context.options.operations.gh,
+          readIssueState: async (_options, number) => ({
+            number,
+            state: "open",
+            stateReason: null,
+            pullRequest: false,
+            error: null,
+          }),
+        },
+      },
+    },
+  );
+  assert.equal(listed.exitCode, 0);
+  assert.equal(
+    Date.parse(listed.document.claims[0].eligibleAt),
+    expiresAtMs + 60 * MINUTE,
+  );
+
+  // Past the ceiling the expiry stops moving, which is the hold's real end.
+  context.clock.advance(180 * MINUTE);
+  const clamped = await renew();
+  assert.equal(clamped.exitCode, 0);
+  assert.equal(Date.parse(clamped.document.claim.expiresAt), ceilingMs);
+
+  // The last `minRemainingSeconds` before the ceiling is a window in which a
+  // gated write is refused and the renew it asks for cannot help. Thirty
+  // minutes, not sixty, is the price of the recommended shape.
+  context.clock.advance(40 * MINUTE);
+  const gated = await context.run([
+    "claims",
+    "verify",
+    "--issue",
+    String(ISSUE),
+    "--token",
+    token,
+    "--run-id",
+    runId,
+    "--gate",
+    "push",
+  ]);
+  assert.equal(gated.exitCode, 15);
+  assert.equal(gated.document.status, "renew-required");
+  const stuck = await renew();
+  assert.equal(stuck.exitCode, 0);
+  assert.equal(Date.parse(stuck.document.claim.expiresAt), ceilingMs);
+
+  // At the ceiling itself the renew refuses, and names it.
+  context.clock.advance(20 * MINUTE);
+  const refused = await renew();
+  assert.equal(refused.exitCode, 16);
+  assert.equal(refused.document.status, "stale");
+  assert.match(
+    refused.document.error.message,
+    /policy ceiling of 360 minutes/u,
+  );
+});
+
 test("an expired issue claim is taken over, and adopt names --issue", async () => {
   const context = harness();
   const first = await context.run([
@@ -849,8 +983,8 @@ test("an expired issue claim is taken over, and adopt names --issue", async () =
   assert.equal(first.exitCode, 0);
   const lockOid = first.document.claim.token;
 
-  // Past the TTL and its grace: six hours plus one.
-  context.clock.advance(421 * MINUTE);
+  // Past the TTL and its grace: three hours plus one.
+  context.clock.advance(181 * MINUTE);
   const taken = await context.run([
     "claims",
     "takeover",

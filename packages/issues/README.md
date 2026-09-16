@@ -238,25 +238,49 @@ endpoint serves pull requests too and an issue claim standing on a
 pull-request number is worth seeing. Recovery is the ordinary path: `claim`
 (which takes over), then `release --outcome skipped`.
 
-### Holding an issue claim for days
+### Holding an issue claim for hours
 
-A multi-hour hold is a **renew cadence, never a long TTL**.
-`MAX_TTL_CEILING_MINUTES` is 360 and `MAX_GRACE_MINUTES` is 60, so the longest
-lease this package will validate is six hours. The maximal shape is
+A multi-hour hold is a **renew cadence, never a long TTL** — and it ends. Every
+expiry is clamped to `claimedAt + maxTtlMinutes`, so the hold is hard-capped at
+`maxTtlMinutes` **from the acquire** and no renew reaches past it.
+`MAX_TTL_CEILING_MINUTES` is 360 and `MAX_GRACE_MINUTES` is 60, so **six hours
+from the acquire is the longest hold any valid policy can produce**. A run that
+needs longer releases and claims again.
+
+That cap is also why `ttlMinutes` must sit **below** `maxTtlMinutes`. A policy
+whose TTL equals its ceiling reaches the ceiling on the very first acquire, and
+every later renew then returns the same `expiresAt` — a renew that renews
+nothing. The recommended shape leaves the renew room to work:
 
 ```json
 {
-  "ttlMinutes": 360,
-  "renewMinutes": 120,
+  "ttlMinutes": 120,
+  "renewMinutes": 60,
   "graceMinutes": 60,
-  "minRemainingSeconds": 3600
+  "minRemainingSeconds": 1800,
+  "maxTtlMinutes": 360
 }
 ```
 
-An hourly `renew --if-due` from cron holds it indefinitely; the claim becomes
-takeable **TTL plus grace — seven hours — after the last successful renew**. A
-cron host that sleeps loses the claim, correctly, and the recovery is the
-ordinary path: the next `claim` takes over automatically.
+An hourly `renew --if-due` from cron moves the expiry an hour further out each
+time, until the ceiling binds. The claim becomes takeable at
+
+```
+min(lastRenew + ttlMinutes, claimedAt + maxTtlMinutes) + graceMinutes
+```
+
+— three hours after a renew early in the hold, and never later than seven
+hours after the acquire whatever the cadence. Size a crash-recovery window
+from that formula, not from `lastRenew + ttl + grace`.
+
+Two things happen as the ceiling approaches, and a sweep has to expect both.
+In the last `minRemainingSeconds` before it — thirty minutes, with the shape
+above — `claims verify` and `claims guard` exit 15 `renew-required`, and the
+renew they ask for cannot help, because the expiry is already at the ceiling;
+the run stops and releases rather than retrying. At the ceiling itself
+`claims renew` exits 16 `stale`, naming the ceiling and the acquire it is
+measured from. A cron host that sleeps loses the claim, correctly, and the
+recovery is the ordinary path: the next `claim` takes over automatically.
 
 Every renew rotates the token, so re-read `claim.token` from each document's
 `next` rather than reusing the one the acquire printed.
@@ -284,10 +308,17 @@ and no kind — nothing in the claim layer can tell the difference.
 
 Two things surface it. `claims list` reports a `pullRequest` boolean per issue
 entry, after the fact. And `claims.verifySubjectKind: true` refuses it before
-the first write: `claim` and `takeover` read the issue after the login and exit
-10 `not-eligible` when the number is really a pull request. It is `false` by
-default because it costs a round trip on the hot path; an issue policy should
-set it to `true`.
+the first write: `claim`, `takeover` and `family claim` read the issue after
+the login and exit 10 `not-eligible` when the number is really a pull request.
+A family reads its members in claim order and stops at the first refusal, so
+nothing is written at all. It is `false` by default because it costs a round
+trip on the hot path; an issue policy should set it to `true`.
+
+The check **fails open**: when the read itself fails — no `gh`, a 5xx, a
+revoked token — the claim is allowed and the run carries a warning whose stage
+is `verify-subject-kind`. A transport fault must not deny a claim the operator
+is entitled to, and `claims list` still reports the hazard afterwards. The key
+is inert under `profile: "pr"`, where the endpoint already names the kind.
 
 **`--outcome`** accepts `ready-for-maintainer-decision`, `needs-decision`,
 `blocked`, `skipped`, `budget-exhausted`, `family-rollback`, `rehearsal` and
@@ -707,6 +738,16 @@ load:
   payloads fail closed one at a time as `CLAIM_REF_INVALID` — a reading that
   looks like a corrupt reference rather than the configuration that caused it.
 
+**Upgrading to 0.2.0.** That second rule reads both directions, so it also
+refuses a `profile: "pr"` policy whose `claims.namespace` is a **parent** of
+the issue profile's default `refs/mento-claims/v1/issue` — for example
+`refs/mento-claims/v1`, or `refs/mento-claims`. Such a policy loaded on 0.1.0
+and stops loading on 0.2.0, at exit 3, before any network call. Move it to a
+sibling namespace of its own (`refs/mento-claims/v1/pr`, which is the default,
+or any name that is neither a parent nor a child of another profile's) before
+upgrading. The production `dependabot-prep-policy:v4` document is unaffected:
+`refs/mento-claims/v1/pr` is a sibling already.
+
 `profile: "issue-board"` is a valid **library** profile — it is the executable
 proof that this package is a byte-for-byte drop-in for monitoring's mutex — but
 the configuration loader refuses it (`CLAIM_CONFIG_PROFILE_UNSUPPORTED`): its
@@ -881,10 +922,10 @@ An issue sweep carries a standalone `mento-issues-config:v1` document instead,
     "profile": "issue",
     "namespace": "refs/mento-claims/v1/issue",
     "scopeTemplate": "refs/mento-claims/v1/issue/{issue}",
-    "ttlMinutes": 360,
-    "renewMinutes": 120,
+    "ttlMinutes": 120,
+    "renewMinutes": 60,
     "graceMinutes": 60,
-    "minRemainingSeconds": 3600,
+    "minRemainingSeconds": 1800,
     "maxTtlMinutes": 360,
     "label": "issue-sweep:claimed",
     "verifySubjectKind": true,
@@ -897,9 +938,10 @@ An issue sweep carries a standalone `mento-issues-config:v1` document instead,
 }
 ```
 
-That is the maximal lease — see "Holding an issue claim for days" — and
-`verifySubjectKind` is on because an issue sweep is exactly the caller that can
-be handed a pull-request number.
+That lease renews on the hour and holds for at most six hours from the
+acquire — see "Holding an issue claim for hours" — and `verifySubjectKind` is
+on because an issue sweep is exactly the caller that can be handed a
+pull-request number.
 
 ## Reference retention
 

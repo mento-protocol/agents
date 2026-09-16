@@ -56,7 +56,7 @@ adoption's diff, already written.
   it is not an authorization boundary. Binding possession to something
   non-public — a `runSecretSha256` in the LOCK payload, its preimage held in
   the process and in the 0600 state file — is the change that would close it,
-  and is not in 0.1.0.
+  and 0.2.0 does not do it.
 
 - **I-B (no publication without proof).** Every branch push and review request
   runs inside `guard`, which requires head ≡ token, `state === "LOCK"`,
@@ -1606,11 +1606,16 @@ Every failure exits 3 **before any network call**:
   exit 3 at load. Without them a misconfigured document validates and then
   wedges references one at a time as `CLAIM_REF_INVALID`, which reads as a
   corrupt reference rather than as the configuration that caused it.
-- `verifySubjectKind` (default `false`) makes `claim` and `takeover` read
-  `repos/{owner}/{repo}/issues/{n}` after the login and refuse with exit 10
-  `not-eligible` when the number is really a pull request. GitHub gives issues
-  and pull requests one number space, so an issue claim can otherwise stand on
-  a pull-request number another skill holds under the `pr` namespace.
+- `verifySubjectKind` (default `false`) makes `claim`, `takeover` and
+  `family claim` read `repos/{owner}/{repo}/issues/{n}` after the login and
+  refuse with exit 10 `not-eligible` when the number is really a pull request.
+  GitHub gives issues and pull requests one number space, so an issue claim can
+  otherwise stand on a pull-request number another skill holds under the `pr`
+  namespace. A family reads its members in claim order and stops at the first
+  refusal, so a refused family writes nothing. The check fails open: a read
+  that fails yields a `verify-subject-kind` warning and allows the claim,
+  because a transport fault must not deny a claim the operator is entitled to.
+  It is inert under `profile: "pr"`, where the endpoint already names the kind.
 - `gh.timeoutSeconds`, when given, is the per-`gh` wall-clock default that
   `--timeout-seconds` overrides. Both are bounded the same way: more than 0 and
   at most 86400 seconds. `runGh` arms its timer only for a finite, positive
@@ -1864,7 +1869,7 @@ Consumers do not add this package to a `package.json` or a lockfile. The policy
 pins the exact version and a thin wrapper spawns it:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.1.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
   dlx mento-issues claims read --pr 872 --config .github/dependabot-prep-policy.json
 ```
 
