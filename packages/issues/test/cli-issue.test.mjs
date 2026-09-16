@@ -724,6 +724,82 @@ test("verifySubjectKind warns rather than refuses when the read fails", async ()
   assert.match(warning.message, /gh api failed/u);
 });
 
+test("a --dry-run plan refuses the pull-request number its run refuses", async () => {
+  // A sweep plans a batch before it commits to it. While the check sat below
+  // the dry-run branch, the plan answered exit 0 `ok` with `would: acquire`
+  // and `refusal: null` for a number the run then refused with exit 10 — so
+  // the sweep was told every pull request in the batch was claimable.
+  const reads = [];
+  const readIssueState = async (_options, number) => {
+    reads.push(number);
+    return {
+      number,
+      state: "open",
+      stateReason: null,
+      // 872 is really a pull request; 4312 is really an issue.
+      pullRequest: number === 872,
+      error: null,
+    };
+  };
+  const settings = {
+    claims: { verifySubjectKind: true },
+    gh: { readIssueState },
+  };
+
+  for (const [label, argv] of [
+    ["claims claim", ["claims", "claim", "--issue", "872"]],
+    [
+      "claims takeover",
+      ["claims", "takeover", "--issue", "872", "--supersedes", hexOid(1)],
+    ],
+    [
+      "claims family claim",
+      ["claims", "family", "claim", "--issues", `872,${ISSUE}`],
+    ],
+  ]) {
+    const context = harness(settings);
+    reads.length = 0;
+    const planned = await context.run([...argv, "--dry-run"]);
+    assert.equal(planned.exitCode, 10, `${label} --dry-run must refuse`);
+    const plan = planned.document ?? planned.stderrDocuments[0];
+    assert.equal(plan.status, "not-eligible");
+    assert.equal(plan.error.details.number, 872);
+    assert.deepEqual(reads, [872], `${label}: the plan makes the same read`);
+    assert.equal(
+      context.server.calls.commit.length,
+      0,
+      `${label}: a refused plan writes nothing`,
+    );
+
+    reads.length = 0;
+    const run = await context.run(argv);
+    assert.equal(
+      run.exitCode,
+      planned.exitCode,
+      `${label}: the run agrees with its plan`,
+    );
+    const document = run.document ?? run.stderrDocuments[0];
+    assert.equal(document.status, plan.status);
+    assert.equal(context.server.calls.commit.length, 0);
+  }
+
+  // And the check refuses nothing else: a real issue number still plans, and
+  // the plan still describes the acquire it would make.
+  const eligible = harness(settings);
+  const planned = await eligible.run([
+    "claims",
+    "claim",
+    "--issue",
+    String(ISSUE),
+    "--dry-run",
+  ]);
+  assert.equal(planned.exitCode, 0);
+  assert.equal(planned.document.status, "ok");
+  assert.equal(planned.document.plan.refusal, null);
+  assert.match(planned.document.plan.would, /acquire/u);
+  assert.equal(eligible.server.calls.commit.length, 0);
+});
+
 // ---------------------------------------------------------------- the loop
 
 test("the issue claim loop runs end to end and prints --issue everywhere", async () => {

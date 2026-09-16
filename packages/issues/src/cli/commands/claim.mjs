@@ -43,11 +43,22 @@ export async function runClaim(runtime) {
     runIdPrefix: flags["run-id-prefix"] ?? null,
   });
 
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number. It sits above
+  // the dry-run branch for the reason the comment above gives: a plan that
+  // skipped it answered `ok` and "would acquire" for a pull-request number the
+  // run refuses with exit 10 `not-eligible`. It reads and never writes, so a
+  // dry run may make it, and it needs no login of its own — the login this
+  // command records belongs to the write path below. Under the pr profile it
+  // returns at once and costs nothing either way.
+  const subjectWarnings = await assertSubjectKind(runtime, number);
+
   if (ctx.options.dryRun === true) {
     return {
       status: "ok",
       ref,
       scope,
+      warnings: subjectWarnings,
       body: {
         plan: await planTransition(ctx, number, {
           action: "acquire",
@@ -61,10 +72,6 @@ export async function runClaim(runtime) {
   // login it records. Before this it was resolved while the runtime was built,
   // where a transport failure masked every deterministic refusal above.
   await runtime.ensureLogin();
-
-  // Optional, and off unless the config asks: one read that proves the number
-  // is an issue and not a pull request wearing an issue number.
-  const subjectWarnings = await assertSubjectKind(runtime, number);
 
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     present: true,

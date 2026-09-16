@@ -201,7 +201,9 @@ transition's own input checks before it plans, so an unusable `--set` value or
 `--run-id-prefix` — on `claim`, `takeover`, `renew` or either `family`
 command — is the same refusal, with the same message, whether or not the run
 goes on to write. `family claim` validates membership first as well, so
-`--prs 872,872` refuses instead of printing two plans for one pull request. A
+`--prs 872,872` refuses instead of printing two plans for one pull request.
+`claims.verifySubjectKind` is part of that set: a plan makes the same issue
+read and answers the same exit 10 `not-eligible` for a pull-request number. A
 plan that answered `ok` for an input the run would have rejected was worse than
 no plan.
 
@@ -308,11 +310,13 @@ and no kind — nothing in the claim layer can tell the difference.
 
 Two things surface it. `claims list` reports a `pullRequest` boolean per issue
 entry, after the fact. And `claims.verifySubjectKind: true` refuses it before
-the first write: `claim`, `takeover` and `family claim` read the issue after
-the login and exit 10 `not-eligible` when the number is really a pull request.
-A family reads its members in claim order and stops at the first refusal, so
-nothing is written at all. It is `false` by default because it costs a round
-trip on the hot path; an issue policy should set it to `true`.
+the first write: `claim`, `takeover` and `family claim` read the issue and exit
+10 `not-eligible` when the number is really a pull request. The read is part of
+each command's own input checks, so it happens under `--dry-run` too and a plan
+never calls a pull-request number claimable. A family reads its members in
+claim order and stops at the first refusal, so nothing is written at all. It is
+`false` by default because it costs a round trip on the hot path; an issue
+policy should set it to `true`.
 
 The check **fails open**: when the read itself fails — no `gh`, a 5xx, a
 revoked token — the claim is allowed and the run carries a warning whose stage

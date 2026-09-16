@@ -38,11 +38,18 @@ export async function runTakeover(runtime) {
     runIdPrefix: flags["run-id-prefix"] ?? null,
   });
 
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number. Above the
+  // dry-run branch, exactly as in `claim`, so the plan and the run agree on a
+  // pull-request number instead of the plan answering `ok`.
+  const subjectWarnings = await assertSubjectKind(runtime, number);
+
   if (ctx.options.dryRun === true) {
     return {
       status: "ok",
       ref,
       scope,
+      warnings: subjectWarnings,
       body: {
         plan: await planTransition(ctx, number, {
           action: "takeover",
@@ -55,10 +62,6 @@ export async function runTakeover(runtime) {
   // The inputs are checked; the write may now spend a round trip on the login
   // it records.
   await runtime.ensureLogin();
-
-  // Optional, and off unless the config asks: one read that proves the number
-  // is an issue and not a pull request wearing an issue number.
-  const subjectWarnings = await assertSubjectKind(runtime, number);
 
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     // C-21: the label tracks the ref, not the owner, so a takeover leaves it

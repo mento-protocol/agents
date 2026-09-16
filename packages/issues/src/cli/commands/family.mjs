@@ -146,28 +146,30 @@ export async function runFamilyClaim(runtime) {
   // moment it was run. The plan is built from the order the run would use.
   const order = planFamilyClaims(numbers);
 
-  if (ctx.options.dryRun === true) {
-    const plans = [];
-    for (const number of order) {
-      plans.push(await planTransition(ctx, number, { action: "acquire" }));
-    }
-    return { status: "ok", body: { plan: plans } };
-  }
-
-  // Membership and metadata are checked; the write may now spend a round trip
-  // on the login it records.
-  await runtime.ensureLogin();
-
   // The same acquire-time check `claim` and `takeover` make, for every member,
   // in claim order and before the first write. A family is the path most
   // likely to be handed a pull-request number — a list of numbers is pasted,
   // not typed — and a refusal in the middle of one leaves the earlier members
   // to the rollback. Off unless the config asks, so it costs nothing by
-  // default.
+  // default. Above the dry-run branch, because a sweep plans the batch before
+  // it commits to it: a plan that skipped the check called every pull-request
+  // number in the batch claimable.
   const subjectWarnings = [];
   for (const number of order) {
     subjectWarnings.push(...(await assertSubjectKind(runtime, number)));
   }
+
+  if (ctx.options.dryRun === true) {
+    const plans = [];
+    for (const number of order) {
+      plans.push(await planTransition(ctx, number, { action: "acquire" }));
+    }
+    return { status: "ok", warnings: subjectWarnings, body: { plan: plans } };
+  }
+
+  // Membership and metadata are checked; the write may now spend a round trip
+  // on the login it records.
+  await runtime.ensureLogin();
 
   let family;
   try {
