@@ -376,6 +376,29 @@ make_breaking_mktemp() {
 	chmod +x "$dir/mktemp"
 }
 
+# An ls shim that refuses one directory: a call whose last argument is the
+# path in LS_TEST_UNLISTABLE_DIR exits 1, and every other call is the real ls.
+# It gives a directory whose permission bits pass a listing that fails, the way
+# an ACL does. The single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+make_unlistable_ls() {
+	local dir real
+	dir=$1
+	real=$(command -v ls)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'last=""' \
+		'for a in "$@"; do' \
+		'	last=$a' \
+		'done' \
+		'if [ -n "${LS_TEST_UNLISTABLE_DIR:-}" ] && [ "$last" = "$LS_TEST_UNLISTABLE_DIR" ]; then' \
+		'	exit 1' \
+		'fi' \
+		"exec \"$real\" \"\$@\"" >"$dir/ls"
+	chmod +x "$dir/ls"
+}
+
 SAVED_PATH=""
 
 use_shims() {
@@ -1721,6 +1744,58 @@ source_listed_twice_by_symlink_alias() {
 	assert_out_has "linked 0, unchanged 2, pruned 0, errors 0" "case-variant summary"
 }
 
+# A sources line that names the assembly itself would make every link already
+# in the assembly a candidate whose target is its own entry: the record would
+# read as unchanged, its target would be rewritten to the assembly, and the day
+# the real target went away the dangling link would be called foreign, dropped
+# from the manifest and left unmanaged with no error. The old layout kept a
+# checkout at that path, so the line is a plausible mistake and is refused by
+# name.
+assembly_dir_refused_as_source() {
+	local manifest before tab
+	manifest="$HOME/.agents/skills/.skill-links"
+	before="$CASE_DIR/manifest.before"
+	tab=$(printf '\t')
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$HOME/.agents/skills"
+	ls_run link
+	assert_rc 1 "link with the assembly listed as a source"
+	assert_out_has "source directory is the assembly $HOME/.agents/skills itself" \
+		"the refusal names the assembly"
+	assert_out_has "(from '$HOME/.agents/skills' in $HOME/.agents/skill-sources)" \
+		"the refusal names the line it came from"
+	assert_out_has "linked 1, unchanged 0, pruned 0, errors 1" "summary"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"the listed checkout still linked its skill"
+	if grep -q -F -- "$tab$HOME/.agents/skills/" "$manifest" 2>/dev/null; then
+		fail "the manifest records a target inside the assembly"
+	fi
+
+	# A second run repeats the refusal and changes nothing it wrote before.
+	cp "$manifest" "$before"
+	ls_run link
+	assert_rc 1 "second link with the assembly listed as a source"
+	assert_out_has "source directory is the assembly $HOME/.agents/skills itself" \
+		"the second run repeats the refusal"
+	assert_out_has "linked 0, unchanged 1, pruned 0, errors 1" "second summary"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link is untouched"
+	assert_same_bytes "$manifest" "$before" "the manifest is untouched"
+
+	ls_run check
+	assert_rc 1 "check with the assembly listed as a source"
+	assert_out_has "source $HOME/.agents/skills: is the assembly directory itself" \
+		"check names the line for what it is"
+	assert_out_lacks "source $HOME/.agents/skills: ok" "check does not call it a source"
+
+	# The refusal reaches the session start's stderr the way an unreadable
+	# source does today, and the hook adds no notice of its own.
+	ls_run hook
+	assert_rc 0 "hook with the assembly listed as a source"
+	assert_out_lacks "[link-skills]" "the hook says nothing about it"
+}
+
 # A case-only rename of a skill directory must relink in one run, not report a
 # collision and drop the skill.
 case_only_rename_relinks() {
@@ -2366,6 +2441,45 @@ unreadable_source_keeps_links() {
 	assert_out_lacks "will prune it" "check promises no prune that link will not do"
 }
 
+# A source whose permission bits pass and whose listing fails is unreadable,
+# and the candidate pass says so. check must take that answer instead of
+# testing the bits again: a second answer from the bits alone calls the source
+# ok and sends check on into the git report of a directory nothing was read
+# from.
+check_reports_unlistable_source_as_unreadable() {
+	local shims seen
+	mkskill "$CASE_DIR/one" alpha
+	mkskill "$CASE_DIR/two" other
+	# A clone, so that a check that wrongly went on would print a branch.
+	git init --quiet "$CASE_DIR/two" >/dev/null 2>&1
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 0 "first link with both sources readable"
+
+	shims="$CASE_DIR/shims"
+	make_unlistable_ls "$shims"
+	LS_TEST_UNLISTABLE_DIR="$CASE_DIR/two"
+	export LS_TEST_UNLISTABLE_DIR
+	use_shims "$shims"
+	ls_run check
+	drop_shims
+	unset LS_TEST_UNLISTABLE_DIR
+
+	assert_rc 1 "check with a source whose listing fails"
+	seen=$(printf '%s\n' "$LS_OUT" | grep -c "source directory cannot be read" || true)
+	if [ "$seen" != "1" ]; then
+		fail "the unreadable source is reported once, got $seen"
+		printf '      output: %s\n' "$LS_OUT"
+	fi
+	assert_out_has "source $CASE_DIR/two: cannot be read" \
+		"check names the source it could not list"
+	assert_out_lacks "source $CASE_DIR/two: ok" "check does not call it ok"
+	assert_out_lacks "git: branch" "check reports no git state for it"
+	assert_out_has "source $CASE_DIR/one: ok" "the readable source still reads ok"
+}
+
 # A recorded link came from a source that cannot be read this run, and another
 # listed source holds a skill of the same name. That copy is then the only
 # candidate, but pointing the link at it would throw away a selection made
@@ -2703,6 +2817,38 @@ lock_with_empty_pid_record_is_kept() {
 	touch -t 200001010000 "$lock"
 	ls_run link
 	assert_rc 0 "link over an aged lock whose pid record is empty"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
+	assert_absent "$lock" "the aged lock is gone"
+}
+
+# A pid record that is not a pid names no owner. Reading the digits out of
+# "owner=1" would name process 1, which is always alive and records no start
+# time, and the lock would then be kept for as long as the machine runs. The
+# record is judged like an empty one instead: kept while it is fresh, cleared
+# once it is older than the stale age.
+malformed_pid_record_ages_out() {
+	local lock
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.agents/skills"
+	lock="$HOME/.agents/skills/.skill-links.lock"
+	mkdir "$lock"
+	printf 'owner=1\n' >"$lock/pid"
+
+	ls_run link
+	assert_rc 1 "link over a fresh lock whose pid record is malformed"
+	assert_out_has "holds the lock" "lock message"
+	assert_exists "$lock" "the fresh lock is kept"
+	assert_exists "$lock/pid" "its pid file is kept"
+	assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
+	assert_absent "$HOME/.agents/skills/.skill-links" "no manifest was written"
+
+	# The same record, once the lock is older than the stale age.
+	touch -t 200001010000 "$lock/pid"
+	touch -t 200001010000 "$lock"
+	ls_run link
+	assert_rc 0 "link over an aged lock whose pid record is malformed"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 	assert_absent "$lock" "the aged lock is gone"
 }
@@ -5660,6 +5806,49 @@ install_hooks_replaces_operand_option_command() {
 			fail "the $opt entry is untouched, so nothing is backed up, found $n"
 		fi
 	done
+}
+
+# Some shell options leave the shell with no script to run. "--version" and
+# "--help" print their text and exit, "-s" reads the commands from standard
+# input and leaves the script path as a positional parameter, and "-D",
+# "--dump-strings" and "--dump-po-strings" print the translatable strings of
+# the script instead of running it. An entry with one of them before the
+# script names this script and never runs the hook, so it is the malformed
+# command install-hooks replaces. An ordinary option that takes no operand
+# still leaves a hook run and counts as installed.
+install_hooks_replaces_terminal_option_command() {
+	local file opt n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	for opt in --version --help -s -D --dump-strings --dump-po-strings; do
+		check_malformed_hook_command "$file" "bash $opt $LS hook" \
+			"the shell option $opt leaving no script to run"
+	done
+
+	rm -f "$file" "$file".bak-*
+	write_installed_hook_settings "$file" "bash --norc $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a --norc entry"
+	assert_out_has "already runs the hook" "--norc still counts as installed"
+	assert_out_lacks "replaced" "the --norc entry is not rewritten"
+	assert_file_has "$file" "bash --norc $LS hook" \
+		"the --norc entry stands as written"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command beside --norc, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "the --norc entry is untouched, so nothing is backed up, found $n"
+	fi
 }
 
 # An explicit YAML tag names the type of a value, so the text after it is not
@@ -9669,6 +9858,7 @@ main() {
 	run_case duplicate_keeps_existing_link
 	run_case missing_source_keeps_links
 	run_case unreadable_source_keeps_links
+	run_case check_reports_unlistable_source_as_unreadable
 	run_case recorded_link_not_repointed_while_source_unavailable
 	run_case emptied_source_prunes_links
 	run_case foreign_matching_link_not_adopted
@@ -9679,6 +9869,7 @@ main() {
 	run_case fetch_stamp_symlink_refused
 	run_case unlink_leaves_foreign_fetch_file
 	run_case source_listed_twice_by_symlink_alias
+	run_case assembly_dir_refused_as_source
 	run_case case_only_rename_relinks
 	run_case case_variant_names_are_duplicates
 	run_case empty_sources_file_does_not_prune
@@ -9709,6 +9900,7 @@ main() {
 	run_case aged_lock_with_live_owner_is_kept
 	run_case lock_owner_survives_timezone_change
 	run_case lock_with_empty_pid_record_is_kept
+	run_case malformed_pid_record_ages_out
 	run_case symlinked_lock_refused
 	run_case regular_file_at_lock_path_refused
 	run_case parent_traversal_through_file_refused
@@ -9738,6 +9930,7 @@ main() {
 	run_case install_hooks_leaves_unrelated_command_alone
 	run_case install_hooks_recognizes_shell_options_before_script
 	run_case install_hooks_replaces_operand_option_command
+	run_case install_hooks_replaces_terminal_option_command
 	run_case install_hooks_replaces_sh_invocation
 	run_case install_hooks_replaces_missing_interpreter
 	run_case install_hooks_replaces_non_executable_direct_script

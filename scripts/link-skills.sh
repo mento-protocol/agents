@@ -927,6 +927,21 @@ collect_candidates() {
 			i=$((i + 1))
 			continue
 		fi
+		# A line that names the assembly itself, or an alias of it such as
+		# ~/.claude/skills, would make every link already in the assembly a
+		# candidate whose target is its own entry: the recorded link reads as
+		# unchanged, its manifest target is rewritten to the assembly, and the
+		# day the real target goes away the dangling link is called foreign,
+		# dropped from the manifest and left unmanaged with no error. The old
+		# layout kept a checkout at that path, so the line is a plausible
+		# mistake and is refused by name. SRC_OK stays 0, so nothing recorded
+		# from it is pruned. The identity test catches an alias as well as the
+		# plain spelling.
+		if same_path "$src" "$ASSEMBLY_DIR"; then
+			err "source directory is the assembly $ASSEMBLY_DIR itself; list the checkout it is built from instead (from '${SRC_RAW[$i]}' in $SOURCES_FILE)"
+			i=$((i + 1))
+			continue
+		fi
 		# A directory the glob below cannot read matches nothing and reports
 		# nothing, which would look exactly like a source that holds no skill.
 		# The permission bits and the exit status of a real listing tell the two
@@ -1498,8 +1513,20 @@ proc_start_time() {
 		sed -e 's/^ //' -e 's/ $//'
 }
 
+# The pid a lock file records, or nothing when its first field is not one. The
+# field is taken whole. Picking the digits out of it would read a record such
+# as "owner=1" as pid 1, which is always alive and has no start time recorded,
+# so the lock would be kept for as long as the machine runs however old it is.
+# A field that is not entirely decimal digits is answered with nothing, so a
+# malformed record is judged like an empty one and ages out at
+# LOCK_STALE_MINUTES. Every caller reads the empty answer as "no pid".
 lock_recorded_pid() {
-	head -n 1 "$1" 2>/dev/null | cut -f1 | tr -dc '0-9'
+	local field
+	field=$(head -n 1 "$1" 2>/dev/null | cut -f1)
+	case "$field" in
+	"" | *[!0-9]*) return 0 ;;
+	esac
+	printf '%s\n' "$field"
 }
 
 # The start time a pid file records, or nothing when it holds only a pid. A
@@ -2455,9 +2482,19 @@ cmd_check() {
 			err "source $src: missing"
 			continue
 		fi
+		# A line that names the assembly is refused by the candidate pass and
+		# produces no candidate, so check names it for what it is rather than
+		# going on to the git report of a directory nothing is linked from.
+		if same_path "$src" "$ASSEMBLY_DIR"; then
+			info "source $src: is the assembly directory itself"
+			continue
+		fi
 		# A source whose contents cannot be listed was already reported by the
-		# candidate pass, so it is named here without being counted twice.
-		if [ ! -r "$src" ] || [ ! -x "$src" ]; then
+		# candidate pass, so it is named here without being counted twice. The
+		# answer is that pass's own, not a second guess from the permission
+		# bits: a directory whose bits pass and whose listing fails is
+		# unreadable too. i has already moved on to the next source.
+		if [ "${SRC_OK[$((i - 1))]-0}" != "1" ]; then
 			info "source $src: cannot be read"
 			continue
 		fi
@@ -3030,6 +3067,23 @@ INTERPRETERS = ("bash", "sh", "dash", "zsh", "ksh", "ash", "busybox")
 # refuses it besides, because the path is no shell option name.
 OPERAND_OPTIONS = ("-o", "-O", "--rcfile", "--init-file")
 
+# Shell options under which bash never runs the script that follows them.
+# "--version" and "--help" print their text and exit. "-s" reads the commands
+# from standard input and leaves the script path as a positional parameter.
+# "-D", "--dump-strings" and "--dump-po-strings" print the translatable
+# strings of the script instead of running it. Any of them before the script
+# path means no hook ever runs and every session start prints something else,
+# so the entry names this script and does something else, which is the
+# malformed command the caller repairs.
+NEVER_RUN_OPTIONS = (
+    "--version",
+    "--help",
+    "-s",
+    "-D",
+    "--dump-strings",
+    "--dump-po-strings",
+)
+
 
 def interpreter_name(text):
     # What the first word is called in the report. A spelling with whitespace
@@ -3072,7 +3126,7 @@ def parse_command(value):
         return None
     index = 0
     interpreter = ""
-    operand_option = False
+    never_runs = False
     first = parts[0].strip(QUOTES)
     # A first word that is not the script itself runs the script only when it
     # is a shell; the script then sits one position later. Which shell it is
@@ -3090,13 +3144,23 @@ def parse_command(value):
         # words are skipped to find the script, and a lone "--" ends them:
         # the token after it is the script whatever it spells. Nothing left
         # after them is a shell reading its input from somewhere else, which
-        # is not this entry. Options with an operand are the exception. "-c"
-        # ends the entry: the next word is the command string, not a script
-        # the shell runs with its arguments. One of OPERAND_OPTIONS ends the
-        # entry only when its operand is this script path; otherwise the
-        # option and its operand are skipped together and the script is read
-        # after them. An entry that ends here is noted as malformed below
-        # rather than read as a hook run.
+        # is not this entry. Three kinds of option are the exception, and each
+        # one ends the loop: the script that follows it is not run with its
+        # arguments, so the entry is noted as malformed below rather than read
+        # as a hook run.
+        #
+        #   -c                  the next word is the command string, not a
+        #                       script the shell runs with its arguments.
+        #   NEVER_RUN_OPTIONS   the shell prints something and exits, or reads
+        #                       its commands from standard input, and the
+        #                       script is never run at all.
+        #   OPERAND_OPTIONS     only when the operand is this script path.
+        #                       Otherwise the option and its operand are
+        #                       skipped together and the script is read after
+        #                       them.
+        #
+        # Every other option, "-x" among them, is skipped alone and the script
+        # is read after it.
         while index < len(parts):
             option = parts[index].strip(QUOTES)
             if not option.startswith("-"):
@@ -3105,7 +3169,10 @@ def parse_command(value):
             if option == "--":
                 break
             if option == "-c":
-                operand_option = True
+                never_runs = True
+                break
+            if option in NEVER_RUN_OPTIONS:
+                never_runs = True
                 break
             if option in OPERAND_OPTIONS:
                 # A missing operand leaves nothing to read: the loop ends and
@@ -3114,7 +3181,7 @@ def parse_command(value):
                     break
                 operand = parts[index].strip(QUOTES)
                 if os.path.basename(operand) == marker:
-                    operand_option = True
+                    never_runs = True
                     break
                 index += 1
     if index >= len(parts):
@@ -3125,10 +3192,10 @@ def parse_command(value):
     # it or counting it as ours would break that session start.
     if os.path.basename(token) != marker:
         return None
-    # The option before the script took that path as its operand, so the words
-    # after it are not what the shell would run. Nothing about the tail can
-    # make this entry a hook run.
-    if operand_option:
+    # An option before the script took that path as its operand, or left the
+    # shell with nothing to run, so the words after it are not what the shell
+    # would run. Nothing about the tail can make this entry a hook run.
+    if never_runs:
         return token, None, interpreter, False
     tail = parse_tail(parts, index)
     if tail is None:
