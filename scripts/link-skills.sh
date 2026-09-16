@@ -67,6 +67,10 @@ ERRORS=0
 LINKED=0
 UNCHANGED=0
 PRUNED=0
+# Links this run left where they were because the source they came from, or
+# the skill directory itself, could not be read. Both passes over the assembly
+# count into it, and the count is reported once.
+KEPT=0
 
 SRC_COUNT=0
 CAND_COUNT=0
@@ -1724,7 +1728,7 @@ candidate_runtime_path() {
 }
 
 link_candidates() {
-	local i name target spelling oldspell entry cur runtime
+	local i name target spelling oldspell srcname entry cur runtime
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do
 		name=${CAND_NAME[$i]}
@@ -1763,6 +1767,26 @@ link_candidates() {
 				if same_path "$cur" "$target"; then
 					UNCHANGED=$((UNCHANGED + 1))
 					record_output "$name" "$target" "$spelling"
+					continue
+				fi
+				# The source this link came from is listed and could not
+				# be read this run, so it produced no candidate of its
+				# own. Another source holding the same name is then the
+				# only candidate, and repointing the link to it would
+				# throw away a selection made when both sources were
+				# readable: the next run sees the two copies again,
+				# refuses the name as a duplicate, and keeps whichever
+				# one this run happened to write. A permission problem
+				# must not decide that, so the link and its manifest
+				# entry stand as they are.
+				if target_source_unavailable "$cur" "$oldspell"; then
+					srcname=$oldspell
+					if [ -z "$srcname" ]; then
+						srcname=$(dirname "$cur")
+					fi
+					info "$PROG: kept $name pointing at $cur; its source $srcname cannot be read now, so $target was not linked"
+					KEPT=$((KEPT + 1))
+					record_output "$name" "$cur" "$oldspell"
 					continue
 				fi
 				# The old link goes first, and only a checked removal
@@ -1825,8 +1849,7 @@ link_candidates() {
 # more. A name refused as a duplicate, and a name whose source could not be
 # read, keep their links and their manifest entries.
 prune_manifest() {
-	local i name target spelling entry cur kept
-	kept=0
+	local i name target spelling entry cur
 	i=0
 	while [ "$i" -lt "$MAN_COUNT" ]; do
 		name=${MAN_NAME[$i]}
@@ -1849,12 +1872,12 @@ prune_manifest() {
 		# produced no candidate. That is not a skill that was deleted.
 		if unreadable_has "$name"; then
 			record_output "$name" "$target" "$spelling"
-			kept=$((kept + 1))
+			KEPT=$((KEPT + 1))
 			continue
 		fi
 		if target_source_unavailable "$target" "$spelling"; then
 			record_output "$name" "$target" "$spelling"
-			kept=$((kept + 1))
+			KEPT=$((KEPT + 1))
 			continue
 		fi
 		cur=$(link_target_abs "$entry")
@@ -1891,8 +1914,8 @@ prune_manifest() {
 			fi
 		fi
 	done
-	if [ "$kept" -gt 0 ]; then
-		info "$PROG: kept $kept link(s) whose source or skill directory could not be read"
+	if [ "$KEPT" -gt 0 ]; then
+		info "$PROG: kept $KEPT link(s) whose source or skill directory could not be read"
 	fi
 }
 
@@ -2057,6 +2080,7 @@ run_link() {
 	NEW_COUNT=0
 	REPOINT_COUNT=0
 	PRUNEBACK_COUNT=0
+	KEPT=0
 	link_candidates
 	prune_manifest
 	# The run is one transaction: either the manifest records every link this
@@ -2397,7 +2421,7 @@ check_runtime_link() {
 }
 
 cmd_check() {
-	local i name target spelling entry cur src root branch state behind fetch_note
+	local i name target spelling oldspell recorded entry cur src root branch state behind fetch_note
 
 	# No sources file is no source to work from, which is exit 2 everywhere
 	# else in this script.
@@ -2474,6 +2498,19 @@ cmd_check() {
 				info "  link ok: $name"
 				continue
 			fi
+			# 'link' keeps a recorded link whose own source is listed and
+			# cannot be read this run, so a 'link' run would not move it.
+			# That goes before the dangling test: a target inside such a
+			# source cannot be stat'ed either. The source pass reported it.
+			recorded=0
+			if entry_is_recorded_link "$name" "$entry"; then
+				recorded=1
+				oldspell=$(manifest_src_of "$name") || oldspell=""
+				if target_source_unavailable "$cur" "$oldspell"; then
+					info "  link kept: $name; its source cannot be read now"
+					continue
+				fi
+			fi
 			if [ ! -e "$entry" ]; then
 				err "link dangling: $name -> $cur"
 				continue
@@ -2481,7 +2518,7 @@ cmd_check() {
 			# A link that now names a different source is drift like any other:
 			# the assembly does not hold what the sources say it should, so it
 			# is reported as a problem and not only as a note.
-			if entry_is_recorded_link "$name" "$entry"; then
+			if [ "$recorded" = "1" ]; then
 				err "link stale: $name -> $cur, expected $target; run '$PROG link'"
 				continue
 			fi
@@ -2557,7 +2594,7 @@ cmd_check() {
 # ------------------------------------------------------------------ hook ----
 
 cmd_hook() {
-	local i src root behind branch state missing stale collided name entry target cur rem
+	local i src root behind branch state missing stale collided name entry target cur oldspell rem
 
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
@@ -2654,7 +2691,12 @@ cmd_hook() {
 				continue
 			fi
 			if entry_is_recorded_link "$name" "$entry"; then
-				stale=$((stale + 1))
+				# A recorded link whose own source cannot be read this run
+				# is one 'link' keeps, so it is not stale.
+				oldspell=$(manifest_src_of "$name") || oldspell=""
+				if ! target_source_unavailable "$cur" "$oldspell"; then
+					stale=$((stale + 1))
+				fi
 			else
 				collided=$((collided + 1))
 			fi
@@ -2975,6 +3017,14 @@ def parse_tail(parts, index):
 # which is exactly what the caller repairs.
 INTERPRETERS = ("bash", "sh", "dash", "zsh", "ksh", "ash", "busybox")
 
+# Shell options that take an operand. One of these standing before the script
+# path swallows that path as its own argument: in "bash -c <script> hook" the
+# -c reads the path as the command string, the shell runs it with no
+# arguments, and the subcommand falls back to link, so every session start
+# relinks the assembly instead of reporting on it. The entry names this script
+# and does something else, which is the malformed command the caller repairs.
+OPERAND_OPTIONS = ("-c", "-o", "-O", "--rcfile", "--init-file")
+
 
 def interpreter_name(text):
     # What the first word is called in the report. A spelling with whitespace
@@ -3017,6 +3067,7 @@ def parse_command(value):
         return None
     index = 0
     interpreter = ""
+    operand_option = False
     first = parts[0].strip(QUOTES)
     # A first word that is not the script itself runs the script only when it
     # is a shell; the script then sits one position later. Which shell it is
@@ -3034,13 +3085,18 @@ def parse_command(value):
         # words are skipped to find the script, and a lone "--" ends them:
         # the token after it is the script whatever it spells. Nothing left
         # after them is a shell reading its input from somewhere else, which
-        # is not this entry.
+        # is not this entry. An option that takes an operand is the exception:
+        # it takes the next word, which is this script path, so the entry is
+        # noted as malformed below rather than read as a hook run.
         while index < len(parts):
             option = parts[index].strip(QUOTES)
             if not option.startswith("-"):
                 break
             index += 1
             if option == "--":
+                break
+            if option in OPERAND_OPTIONS:
+                operand_option = True
                 break
     if index >= len(parts):
         return None
@@ -3050,6 +3106,11 @@ def parse_command(value):
     # it or counting it as ours would break that session start.
     if os.path.basename(token) != marker:
         return None
+    # The option before the script took that path as its operand, so the words
+    # after it are not what the shell would run. Nothing about the tail can
+    # make this entry a hook run.
+    if operand_option:
+        return token, None, interpreter, False
     tail = parse_tail(parts, index)
     if tail is None:
         return token, None, interpreter, False

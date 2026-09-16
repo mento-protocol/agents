@@ -2366,6 +2366,80 @@ unreadable_source_keeps_links() {
 	assert_out_lacks "will prune it" "check promises no prune that link will not do"
 }
 
+# A recorded link came from a source that cannot be read this run, and another
+# listed source holds a skill of the same name. That copy is then the only
+# candidate, but pointing the link at it would throw away a selection made
+# while both sources could be read: once the first source is back the two are
+# a duplicate, and the name keeps whichever copy this run wrote. A permission
+# problem must not decide that, so the link and its manifest entry stand.
+recorded_link_not_repointed_while_source_unavailable() {
+	local manifest
+	if [ "$(id -u)" = "0" ]; then
+		printf '    (skipped: running as root)\n'
+		return
+	fi
+	manifest="$HOME/.agents/skills/.skill-links"
+	mkskill "$CASE_DIR/one" alpha
+	mkdir -p "$CASE_DIR/two"
+	write_sources
+	add_source "$CASE_DIR/one"
+	add_source "$CASE_DIR/two"
+	ls_run link
+	assert_rc 0 "first link"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"alpha comes from the first source"
+
+	# The second source takes the same name while the first cannot be read.
+	mkskill "$CASE_DIR/two" alpha
+	chmod 000 "$CASE_DIR/one"
+	ls_run link
+	chmod 700 "$CASE_DIR/one"
+	assert_rc 1 "link while the recorded source cannot be read"
+	assert_out_has "kept alpha pointing at $CASE_DIR/one/alpha" \
+		"the link is kept where it pointed"
+	assert_out_has "its source $CASE_DIR/one cannot be read now" \
+		"the message names the recorded source"
+	assert_out_has "so $CASE_DIR/two/alpha was not linked" \
+		"the message names the copy that was refused"
+	assert_out_has "kept 1 link(s)" "the kept counter covers it"
+	assert_out_has "linked 0" "nothing was linked"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"alpha still points at the first source"
+	assert_file_has "$manifest" "$CASE_DIR/one/alpha" \
+		"the manifest still records the first source"
+	assert_file_lacks "$manifest" "$CASE_DIR/two/alpha" \
+		"the second source was not recorded"
+
+	# check and the hook say what link does: the link is kept, not stale, and
+	# not dangling either, though its target sits inside the unreadable source.
+	chmod 000 "$CASE_DIR/one"
+	ls_run check
+	chmod 700 "$CASE_DIR/one"
+	assert_rc 1 "check while the recorded source cannot be read"
+	assert_out_has "link kept: alpha; its source cannot be read now" \
+		"check says the link is kept"
+	assert_out_lacks "link stale" "check does not call the kept link stale"
+	assert_out_lacks "link dangling" "check does not call the kept link dangling"
+	chmod 000 "$CASE_DIR/one"
+	ls_run hook
+	chmod 700 "$CASE_DIR/one"
+	assert_rc 0 "hook while the recorded source cannot be read"
+	assert_out_lacks "stale" "the hook does not call the kept link stale"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"check and the hook leave the link alone"
+
+	# Both sources readable again: the name is a duplicate and keeps its link.
+	ls_run link
+	assert_rc 1 "link with both sources readable"
+	assert_out_has "duplicate skill name 'alpha'" "the duplicate is reported"
+	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
+		"the duplicate keeps the link it had"
+	assert_file_has "$manifest" "$CASE_DIR/one/alpha" \
+		"the manifest keeps the first source"
+	assert_file_lacks "$manifest" "$CASE_DIR/two/alpha" \
+		"the duplicate records nothing new"
+}
+
 # The manifest must be a plain file this script can replace. A directory at that
 # path is refused before the first link is created.
 directory_at_manifest_path_refused() {
@@ -5521,6 +5595,47 @@ install_hooks_recognizes_shell_options_before_script() {
 		"a shell option before a missing option operand"
 }
 
+# A shell option that takes an operand takes the script path with it. In
+# "bash -c <script> hook" the -c reads that path as the command string and the
+# shell runs it with no arguments, so the subcommand falls back to link and
+# every session start relinks the assembly instead of reporting on it. The
+# entry names this script and does something else, which is the malformed
+# command install-hooks replaces. An option that takes no operand still leaves
+# a hook run, so it counts as installed.
+install_hooks_replaces_operand_option_command() {
+	local file opt n
+	if ! have_python3; then
+		printf '    (skipped: no python3)\n'
+		return
+	fi
+	mkskill "$CASE_DIR/one" alpha
+	write_sources
+	add_source "$CASE_DIR/one"
+	mkdir -p "$HOME/.claude"
+	file="$HOME/.claude/settings.json"
+
+	for opt in -c -o -O --rcfile --init-file; do
+		check_malformed_hook_command "$file" "bash $opt $LS hook" \
+			"the shell option $opt taking the script as its operand"
+	done
+
+	rm -f "$file" "$file".bak-*
+	write_installed_hook_settings "$file" "bash -x $LS hook"
+	ls_run install-hooks
+	assert_rc 0 "install-hooks over a -x entry"
+	assert_out_has "already runs the hook" "-x still counts as installed"
+	assert_out_lacks "replaced" "the -x entry is not rewritten"
+	assert_file_has "$file" "bash -x $LS hook" "the -x entry stands as written"
+	n=$(count_in_file "$file" "link-skills.sh")
+	if [ "$n" != "1" ]; then
+		fail "expected one hook command beside -x, found $n"
+	fi
+	n=$(find "$HOME/.claude" -name 'settings.json.bak-*' | wc -l | tr -d ' ')
+	if [ "$n" != "0" ]; then
+		fail "the -x entry is untouched, so nothing is backed up, found $n"
+	fi
+}
+
 # An explicit YAML tag names the type of a value, so the text after it is not
 # the description. YAML 1.1 also reads a binary integer and a number written
 # with underscore digit groups as numbers. Quoting any of them makes it text.
@@ -7909,6 +8024,82 @@ validator_rejects_orphan_indented_line() {
 	fi
 }
 
+# A comment belongs to no value at any indentation, so a comment at column zero
+# between a key and the indented line under it does not end the search for that
+# value. Reading the comment as the end left the key empty and made the line
+# under it an orphan, which failed a frontmatter every loader reads.
+validator_accepts_top_level_comment_before_value() {
+	local out rc fits over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	# The value is read, not skipped: 1024 characters under the comment fit the
+	# description limit and 1025 do not.
+	fits=$(printf '%1024s' '' | tr ' ' 'a')
+	over=$(printf '%1025s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/comment-value/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '# explanation\n'
+		printf '  %s\n' "$fits"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-value/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-value" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a value under a top-level comment must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/comment-value-long/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description:\n'
+		printf '# explanation\n'
+		printf '  %s\n' "$over"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-value-long/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-value-long" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a 1025-character value under a top-level comment must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+
+	# The comment carries no value of its own, so a key with a comment and then
+	# the next key under it is still empty.
+	mkdir -p "$CASE_DIR/comment-empty/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'description:\n'
+		printf '# explanation\n'
+		printf 'name: noted\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/comment-empty/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/comment-empty" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "an empty key under a top-level comment must fail: $out"
+	fi
+	case "$out" in
+	*"1-1024 chars"*) ;;
+	*) fail "the failure must name the length limit: $out" ;;
+	esac
+}
+
 # A control character makes the document unreadable for every YAML loader, so
 # the frontmatter reaches no runtime. Measuring a description that holds one
 # reports a length nothing ever sees.
@@ -8264,6 +8455,65 @@ validator_rejects_symlinked_nested_skill_md() {
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		fail "a dangling link under the skill must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output: $out" ;;
+	esac
+}
+
+# The walk below the skill root resolves a symlinked directory, but the root
+# itself accepted only a real directory, so a link directly under the root hid
+# every SKILL.md behind it. A link to a directory that holds no SKILL.md is an
+# ordinary part of the skill and stays one.
+validator_rejects_symlinked_root_dir_with_skill_md() {
+	local out rc
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+	mkdir -p "$CASE_DIR/root-link/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/root-link/skills/noted/SKILL.md"
+	mkdir -p "$CASE_DIR/root-link/shared"
+	{
+		printf -- '---\n'
+		printf 'name: shared\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/root-link/shared/SKILL.md"
+	ln -s ../../shared "$CASE_DIR/root-link/skills/noted/assets"
+	out=$(node "$VALIDATOR" "$CASE_DIR/root-link" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a symlinked root directory holding a SKILL.md must fail: $out"
+	fi
+	case "$out" in
+	*"unexpected nested SKILL.md at assets/SKILL.md"*) ;;
+	*) fail "the SKILL.md behind the root link must be named: $out" ;;
+	esac
+
+	mkdir -p "$CASE_DIR/root-link-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/root-link-plain/skills/noted/SKILL.md"
+	mkdir -p "$CASE_DIR/root-link-plain/plain"
+	printf 'Detail.\n' >"$CASE_DIR/root-link-plain/plain/detail.md"
+	ln -s ../../plain "$CASE_DIR/root-link-plain/skills/noted/assets"
+	out=$(node "$VALIDATOR" "$CASE_DIR/root-link-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a symlinked root directory with no SKILL.md must validate: $out"
 	fi
 	case "$out" in
 	"validated 1 skills") ;;
@@ -9269,6 +9519,7 @@ main() {
 	run_case duplicate_keeps_existing_link
 	run_case missing_source_keeps_links
 	run_case unreadable_source_keeps_links
+	run_case recorded_link_not_repointed_while_source_unavailable
 	run_case emptied_source_prunes_links
 	run_case foreign_matching_link_not_adopted
 	run_case foreign_dangling_not_pruned
@@ -9336,6 +9587,7 @@ main() {
 	run_case install_hooks_ignores_similar_named_script
 	run_case install_hooks_leaves_unrelated_command_alone
 	run_case install_hooks_recognizes_shell_options_before_script
+	run_case install_hooks_replaces_operand_option_command
 	run_case install_hooks_replaces_sh_invocation
 	run_case install_hooks_replaces_missing_interpreter
 	run_case install_hooks_replaces_non_executable_direct_script
@@ -9372,11 +9624,13 @@ main() {
 	run_case validator_rejects_malformed_frontmatter
 	run_case validator_rejects_missing_separation_after_colon
 	run_case validator_rejects_orphan_indented_line
+	run_case validator_accepts_top_level_comment_before_value
 	run_case validator_rejects_control_character
 	run_case validator_rejects_invalid_utf8
 	run_case validator_rejects_raw_nel
 	run_case validator_rejects_nested_references_dir
 	run_case validator_rejects_symlinked_nested_skill_md
+	run_case validator_rejects_symlinked_root_dir_with_skill_md
 	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar

@@ -342,8 +342,9 @@ function isDelimiterLine(line) {
 /**
  * The number of leading spaces of a line. A tab is never indentation in YAML,
  * and a loader refuses a document that indents with one, so the count stops at
- * the first tab and the callers read such a line as a line at column zero,
- * which they report.
+ * the first tab and the callers read a line that holds content there as a
+ * line at column zero, which they report. A comment-only line is skipped
+ * before the width is read, so a tab in front of a comment is not seen.
  */
 function indentWidth(line) {
   const match = /^ */.exec(line);
@@ -695,9 +696,10 @@ function readBlockScalar(header, lines, start) {
  * lines into the value with single spaces, so they are measured with it.
  *
  * A blank line does not end the value when an indented line still follows: it
- * folds to one newline, and n blank lines fold to n newlines. Only a non-blank
- * line at column zero, such as the next "key:" line, or the end of the
- * frontmatter ends the value.
+ * folds to one newline, and n blank lines fold to n newlines. Only a line that
+ * holds content at column zero, such as the next "key:" line, or the end of
+ * the frontmatter ends the value; a comment-only line at column zero is a
+ * comment like any other and is read by the rule below.
  *
  * A comment-only line ends a scalar that already holds content: YAML reads the
  * comment as the end of the value, so an indented line after it belongs to no
@@ -725,8 +727,12 @@ function readPlainScalar(first, lines, start) {
       blanks += 1;
       continue;
     }
-    if (indentWidth(next) === 0) break;
     const part = stripInlineComment(next.trim());
+    // A comment belongs to no value at any indentation, so a comment-only line
+    // at column zero does not end the value the way a key line there does: the
+    // indented line under it still folds in. Only a line that holds content
+    // stops the scalar at column zero.
+    if (part !== "" && indentWidth(next) === 0) break;
     if (ended) {
       // The value ended at the comment above, so only another comment may
       // follow it here.
@@ -910,7 +916,8 @@ const NO_CONTINUATION = { index: -1, raw: "", text: "" };
 /**
  * The first continuation line under a key with no inline value: the first
  * following line that is indented and holds something other than a comment.
- * Blank lines are skipped and a line at column zero ends the value, exactly as
+ * Blank lines and comment-only lines are skipped at any indentation, and a
+ * line that holds content at column zero ends the value, exactly as
  * readPlainScalar folds them.
  *
  * Returns { index, raw, text }: the line's index in `lines`, its text without
@@ -923,10 +930,11 @@ function firstContinuation(lines, start) {
   for (let i = start + 1; i < lines.length; i += 1) {
     const next = lines[i].replace(/\r$/, "");
     if (next.trim() === "") continue;
-    if (indentWidth(next) === 0) return NO_CONTINUATION;
     const raw = next.trim();
     const text = stripInlineComment(raw);
-    if (text !== "") return { index: i, raw, text };
+    if (text === "") continue;
+    if (indentWidth(next) === 0) return NO_CONTINUATION;
+    return { index: i, raw, text };
   }
   return NO_CONTINUATION;
 }
@@ -1171,29 +1179,36 @@ function findNestedSkillMd(dir, baseDir, seen = new Set()) {
   const nested = [];
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isSymbolicLink()) {
-      if (entry.name === "SKILL.md") {
-        nested.push(relative(baseDir, full));
-        continue;
-      }
-      let real;
-      try {
-        if (!statSync(full).isDirectory()) continue;
-        real = realpathSync(full);
-      } catch {
-        continue;
-      }
-      if (seen.has(real)) continue;
-      seen.add(real);
-      nested.push(...findNestedSkillMd(full, baseDir, seen));
-    } else if (entry.isDirectory()) {
-      nested.push(...findNestedSkillMd(full, baseDir, seen));
-    } else if (entry.isFile() && entry.name === "SKILL.md") {
-      nested.push(relative(baseDir, full));
-    }
+    nested.push(...nestedSkillMdUnder(dir, entry, baseDir, seen));
   }
   return nested;
+}
+
+/**
+ * The nested SKILL.md paths one `entry` of `dir` holds, as paths relative to
+ * `baseDir`. The skill root and every directory under it read an entry the
+ * same way, so both walks call this.
+ */
+function nestedSkillMdUnder(dir, entry, baseDir, seen) {
+  const full = join(dir, entry.name);
+  if (entry.isSymbolicLink()) {
+    if (entry.name === "SKILL.md") return [relative(baseDir, full)];
+    let real;
+    try {
+      if (!statSync(full).isDirectory()) return [];
+      real = realpathSync(full);
+    } catch {
+      return [];
+    }
+    if (seen.has(real)) return [];
+    seen.add(real);
+    return findNestedSkillMd(full, baseDir, seen);
+  }
+  if (entry.isDirectory()) return findNestedSkillMd(full, baseDir, seen);
+  if (entry.isFile() && entry.name === "SKILL.md") {
+    return [relative(baseDir, full)];
+  }
+  return [];
 }
 
 function validateSkill(name) {
@@ -1212,16 +1227,21 @@ function validateSkill(name) {
     return;
   }
 
-  // Fail on any nested SKILL.md deeper than skills/<name>/SKILL.md.
-  const entries = readdirSync(skillDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const nested = findNestedSkillMd(join(skillDir, entry.name), skillDir);
-      for (const nestedPath of nested) {
-        problems.push(
-          `skills/${name}: unexpected nested SKILL.md at ${nestedPath}`,
-        );
-      }
+  // Fail on any nested SKILL.md deeper than skills/<name>/SKILL.md. An entry
+  // at the root is read the way the walk below it reads one, so a symlinked
+  // directory here is walked like the directory it names. The root entry
+  // named SKILL.md is the skill's own file, whatever its type, and the check
+  // above already read it, so it is the one entry the walk does not report.
+  const rootEntries = readdirSync(skillDir, { withFileTypes: true });
+  const rootSeen = new Set();
+  for (const entry of rootEntries) {
+    if (entry.name === "SKILL.md") continue;
+    if (!entry.isSymbolicLink() && !entry.isDirectory()) continue;
+    const nested = nestedSkillMdUnder(skillDir, entry, skillDir, rootSeen);
+    for (const nestedPath of nested) {
+      problems.push(
+        `skills/${name}: unexpected nested SKILL.md at ${nestedPath}`,
+      );
     }
   }
 
