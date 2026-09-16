@@ -3017,13 +3017,18 @@ def parse_tail(parts, index):
 # which is exactly what the caller repairs.
 INTERPRETERS = ("bash", "sh", "dash", "zsh", "ksh", "ash", "busybox")
 
-# Shell options that take an operand. One of these standing before the script
-# path swallows that path as its own argument: in "bash -c <script> hook" the
-# -c reads the path as the command string, the shell runs it with no
-# arguments, and the subcommand falls back to link, so every session start
-# relinks the assembly instead of reporting on it. The entry names this script
-# and does something else, which is the malformed command the caller repairs.
-OPERAND_OPTIONS = ("-c", "-o", "-O", "--rcfile", "--init-file")
+# Shell options that take an operand and then go on to the script. In "bash
+# -O extglob <script> hook" the -O takes extglob and the shell still runs the
+# script, so the option and its operand are both skipped and the script is
+# found after them. "-c" is not listed here because it does not go on to the
+# script at all: it reads its operand as the command string, so "bash -c
+# <script> hook" runs the path with no arguments, the subcommand falls back to
+# link, and every session start relinks the assembly instead of reporting on
+# it. That entry names this script and does something else, which is the
+# malformed command the caller repairs. An option listed here that takes the
+# script path itself as its operand is malformed the same way, and bash
+# refuses it besides, because the path is no shell option name.
+OPERAND_OPTIONS = ("-o", "-O", "--rcfile", "--init-file")
 
 
 def interpreter_name(text):
@@ -3085,9 +3090,13 @@ def parse_command(value):
         # words are skipped to find the script, and a lone "--" ends them:
         # the token after it is the script whatever it spells. Nothing left
         # after them is a shell reading its input from somewhere else, which
-        # is not this entry. An option that takes an operand is the exception:
-        # it takes the next word, which is this script path, so the entry is
-        # noted as malformed below rather than read as a hook run.
+        # is not this entry. Options with an operand are the exception. "-c"
+        # ends the entry: the next word is the command string, not a script
+        # the shell runs with its arguments. One of OPERAND_OPTIONS ends the
+        # entry only when its operand is this script path; otherwise the
+        # option and its operand are skipped together and the script is read
+        # after them. An entry that ends here is noted as malformed below
+        # rather than read as a hook run.
         while index < len(parts):
             option = parts[index].strip(QUOTES)
             if not option.startswith("-"):
@@ -3095,9 +3104,19 @@ def parse_command(value):
             index += 1
             if option == "--":
                 break
-            if option in OPERAND_OPTIONS:
+            if option == "-c":
                 operand_option = True
                 break
+            if option in OPERAND_OPTIONS:
+                # A missing operand leaves nothing to read: the loop ends and
+                # the entry is not ours.
+                if index >= len(parts):
+                    break
+                operand = parts[index].strip(QUOTES)
+                if os.path.basename(operand) == marker:
+                    operand_option = True
+                    break
+                index += 1
     if index >= len(parts):
         return None
     token = parts[index].strip(QUOTES)

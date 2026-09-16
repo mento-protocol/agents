@@ -251,12 +251,51 @@ function isNonStringScalar(raw) {
  * Remove an inline YAML comment from one line of an unquoted scalar: a "#"
  * that starts the line, or a "#" preceded by a space or a tab. Those are the
  * only two characters YAML starts a comment after, so a "#" after any other
- * whitespace, such as U+00A0, is text and stays in the value. A quoted value
- * never reaches this function, because there the character is part of the text.
+ * whitespace, such as U+00A0, is text and stays in the value. A whole quoted
+ * value never reaches this function, because there the character is part of
+ * the text, and a quoted member of a flow collection goes to stripFlowComment
+ * for the same reason. A quote inside a plain scalar is text, so this function
+ * cuts at a " #" after one.
  */
 function stripInlineComment(value) {
   if (value.startsWith("#")) return "";
   return value.replace(/[ \t]+#.*$/, "").trim();
+}
+
+/**
+ * Remove an inline YAML comment from one line of a flow collection: a quote
+ * aware sibling of stripInlineComment. A "#" that starts the line empties it;
+ * otherwise the cut falls at the first "#" outside quotes that follows a space
+ * or a tab, so a "#" inside a quoted member stays in the value the way YAML
+ * reads it. The quote tracking is the one flowCollectionCloses uses: a "\\"
+ * escapes the next character inside double quotes, and a doubled quote stands
+ * for one quote inside single quotes. Quote state does not carry across lines,
+ * so a quoted member that spans lines is out of scope.
+ */
+function stripFlowComment(value) {
+  if (value.startsWith("#")) return "";
+  let quote = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (quote === '"') {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') quote = "";
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'" && value[i + 1] === "'") i += 1;
+      else if (ch === "'") quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "#" && (value[i - 1] === " " || value[i - 1] === "\t")) {
+      return value.slice(0, i).trim();
+    }
+  }
+  return value.trim();
 }
 
 /**
@@ -710,13 +749,20 @@ function readBlockScalar(header, lines, start) {
  * the two entries it spells, so the comment line is skipped and the folding
  * goes on.
  *
+ * A value that opens a flow collection, on the key's line or on the first
+ * content line under an empty key, has its comments cut by stripFlowComment
+ * while the collection is still open, so a "#" inside a quoted member stays in
+ * the value. Every other line keeps stripInlineComment, because a quote inside
+ * a plain scalar is text and a " #" after it is a comment.
+ *
  * Returns { value, end, invalid }, where `end` is the index of the last line
  * consumed and `invalid` holds the index of every line that follows the
  * comment that ended the value. Trailing blank lines are never consumed, so a
  * blank line before a column-zero key leaves that key for the caller to read.
  */
 function readPlainScalar(first, lines, start) {
-  let value = stripInlineComment(first);
+  let flow = first[0] === "[" || first[0] === "{";
+  let value = flow ? stripFlowComment(first) : stripInlineComment(first);
   let end = start;
   let blanks = 0;
   let ended = false;
@@ -727,7 +773,12 @@ function readPlainScalar(first, lines, start) {
       blanks += 1;
       continue;
     }
-    const part = stripInlineComment(next.trim());
+    const trimmed = next.trim();
+    // A key with no inline value opens its collection on the first content
+    // line under it instead, and that line is read the same way.
+    if (value === "" && !flow) flow = trimmed[0] === "[" || trimmed[0] === "{";
+    const open = flow && (value === "" || opensOpenFlowCollection(value));
+    const part = open ? stripFlowComment(trimmed) : stripInlineComment(trimmed);
     // A comment belongs to no value at any indentation, so a comment-only line
     // at column zero does not end the value the way a key line there does: the
     // indented line under it still folds in. Only a line that holds content
@@ -931,7 +982,10 @@ function firstContinuation(lines, start) {
     const next = lines[i].replace(/\r$/, "");
     if (next.trim() === "") continue;
     const raw = next.trim();
-    const text = stripInlineComment(raw);
+    const text =
+      raw[0] === "[" || raw[0] === "{"
+        ? stripFlowComment(raw)
+        : stripInlineComment(raw);
     if (text === "") continue;
     if (indentWidth(next) === 0) return NO_CONTINUATION;
     return { index: i, raw, text };

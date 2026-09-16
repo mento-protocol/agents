@@ -5595,13 +5595,14 @@ install_hooks_recognizes_shell_options_before_script() {
 		"a shell option before a missing option operand"
 }
 
-# A shell option that takes an operand takes the script path with it. In
-# "bash -c <script> hook" the -c reads that path as the command string and the
-# shell runs it with no arguments, so the subcommand falls back to link and
-# every session start relinks the assembly instead of reporting on it. The
-# entry names this script and does something else, which is the malformed
-# command install-hooks replaces. An option that takes no operand still leaves
-# a hook run, so it counts as installed.
+# A shell option that reads the script path as its operand takes that path
+# with it. In "bash -c <script> hook" the -c reads the path as the command
+# string and the shell runs it with no arguments, so the subcommand falls back
+# to link and every session start relinks the assembly instead of reporting on
+# it. The entry names this script and does something else, which is the
+# malformed command install-hooks replaces. An option that takes no operand
+# still leaves a hook run, and so does one that takes its own operand and then
+# goes on to the script, so both count as installed.
 install_hooks_replaces_operand_option_command() {
 	local file opt n
 	if ! have_python3; then
@@ -5634,6 +5635,31 @@ install_hooks_replaces_operand_option_command() {
 	if [ "$n" != "0" ]; then
 		fail "the -x entry is untouched, so nothing is backed up, found $n"
 	fi
+
+	# An option that takes its own operand and then goes on to the script
+	# runs the same hook: in "bash -O extglob <script> hook" the -O takes
+	# extglob, and the script runs with "hook". Those entries stand as they
+	# are written.
+	for opt in "-O extglob" "-o errexit"; do
+		rm -f "$file" "$file".bak-*
+		write_installed_hook_settings "$file" "bash $opt $LS hook"
+		ls_run install-hooks
+		assert_rc 0 "install-hooks over a $opt entry"
+		assert_out_has "already runs the hook" \
+			"$opt with its own operand counts as installed"
+		assert_out_lacks "replaced" "the $opt entry is not rewritten"
+		assert_file_has "$file" "bash $opt $LS hook" \
+			"the $opt entry stands as written"
+		n=$(count_in_file "$file" "link-skills.sh")
+		if [ "$n" != "1" ]; then
+			fail "expected one hook command beside $opt, found $n"
+		fi
+		n=$(find "$HOME/.claude" -name 'settings.json.bak-*' |
+			wc -l | tr -d ' ')
+		if [ "$n" != "0" ]; then
+			fail "the $opt entry is untouched, so nothing is backed up, found $n"
+		fi
+	done
 }
 
 # An explicit YAML tag names the type of a value, so the text after it is not
@@ -8100,6 +8126,130 @@ validator_accepts_top_level_comment_before_value() {
 	esac
 }
 
+# YAML reads a "#" inside a quoted member of a flow collection as text, so the
+# collection closes and the value is the one it spells. Cutting the line at the
+# first " #" left an unterminated quote and made the collection look like one
+# that never closes, which failed a frontmatter every loader reads. A quote
+# inside a plain scalar is text, so a " #" after one is still a comment there.
+validator_accepts_hash_inside_quoted_flow_member() {
+	local out rc form n over
+	if ! have_node; then
+		printf '    (skipped: no node)\n'
+		return
+	fi
+
+	# A flow collection is refused as a non-string on the string fields, so the
+	# fixtures sit under an optional key.
+	n=0
+	for form in '["foo # bar"]' '{a: "x # y"}' "['it''s # here']" '["foo # bar"] # trailing comment'; do
+		n=$((n + 1))
+		mkdir -p "$CASE_DIR/flow-hash-good-$n/skills/noted"
+		{
+			printf -- '---\n'
+			printf 'name: noted\n'
+			printf 'description: a description\n'
+			printf 'metadata: %s\n' "$form"
+			printf -- '---\n\n'
+			printf 'Body.\n'
+		} >"$CASE_DIR/flow-hash-good-$n/skills/noted/SKILL.md"
+		out=$(node "$VALIDATOR" "$CASE_DIR/flow-hash-good-$n" 2>&1)
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			fail "flow member '$form' must validate: $out"
+			continue
+		fi
+		case "$out" in
+		"validated 1 skills") ;;
+		*) fail "unexpected validator output for '$form': $out" ;;
+		esac
+	done
+
+	# The hash sits outside the quotes, so YAML reads it as a comment and the
+	# collection never closes.
+	mkdir -p "$CASE_DIR/flow-hash-bad/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata: ["foo" # bar]\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-hash-bad/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-hash-bad" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a hash outside the quotes must fail: $out"
+	fi
+	case "$out" in
+	'skills/noted: frontmatter line 4 is not valid YAML') ;;
+	*) fail "a hash outside the quotes must be reported by its line: $out" ;;
+	esac
+
+	# The collection may open on the line under an empty key instead, and
+	# that line is read by the same rule: a quoted hash is text, and one
+	# outside the quotes is a comment that leaves the collection open.
+	mkdir -p "$CASE_DIR/flow-hash-below/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  ["foo # bar", "baz"]\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-hash-below/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-hash-below" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a quoted hash in a collection under an empty key must validate: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output for the collection under an empty key: $out" ;;
+	esac
+	mkdir -p "$CASE_DIR/flow-hash-below-bad/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: a description\n'
+		printf 'metadata:\n'
+		printf '  ["foo" # bar]\n'
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-hash-below-bad/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-hash-below-bad" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "a hash outside the quotes under an empty key must fail: $out"
+	fi
+	case "$out" in
+	*'is not valid YAML'*) ;;
+	*) fail "a hash outside the quotes under an empty key must be reported as invalid YAML: $out" ;;
+	esac
+
+	# A plain scalar is not a flow collection: the quote is text and the " #"
+	# after it still starts a comment. The value is "say \"hi", so the 1025
+	# characters behind the hash are cut and the length limit is met.
+	over=$(printf '%1025s' '' | tr ' ' 'a')
+	mkdir -p "$CASE_DIR/flow-hash-plain/skills/noted"
+	{
+		printf -- '---\n'
+		printf 'name: noted\n'
+		printf 'description: say "hi # %s"\n' "$over"
+		printf -- '---\n\n'
+		printf 'Body.\n'
+	} >"$CASE_DIR/flow-hash-plain/skills/noted/SKILL.md"
+	out=$(node "$VALIDATOR" "$CASE_DIR/flow-hash-plain" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "a comment after a quote in a plain scalar must be cut: $out"
+	fi
+	case "$out" in
+	"validated 1 skills") ;;
+	*) fail "unexpected validator output for the plain scalar: $out" ;;
+	esac
+}
+
 # A control character makes the document unreadable for every YAML loader, so
 # the frontmatter reaches no runtime. Measuring a description that holds one
 # reports a length nothing ever sees.
@@ -9625,6 +9775,7 @@ main() {
 	run_case validator_rejects_missing_separation_after_colon
 	run_case validator_rejects_orphan_indented_line
 	run_case validator_accepts_top_level_comment_before_value
+	run_case validator_accepts_hash_inside_quoted_flow_member
 	run_case validator_rejects_control_character
 	run_case validator_rejects_invalid_utf8
 	run_case validator_rejects_raw_nel
