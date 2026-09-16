@@ -30,6 +30,7 @@ import {
   takeoverClaim,
 } from "../src/claims/transitions.mjs";
 import { verifyClaim } from "../src/claims/verify.mjs";
+import { statusForError } from "../src/cli/exit-codes.mjs";
 import {
   REPOSITORY,
   buildTestLock,
@@ -384,7 +385,11 @@ test("a claim written by one profile is not readable as the other's mutex", asyn
   ];
   for (const [label, writer, reader, noun] of cases) {
     writer.server.refs.delete(refName);
-    seedRef(writer.server, refName, buildTestLock(writer.ctx, NUMBER));
+    const seeded = seedRef(
+      writer.server,
+      refName,
+      buildTestLock(writer.ctx, NUMBER),
+    );
     await assert.rejects(
       () => readClaim(reader.ctx, NUMBER),
       (error) => {
@@ -405,28 +410,42 @@ test("a claim written by one profile is not readable as the other's mutex", asyn
       },
       label,
     );
-    // The same ref refuses an acquire, which is the call a sweep actually
-    // makes. `initializeClaimRef` lets the parse refusal through as it stands,
-    // so there the error carries `refInvalid` directly rather than the
-    // re-raised class, and nothing is written either way.
-    const writesBefore = writer.server.calls.cas.length;
-    await assert.rejects(
-      () => acquireClaim(reader.ctx, NUMBER, {}),
-      (error) => {
-        assert.equal(error.refInvalid, true);
+    // The same ref refuses the two calls a sweep actually makes, and refuses
+    // them the same way `readClaim` does. A raw read inside `initializeClaimRef`
+    // and `takeoverClaim` let the parse refusal out as a bare
+    // `ClaimConflictError`, whose `CLAIM_CONFLICT` code the exit table did not
+    // know: acquire and takeover answered exit 1 `usage` on the very reference
+    // `read` and `renew` answered exit 16 on.
+    const acquires = [
+      ["acquire", () => acquireClaim(reader.ctx, NUMBER, {})],
+      [
+        "takeover",
+        () => takeoverClaim(reader.ctx, NUMBER, { supersedes: seeded.oid }),
+      ],
+    ];
+    for (const [action, run] of acquires) {
+      const writesBefore = writer.server.calls.cas.length;
+      await assert.rejects(run, (error) => {
+        assert.ok(
+          error instanceof ClaimRefInvalidError,
+          `${label} (${action}): expected ClaimRefInvalidError, got ${error?.name}`,
+        );
+        assert.equal(error.claimCode, "CLAIM_REF_INVALID");
+        assert.equal(error.cause?.refInvalid, true);
+        assert.equal(exitCodeForError(error), 16);
+        assert.equal(statusForError(error), "stale");
         assert.match(
           error.message,
           new RegExp(`is not a valid mutex state for this ${noun}`, "u"),
         );
         return true;
-      },
-      `${label} (acquire)`,
-    );
-    assert.equal(
-      writer.server.calls.cas.length,
-      writesBefore,
-      `${label}: a wedged ref is never written to`,
-    );
+      });
+      assert.equal(
+        writer.server.calls.cas.length,
+        writesBefore,
+        `${label} (${action}): a wedged ref is never written to`,
+      );
+    }
   }
 });
 

@@ -55,10 +55,17 @@ export const STATUS_EXIT_CODES = Object.freeze({
   permission: 21,
 });
 
-/** Canonical claim code to the status that names it. */
+/**
+ * Canonical claim code to the status that names it.
+ *
+ * `CLAIM_CONFLICT` is here for the same reason it is in `CLAIM_EXIT_CODES`: a
+ * bare `ClaimConflictError` that named no subclass code must not fall through
+ * to `usage`, whose exit code is 2 while the fall-through exit code is 1.
+ */
 export const CLAIM_CODE_STATUSES = Object.freeze({
   CLAIM_USAGE: "usage",
   CLAIM_CONFIG: "config",
+  CLAIM_CONFLICT: "contended",
   CLAIM_CONTENDED: "contended",
   CLAIM_ALREADY_HELD: "already-held",
   CLAIM_NOT_EXPIRED: "not-eligible",

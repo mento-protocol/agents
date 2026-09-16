@@ -26,15 +26,19 @@ import { GUARD_SLOT_SCHEMA, createStateStore } from "../src/cli/state-file.mjs";
 import { claimProfile } from "../src/claims/profile.mjs";
 import {
   CLAIM_CODE_STATUSES,
+  COARSE_EXIT_RULE,
+  EXIT_ADVICE,
   STATUS_EXIT_CODES,
   exitCodeForCliError,
   statusForError,
 } from "../src/cli/exit-codes.mjs";
 import { runCli } from "../src/cli/main.mjs";
 import {
+  CLAIM_EXIT_CODES,
   ClaimAlreadyHeldError,
   ClaimClockSkewError,
   ClaimConfigError,
+  ClaimConflictError,
   ClaimContendedError,
   ClaimExpiredError,
   ClaimFamilyAbortedError,
@@ -1250,6 +1254,27 @@ test("mutating commands refuse a missing or non-40-lowercase-hex token with exit
   assert.equal(missing.server.calls.read.length, 0);
 });
 
+test("the advice rows consuming skills copy are pinned, word for word", () => {
+  // README.md's footnote states that these three strings are copied verbatim
+  // into the dependabot-prep skill, its playbook and its prompt, and that the
+  // issue profile inherits the pull-request wording on purpose. Rewording a
+  // row here silently invalidates every copy, so the copies are the test.
+  assert.equal(EXIT_ADVICE[10], "skip this pull request (or family) this run");
+  assert.equal(
+    EXIT_ADVICE[13],
+    "stop publishing this PR and treat work in flight as forfeit",
+  );
+  assert.equal(
+    COARSE_EXIT_RULE,
+    "0 proceed; 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.",
+  );
+  // Exit 13's long wording is the one the coarse rule repeats (AMENDMENTS §O).
+  assert.ok(
+    COARSE_EXIT_RULE.includes(EXIT_ADVICE[13]),
+    "the coarse rule carries the exit-13 advice verbatim",
+  );
+});
+
 test("the exit-code table matches the status table for every status and error class", async () => {
   // Every claim code names a status, and every status names an exit code.
   for (const [claimCode, status] of Object.entries(CLAIM_CODE_STATUSES)) {
@@ -1258,9 +1283,31 @@ test("the exit-code table matches the status table for every status and error cl
       `${claimCode} names an unknown status ${status}`,
     );
   }
+  // Both directions, because a code in one table and not the other is how an
+  // error falls through to exit 1 with status `usage` — an exit code that
+  // appears in no row of this table, beside a status whose row says 2.
+  // `CLAIM_CONFLICT`, the base class's own code, did exactly that.
+  for (const [claimCode, exitCode] of Object.entries(CLAIM_EXIT_CODES)) {
+    const status = CLAIM_CODE_STATUSES[claimCode];
+    assert.ok(status, `${claimCode} has no status row`);
+    assert.equal(
+      STATUS_EXIT_CODES[status],
+      exitCode,
+      `${claimCode} exits ${exitCode} but names status ${status}`,
+    );
+  }
+  for (const claimCode of Object.keys(CLAIM_CODE_STATUSES)) {
+    if (claimCode === "CLAIM_USAGE") continue; // raised by the CLI, not the table
+    assert.ok(
+      Object.hasOwn(CLAIM_EXIT_CODES, claimCode),
+      `${claimCode} has no exit-code row`,
+    );
+  }
   const classes = [
     [new ClaimUsageError("usage"), 2, "usage"],
     [new ClaimConfigError("config"), 3, "config"],
+    // The base class, with no subclass code of its own.
+    [new ClaimConflictError("conflict"), 10, "contended"],
     [new ClaimContendedError("contended"), 10, "contended"],
     [new ClaimAlreadyHeldError("held"), 10, "already-held"],
     [new ClaimNotExpiredError("live"), 10, "not-eligible"],

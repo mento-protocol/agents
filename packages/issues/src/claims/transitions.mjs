@@ -934,7 +934,9 @@ export async function takeoverClaim(ctx, number, input = {}, overrides = {}) {
   const owner = prepareAcquireOwner(ctx, number, overrides);
   const metadata = input.metadata ?? {};
 
-  const current = await operations.readClaimRef(ctx, refName, scope);
+  // Wrapped like every other head read: a payload this profile cannot parse
+  // is `CLAIM_REF_INVALID` and exit 16, not a bare conflict at exit 1.
+  const current = await readHead(ctx, operations, refName, scope);
   if (!current) {
     throwClassified(
       classifyObservedHead(null, {

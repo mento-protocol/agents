@@ -247,6 +247,37 @@ export function defaultOperations() {
 }
 
 /**
+ * Read one claim ref, raising an unparsable payload as `CLAIM_REF_INVALID`.
+ *
+ * `parseClaimPayload` refuses a payload this profile cannot read with a
+ * conflict carrying `refInvalid`, whose own `claimCode` is the base
+ * `CLAIM_CONFLICT`. Every read path has to re-raise it as
+ * `ClaimRefInvalidError` — exit 16, "stop and report to the operator" — so
+ * one wedged reference answers the same way whichever command found it.
+ *
+ * @param {object} ctx claim context.
+ * @param {object} operations the operations bag.
+ * @param {string} refName fully qualified ref.
+ * @param {object} scope canonical scope.
+ * @returns {Promise<object|null>} the observed head, or null when absent.
+ * @throws {ClaimRefInvalidError} for a payload this profile cannot parse.
+ */
+async function readClaimRefOrRaiseInvalid(ctx, operations, refName, scope) {
+  try {
+    return await operations.readClaimRef(ctx, refName, scope);
+  } catch (err) {
+    if (err?.refInvalid === true) {
+      throw new ClaimRefInvalidError(err.message, {
+        code: err.code,
+        details: err.details,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
  * Read the claim ref without bootstrapping or mutating anything.
  *
  * @param {object} ctx claim context.
@@ -260,19 +291,12 @@ export async function readClaim(ctx, number, overrides = {}) {
     : operationsFor(overrides);
   const scope = ctx.profile.canonicalScope(ctx.options, number);
   const refName = ctx.profile.refName(scope);
-  let observed;
-  try {
-    observed = await operations.readClaimRef(ctx, refName, scope);
-  } catch (err) {
-    if (err?.refInvalid === true) {
-      throw new ClaimRefInvalidError(err.message, {
-        code: err.code,
-        details: err.details,
-        cause: err,
-      });
-    }
-    throw err;
-  }
+  const observed = await readClaimRefOrRaiseInvalid(
+    ctx,
+    operations,
+    refName,
+    scope,
+  );
   if (!observed) return null;
   return {
     refName,
@@ -486,6 +510,13 @@ export async function listClaims(ctx, options = {}, overrides = {}) {
  * unclassified branch and print exit 2, "fix the command", which names a fix
  * no caller can make.
  *
+ * The opening read is wrapped exactly as `readClaim` and `readHead` wrap
+ * theirs. A payload this profile cannot parse — the other profile's LOCK on a
+ * ref an overlapping namespace put it on — raises a conflict carrying
+ * `refInvalid`, and a raw read let it out of `claim` and `takeover` as a bare
+ * `ClaimConflictError`. Those two commands then answered exit 1 `usage` where
+ * `read` and `renew` answered exit 16 `stale` on the same reference.
+ *
  * @param {object} ctx claim context.
  * @param {object} scope canonical scope.
  * @param {string} refName fully qualified ref.
@@ -502,7 +533,12 @@ export async function initializeClaimRef(
   operationId,
   timestamp,
 ) {
-  let observed = await operations.readClaimRef(ctx, refName, scope);
+  let observed = await readClaimRefOrRaiseInvalid(
+    ctx,
+    operations,
+    refName,
+    scope,
+  );
   if (observed) return observed;
   const base = await operations.readDefaultBranchCommit(ctx);
   const payload = buildClaimPayload({
