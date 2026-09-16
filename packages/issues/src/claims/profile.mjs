@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 
-import { describeRedactedValue } from "../gh/redact.mjs";
+import { containsSecret, describeRedactedValue } from "../gh/redact.mjs";
 import { isClaimNumber } from "../shared/claim-number.mjs";
 import { describeGrammarWord, suggestion } from "../shared/vocabulary.mjs";
 import { assertValidRefName } from "../shared/ref-name.mjs";
@@ -87,6 +87,27 @@ function isObjectIdOrNull(value) {
     value === null ||
     (typeof value === "string" && OBJECT_ID_PATTERN.test(value))
   );
+}
+
+/**
+ * A branch name this package may persist, or null.
+ *
+ * `branch` is the one free-text metadata key a numbered profile records, and
+ * free text is where a credential arrives. The CLI already refuses one in
+ * `collectSetFlags`, but `acquireClaim`, `takeoverClaim` and `renewClaim` are
+ * exported: a library caller reaches the payload without passing through the
+ * flag grammar, and a `ghp_…` accepted here is serialized into a commit on the
+ * claim ref, printed in every document built from that payload, and cannot be
+ * removed afterwards. The validator is the one boundary every write and every
+ * read crosses, so the credential check lives here rather than in one caller.
+ *
+ * @param {unknown} value the supplied branch.
+ * @returns {boolean}
+ */
+function isBranchNameOrNull(value) {
+  if (value === null) return true;
+  if (!isSafeSingleLineText(value, SINGLE_LINE_TEXT_MAX_LENGTH)) return false;
+  return !containsSecret(value);
 }
 
 function isGithubUrlOrNull(value) {
@@ -266,9 +287,7 @@ const ISSUE_PROFILE_SPEC = Object.freeze({
   itemKind: "issue",
   metadataKeys: ISSUE_METADATA_KEYS,
   metadataValidators: Object.freeze({
-    branch: (value) =>
-      value === null ||
-      isSafeSingleLineText(value, SINGLE_LINE_TEXT_MAX_LENGTH),
+    branch: isBranchNameOrNull,
     pullRequest: isDecimalNumberOrNull,
     lastCommentUrl: isGithubUrlOrNull,
   }),

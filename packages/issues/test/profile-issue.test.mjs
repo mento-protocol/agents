@@ -218,6 +218,84 @@ test("the issue profile validates the metadata a sweep must not redo", () => {
   }
 });
 
+test("a branch that looks like a credential is refused before any ref write", async () => {
+  // `collectSetFlags` refuses one at the flag grammar, but `acquireClaim`,
+  // `renewClaim` and `takeoverClaim` are exported: a library caller reaches
+  // the payload without a command line. A token accepted here is serialized
+  // into a commit on the claim ref, printed in every document built from that
+  // payload, and impossible to take back — so all three transitions refuse it
+  // before they write, and the refusal describes the value instead of echoing
+  // it.
+  const TOKEN = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const refusal = (error, label) => {
+    assert.equal(error.claimCode, "CLAIM_CONFIG");
+    assert.match(error.message, /Metadata key branch has an invalid value/u);
+    assert.match(error.message, /\[redacted-github-token\] \(44 characters\)/u);
+    assert.equal(
+      error.message.includes(TOKEN),
+      false,
+      `the ${label} refusal must not echo the credential`,
+    );
+    return true;
+  };
+
+  const acquiring = createIssueContext();
+  await assert.rejects(
+    () => acquireClaim(acquiring.ctx, ISSUE, { branch: TOKEN }),
+    (error) => refusal(error, "acquire"),
+  );
+  assert.equal(
+    acquiring.server.calls.commit.length,
+    0,
+    "not even the bootstrap UNLOCK is written",
+  );
+  assert.equal(acquiring.server.calls.cas.length, 0);
+
+  const { ctx, server } = createIssueContext({ uuidPrefix: "renew" });
+  const lease = await acquireClaim(ctx, ISSUE, { branch: "sweep/4312" });
+  const held = server.calls.commit.length;
+  await assert.rejects(
+    () => renewClaim(lease, { set: { branch: TOKEN } }),
+    (error) => refusal(error, "renew"),
+  );
+  assert.equal(
+    server.calls.commit.length,
+    held,
+    "a refused renew writes nothing",
+  );
+  assert.equal(lease.payload.branch, "sweep/4312", "the lease is untouched");
+
+  const taking = createIssueContext({ uuidPrefix: "taker" });
+  const refName = claimRefName(taking.ctx, ISSUE);
+  seedRef(
+    taking.server,
+    refName,
+    buildTestLock(taking.ctx, ISSUE, { ownerRunId: "peer-run-1" }),
+  );
+  // Past `expiresAt` plus grace, so only the metadata stands in the way.
+  taking.clock.advance(40 * 60_000);
+  const seeded = taking.server.calls.commit.length;
+  const supersedes = taking.server.getRefOid(refName);
+  await assert.rejects(
+    () =>
+      takeoverClaim(taking.ctx, ISSUE, {
+        supersedes,
+        metadata: { branch: TOKEN },
+      }),
+    (error) => refusal(error, "takeover"),
+  );
+  assert.equal(
+    taking.server.calls.commit.length,
+    seeded,
+    "a refused takeover writes nothing",
+  );
+  assert.equal(
+    taking.server.getRefOid(refName),
+    supersedes,
+    "the peer's LOCK is still the head",
+  );
+});
+
 test("an issue claim runs the whole lifecycle through the shared engine", async () => {
   const { ctx, server, clock } = createIssueContext();
   const refName = claimRefName(ctx, ISSUE);

@@ -230,7 +230,11 @@ re-creating a branch, re-opening a pull request or re-posting a comment the
 previous owner already handled.
 
 `pullRequest` is a **decimal string**, not a number, because every `--set`
-value arrives as a string; the literal `null` writes a null.
+value arrives as a string; the literal `null` writes a null. `branch` is free
+single-line text of at most 120 characters and never a credential: the profile
+itself refuses a value that looks like a GitHub token, so `acquireClaim`,
+`renewClaim` and `takeoverClaim` refuse one before the first write rather than
+only the `--set` grammar refusing it.
 
 **`list --stale`** selects LOCKs whose lease has expired and reports the
 claimed item's state — the abandoned-claim-on-a-merged-PR case. Under the pr
