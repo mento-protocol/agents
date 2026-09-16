@@ -54,7 +54,7 @@ workspace dependency runs a package's CLI through `dlx`, naming the binary
 after `dlx` and the pinned spec through `--package`:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.1.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
   dlx mento-issues <command> [...args]
 ```
 
