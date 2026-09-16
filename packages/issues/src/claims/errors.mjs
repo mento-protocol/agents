@@ -7,19 +7,9 @@
  * vocabulary the CLI exit table reads.
  */
 
-/**
- * Canonical claim code to process exit code (PLAN §2.19).
- *
- * `CLAIM_CONFLICT` is the base class's own code, raised only when a subclass
- * did not name a more exact one. It has a row so that it cannot fall through
- * the table: a code the table does not know exits 1 with status `usage`, which
- * is a document that contradicts itself (`STATUS_EXIT_CODES.usage` is 2) and
- * tells a caller to fix a command line that was never wrong. A bare conflict
- * is a lost race, so it reads as one.
- */
+/** Canonical claim code to process exit code (PLAN §2.19). */
 export const CLAIM_EXIT_CODES = Object.freeze({
   CLAIM_CONFIG: 3,
-  CLAIM_CONFLICT: 10,
   CLAIM_CONTENDED: 10,
   CLAIM_ALREADY_HELD: 10,
   CLAIM_NOT_EXPIRED: 10,

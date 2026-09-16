@@ -38,7 +38,6 @@ import {
   ClaimAlreadyHeldError,
   ClaimClockSkewError,
   ClaimConfigError,
-  ClaimConflictError,
   ClaimContendedError,
   ClaimExpiredError,
   ClaimFamilyAbortedError,
@@ -1286,7 +1285,11 @@ test("the exit-code table matches the status table for every status and error cl
   // Both directions, because a code in one table and not the other is how an
   // error falls through to exit 1 with status `usage` — an exit code that
   // appears in no row of this table, beside a status whose row says 2.
-  // `CLAIM_CONFLICT`, the base class's own code, did exactly that.
+  // `CLAIM_CONFLICT`, the base class's own code, is in neither table and so is
+  // walked by neither loop. That is deliberate and unchanged: giving it a row
+  // moves a lost compare-and-swap response under the pull-request profile from
+  // exit 1 to exit 10, which is a contract change for the skills that already
+  // read these codes, not something this package may do in passing.
   for (const [claimCode, exitCode] of Object.entries(CLAIM_EXIT_CODES)) {
     const status = CLAIM_CODE_STATUSES[claimCode];
     assert.ok(status, `${claimCode} has no status row`);
@@ -1306,8 +1309,6 @@ test("the exit-code table matches the status table for every status and error cl
   const classes = [
     [new ClaimUsageError("usage"), 2, "usage"],
     [new ClaimConfigError("config"), 3, "config"],
-    // The base class, with no subclass code of its own.
-    [new ClaimConflictError("conflict"), 10, "contended"],
     [new ClaimContendedError("contended"), 10, "contended"],
     [new ClaimAlreadyHeldError("held"), 10, "already-held"],
     [new ClaimNotExpiredError("live"), 10, "not-eligible"],
