@@ -79,8 +79,10 @@ function guardCommand(runtime, members) {
   // as the rest, and a third interpolation of the raw config path was a third
   // way to get both wrong.
   const globals = runtime.commandGlobals ?? "";
+  const numberFlag =
+    runtime.numberFlag ?? runtime.ctx?.profile?.numberKey ?? "pr";
   const pairs = members
-    .map((member) => `--pr ${member.number} --token ${member.token}`)
+    .map((member) => `--${numberFlag} ${member.number} --token ${member.token}`)
     .join(" ");
   const runId = members[0]?.runId ?? "<run-id>";
   return `mento-issues claims guard${globals} ${pairs} --run-id ${runId} --gate push -- <command>`;
@@ -129,7 +131,7 @@ async function labelSurvivingLocks(runtime, order, error) {
  */
 export async function runFamilyClaim(runtime) {
   const { ctx, flags } = runtime;
-  const numbers = flags.prs;
+  const numbers = runtime.numbers;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
   markFailureContext(runtime, numbers[0]);
   // The plan predicts execution, so it is refused by the same input checks.
@@ -210,13 +212,13 @@ export async function runFamilyClaim(runtime) {
  */
 export async function runFamilyRelease(runtime) {
   const { ctx, flags } = runtime;
-  const numbers = flags.prs;
+  const numbers = runtime.numbers;
   const tokens = flags.tokens;
   const runId = flags["run-id"];
   const outcome = assertOutcome(flags.outcome);
   if (numbers.length !== tokens.length) {
     throw new ClaimUsageError(
-      `family release needs one token per pull request; got ${numbers.length} numbers and ${tokens.length} tokens`,
+      `family release needs one token per ${ctx.profile.subjectNoun}; got ${numbers.length} numbers and ${tokens.length} tokens`,
       { details: { numbers, tokens: tokens.length } },
     );
   }

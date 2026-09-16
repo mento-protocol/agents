@@ -141,7 +141,7 @@ const BASE_CLAIMS = Object.freeze({
   renewMinutes: 10,
   graceMinutes: 5,
   label: "dependabot-prep:claimed",
-  package: { name: "@mento-protocol/issues", version: "0.1.0" },
+  package: { name: "@mento-protocol/issues", version: "0.2.0" },
 });
 
 function packageDocument(claims = {}) {
@@ -566,14 +566,14 @@ test("the loader rejects renewMinutes twice over ttlMinutes, minRemainingSeconds
   // hand, and deadlocking the run would be the worse outcome.
   const drifted = harness();
   const warned = await drifted.run(["claims", "read", "--pr", String(PR)], {
-    packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+    packageIdentity: { name: "@mento-protocol/issues", version: "0.9.9" },
   });
   assert.equal(warned.exitCode, 0);
   assert.deepEqual(
     warned.document.warnings.map((warning) => warning.stage),
     ["package-version"],
   );
-  assert.match(warned.document.warnings[0].message, /0\.1\.0.*0\.2\.0/u);
+  assert.match(warned.document.warnings[0].message, /0\.2\.0.*0\.9\.9/u);
 });
 
 test("the config rejects a package block without an exact version", async () => {
@@ -618,7 +618,7 @@ test("the config rejects a package block without an exact version", async () => 
   const accepted = normalizeConfigDocument(packageDocument());
   assert.deepEqual(accepted.claims.package, {
     name: "@mento-protocol/issues",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 });
 
@@ -1618,7 +1618,7 @@ test("doctor reports a measured clock offset and warns above half the budget", a
   assert.equal(inBudget.document.clock.warn, false);
   assert.equal(inBudget.document.clock.measured, true);
   assert.deepEqual(inBudget.document.scopes, ["repo", "workflow"]);
-  assert.equal(inBudget.document.version, "0.1.0");
+  assert.equal(inBudget.document.version, "0.2.0");
   assert.match(inBudget.document.exitCodes.rule, /^0 proceed; 10\/11\/14\/15/u);
   assert.deepEqual(inBudget.document.warnings, []);
 
@@ -5507,7 +5507,7 @@ test("guard reports the warnings its runtime collected before it started", async
     ],
     {
       spawn: recordingSpawn(0).spawn,
-      packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+      packageIdentity: { name: "@mento-protocol/issues", version: "0.9.9" },
     },
   );
 

@@ -26,7 +26,9 @@ function quote(value) {
  */
 function adoptCommand(lease, action, operationId) {
   const number = lease.scope[lease.profile.numberKey];
-  const flag = lease.profile.numberKey === "pr" ? "--pr" : "--issue";
+  // The profile's own key, not a two-profile ternary: there are three
+  // profiles now and the CLI accepts the flag the loaded one names.
+  const flag = `--${lease.profile.numberKey}`;
   // Every `claims` command needs a `--config`, so a line printed without one
   // exits 2 the moment an operator runs it — for a recovery whose whole point
   // is to be run verbatim. The CLI hands the context the same globals it

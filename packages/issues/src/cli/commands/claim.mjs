@@ -16,6 +16,7 @@ import {
 } from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { claimBlock } from "../output.mjs";
 import {
@@ -30,7 +31,7 @@ import {
  */
 export async function runClaim(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const { scope, ref } = markFailureContext(runtime, number);
   const takeover = flags["no-takeover"] === true ? false : undefined;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
@@ -61,6 +62,10 @@ export async function runClaim(runtime) {
   // where a transport failure masked every deterministic refusal above.
   await runtime.ensureLogin();
 
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number.
+  const subjectWarnings = await assertSubjectKind(runtime, number);
+
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     present: true,
     run: () =>
@@ -75,7 +80,7 @@ export async function runClaim(runtime) {
     status: lease.status,
     ref,
     scope,
-    warnings: [...label.warnings, ...state.warnings],
+    warnings: [...subjectWarnings, ...label.warnings, ...state.warnings],
     body: {
       claim: claimBlock(lease),
       label: { name: label.name, changed: label.changed, status: label.status },

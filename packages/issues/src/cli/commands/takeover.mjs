@@ -13,6 +13,7 @@ import {
 } from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { claimBlock } from "../output.mjs";
 import {
@@ -27,7 +28,7 @@ import {
  */
 export async function runTakeover(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const supersedes = flags.supersedes;
   const { scope, ref } = markFailureContext(runtime, number);
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
@@ -55,6 +56,10 @@ export async function runTakeover(runtime) {
   // it records.
   await runtime.ensureLogin();
 
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number.
+  const subjectWarnings = await assertSubjectKind(runtime, number);
+
   const { result: lease, label } = await projectClaimLabelAfter(ctx, number, {
     // C-21: the label tracks the ref, not the owner, so a takeover leaves it
     // present and reports `alreadyPresent` rather than changing anything.
@@ -73,7 +78,7 @@ export async function runTakeover(runtime) {
     status: lease.status,
     ref,
     scope,
-    warnings: [...label.warnings, ...state.warnings],
+    warnings: [...subjectWarnings, ...label.warnings, ...state.warnings],
     body: {
       claim: claimBlock(lease),
       label: {

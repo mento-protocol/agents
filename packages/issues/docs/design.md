@@ -1380,6 +1380,33 @@ Global flags: `--config <path>` (required for `claims`), `--json`, `--dry-run`,
 `--agent`, `--state <path>`, `--run-id` (rejected on `claim`, `takeover` and
 `family claim`; required elsewhere).
 
+### The number flag the profile selects
+
+Every command that names an item declares **both** `--pr` and `--issue`
+(`--prs`/`--issues` on `claims list` and the `family` commands), injected per
+command by `flagGrammar` from the spec's `numberFlags` mode. The parser cannot
+know which profile is loaded, so it judges only the count:
+
+- both flags — `claims claim takes --pr or --issue, not both`;
+- neither, on a command that requires one —
+  `claims claim requires --pr or --issue (the loaded config's profile decides which)`;
+- `claims list` is the one `filter` mode: naming no item lists the whole
+  namespace, and at most one flag still holds.
+
+`resolveNumberFlags` then settles which of the two is legal, from
+`config.profile.numberKey`, and refuses the other:
+`The loaded config selects the issue profile, so claims claim takes --issue, not --pr`.
+It returns immediately when `runtime.config` is null, because a command run
+without `--config` — `markers build` — names no item and has no profile to
+read. Every refusal here is exit 2, raised after the config loads and before
+`ensureLogin`, `assertMutationAllowed` and the first write, so it costs no
+round trip.
+
+The handlers then read `runtime.number` and `runtime.numbers` rather than
+`flags.pr` and `flags.prs`, `pairClaimFlags` takes the flag name so guard's
+pairing refusals print the flag the operator typed, and every generated line
+already interpolates `profile.numberKey`.
+
 Gated flags, refused with exit 3 unless the loaded config sets
 `allowOverrides: true`: `--ttl-minutes`, `--grace-minutes`,
 `--min-remaining-seconds`, and `--now <iso>`, which additionally requires
@@ -1477,6 +1504,7 @@ Required keys in `claims`: `schema`, `profile`, `namespace`, `scopeTemplate`,
 lease-capable profile — `ttlMinutes`, `renewMinutes`, `graceMinutes`.
 
 Optional keys and their defaults: `kind` (`mento-claim`), `payloadVersion` (1),
+`verifySubjectKind` (`false`),
 `author` (the profile's), `maxTtlMinutes` (360), `minRemainingSeconds` (360),
 `skewToleranceSeconds` (300), `markerRevision` (`v2`), `requiredBefore`
 (`["branch-push", "review-request"]`), `advisoryBefore`
@@ -1564,11 +1592,25 @@ Every failure exits 3 **before any network call**:
   cache or a checkout bin run by hand.
 - `requiredBefore` and `advisoryBefore` must together name every fence purpose,
   each exactly once. They are the mandatory/advisory table the run uses.
-- `profile` must be `pr`. `issue-board` is a valid profile value in the library
-  but is refused by the configuration loader
+- `profile` must be `pr` or `issue`. `issue-board` is a valid profile value in
+  the library but is refused by the configuration loader
   (`CLAIM_CONFIG_PROFILE_UNSUPPORTED`): its canonical scope needs a Project
   owner and number that no command line supplies. Lease keys on a
   `leaseCapable: false` profile are refused.
+- `scopeTemplate` carries the **selected profile's** placeholder, `{pr}` or
+  `{issue}`, exactly once, with the namespace as its prefix. Two refusals name
+  the copied-policy mistakes: `CLAIM_CONFIG_SCOPE_TEMPLATE_TOKEN` for a
+  template holding the other profile's placeholder, and
+  `CLAIM_CONFIG_NAMESPACE_OVERLAP` for a namespace that equals, is a prefix of,
+  or is prefixed by another configurable profile's default namespace. Both are
+  exit 3 at load. Without them a misconfigured document validates and then
+  wedges references one at a time as `CLAIM_REF_INVALID`, which reads as a
+  corrupt reference rather than as the configuration that caused it.
+- `verifySubjectKind` (default `false`) makes `claim` and `takeover` read
+  `repos/{owner}/{repo}/issues/{n}` after the login and refuse with exit 10
+  `not-eligible` when the number is really a pull request. GitHub gives issues
+  and pull requests one number space, so an issue claim can otherwise stand on
+  a pull-request number another skill holds under the `pr` namespace.
 - `gh.timeoutSeconds`, when given, is the per-`gh` wall-clock default that
   `--timeout-seconds` overrides. Both are bounded the same way: more than 0 and
   at most 86400 seconds. `runGh` arms its timer only for a finite, positive

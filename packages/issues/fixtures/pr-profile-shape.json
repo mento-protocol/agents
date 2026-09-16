@@ -6,17 +6,8 @@
   },
   "inputs": {
     "repository": "mento-protocol/frontend-monorepo",
-    "numbers": [
-      "1",
-      "872",
-      "9007199254740991"
-    ],
-    "actions": [
-      "acquire",
-      "renew",
-      "takeover",
-      "release"
-    ],
+    "numbers": ["1", "872", "9007199254740991"],
+    "actions": ["acquire", "renew", "takeover", "release"],
     "overrides": {
       "namespace": "refs/rehearsal-claims/v9/pr",
       "refTemplate": "refs/rehearsal-claims/v9/pr/{pr}",

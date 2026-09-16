@@ -283,6 +283,10 @@ const README_POLICY_NORMALIZED = Object.freeze({
     advisoryBefore: ["summary-comment", "inline-reply", "long-wait"],
     allowOverrides: false,
     allowCloudWriters: false,
+    // The one key 0.2.0 adds, and the reason this snapshot exists: a new
+    // default reaches every policy already in production, so it is a
+    // deliberate, reviewable line here rather than a silent widening.
+    verifySubjectKind: false,
     command: ["pnpm", "dependabot:claim", "--"],
     schema: "mento-claims-config:v1",
     profile: "pr",

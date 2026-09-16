@@ -5,9 +5,11 @@ without a shared server: a compare-and-swap mutex with an opt-in lease, a
 bounded `gh` subprocess runner, and the procedural-marker byte contracts agents
 post on pull requests.
 
-One Git reference per claimed item — `refs/mento-claims/v1/pr/<number>` — is
-the sole authority. The commit that reference points at is both the state and
-the fencing token, and GitHub's `updateRefs` mutation makes taking it atomic.
+One Git reference per claimed item is the sole authority: one per pull request
+under `refs/mento-claims/v1/pr/<number>`, one per issue under
+`refs/mento-claims/v1/issue/<number>`. The commit that reference points at is
+both the state and the fencing token, and GitHub's `updateRefs` mutation makes
+taking it atomic.
 
 Plain ESM, Node >= 22.12, **zero runtime dependencies**, no build step: the
 published bytes are the reviewed bytes.
@@ -21,7 +23,7 @@ Nothing installs this package. Consumers pin the exact version in policy and
 spawn the CLI:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.1.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
   dlx mento-issues claims read --pr 872 --config .github/dependabot-prep-policy.json
 ```
 
@@ -29,7 +31,7 @@ Two details of that command line are load-bearing, both measured against pnpm
 10.34.5:
 
 - **`--package=<name>@<version>` … `dlx <binary>`, not `dlx <spec> <binary>`.**
-  The shorter `pnpm dlx @mento-protocol/issues@0.1.0 mento-issues …` form
+  The shorter `pnpm dlx @mento-protocol/issues@0.2.0 mento-issues …` form
   passes `mento-issues` to the CLI as its first positional argument, where it
   is an unknown command.
 - **`--config.ignore-scripts=true`, not `--ignore-scripts`.** The latter is not
@@ -63,6 +65,20 @@ belongs to the child it spawns, so its own documents go to stderr.
 | `--host`, `--runtime`, `--login`, `--agent` | identity overrides                                                                                                                                                                                                                                                                                                 |
 | `--state <path>`                            | state-file root                                                                                                                                                                                                                                                                                                    |
 | `--run-id <id>`                             | required by `renew`, `release`, `verify`, `guard`, `family release` and `slot clear`; **rejected** by `claim`, `takeover` and `family claim`, which generate their own; `adopt` resolves it from the flag, from `--from-state` or from this host's state entry; `read`, `list`, `label` and `doctor` never need it |
+| `--pr <n>` / `--issue <n>`                  | the claimed item; `--prs`/`--issues` on `list` and the `family` commands. The loaded config's `claims.profile` decides which of the pair is legal, and the other one, both of them, or neither is exit 2 before any network call                                                                                   |
+
+**The profile picks the flag.** Both `--pr` and `--issue` are in the grammar of
+every command that names an item, and the loaded configuration decides which
+one this run takes: `--pr` under an issue config is
+
+```text
+The loaded config selects the issue profile, so claims claim takes --issue, not --pr
+```
+
+exit 2, refused before the login read and before the first write. A sweep that
+types `--pr` from muscle memory must never claim the wrong namespace quietly.
+`claims list` names no item when it is listing the whole namespace, but at most
+one of `--prs` and `--issues` still holds.
 
 Gated flags need `allowOverrides: true` in the loaded config, or they exit 3:
 `--ttl-minutes`, `--grace-minutes`, `--min-remaining-seconds`, and `--now <iso>`
@@ -82,23 +98,32 @@ uncovered exits 3 exactly as the equivalent policy would.
 
 ### `claims`
 
-| Command                                                            | Flags                                                                                                      | Writes                               |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `read --pr <n>`                                                    | —                                                                                                          | none                                 |
-| `list`                                                             | `[--stale] [--prs 872,880] [--concurrency <n>]`                                                            | none                                 |
-| `claim --pr <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                                                    | commit, reference, label             |
-| `renew --pr <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                    |
-| `takeover --pr <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commit, reference, label             |
-| `release --pr <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label             |
-| `verify --pr <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                                 |
-| `guard --pr <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs   |
-| `adopt --pr <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                                 |
-| `family claim --prs 872,880,881`                                   | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commits, references                  |
-| `family release --prs … --tokens … --run-id <id>`                  | `[--outcome <slug>]`                                                                                       | commits, references                  |
-| `label ensure`                                                     | `[--color <hex>] [--description <text>]`                                                                   | labels only                          |
-| `label reconcile --pr <n>`                                         | `[--apply]`                                                                                                | labels only, and only with `--apply` |
-| `slot clear --pr <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                  |
-| `doctor`                                                           | —                                                                                                          | none                                 |
+Below, `--pr|--issue <n>` means "the number flag the loaded profile selects".
+
+| Command                                                                     | Flags                                                                                                      | Writes                               |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `read --pr\|--issue <n>`                                                    | —                                                                                                          | none                                 |
+| `list`                                                                      | `[--stale] [--prs\|--issues 872,880] [--concurrency <n>]`                                                  | none                                 |
+| `claim --pr\|--issue <n>`                                                   | `[--run-id-prefix <slug>] [--no-takeover] [--set k=v]…`                                                    | commit, reference, label             |
+| `renew --pr\|--issue <n> --token <oid> --run-id <id>`                       | `[--if-due] [--set k=v]…`                                                                                  | commit, reference                    |
+| `takeover --pr\|--issue <n> --supersedes <oid>`                             | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commit, reference, label             |
+| `release --pr\|--issue <n> --token <oid> --run-id <id>`                     | `[--outcome <slug>]`                                                                                       | commit, reference, label             |
+| `verify --pr\|--issue <n> --token <oid> --run-id <id>`                      | `[--gate <g>] [--advisory] [--min-remaining-seconds <n>]` (gated)                                          | none                                 |
+| `guard --pr\|--issue <n> --token <oid> --run-id <id> --gate <g> -- <argv…>` | `[--no-renew] [--advisory] [--report <path>]`                                                              | renew commits while the child runs   |
+| `adopt --pr\|--issue <n>`                                                   | `(--candidate <oid> --operation-id <id> --run-id <id> \| --from-state) [--action …] [--parent-lock <oid>]` | none                                 |
+| `family claim --prs\|--issues 872,880,881`                                  | `[--run-id-prefix <slug>] [--set k=v]…`                                                                    | commits, references                  |
+| `family release --prs\|--issues … --tokens … --run-id <id>`                 | `[--outcome <slug>]`                                                                                       | commits, references                  |
+| `label ensure`                                                              | `[--color <hex>] [--description <text>]`                                                                   | labels only                          |
+| `label reconcile --pr\|--issue <n>`                                         | `[--apply]`                                                                                                | labels only, and only with `--apply` |
+| `slot clear --pr\|--issue <n> --run-id <id>`                                | `[--dry-run]`                                                                                              | one host-local file                  |
+| `doctor`                                                                    | —                                                                                                          | none                                 |
+
+**The two namespaces are independent.** One repository may run a pull-request
+sweep and an issue sweep at once: they write different references, different
+state-store entries (`pr-872.json` beside `issue-872.json`), different
+host-local guard slots and different labels, and nothing is shared but the
+code. They also never coordinate — see "Issues and pull requests share one
+number space" below.
 
 **`claim` takes over automatically.** Against an UNLOCK it acquires; against a
 LOCK whose lease has expired past its grace it takes over in the same process
@@ -194,15 +219,75 @@ what it would do — nothing — rather than a refusal, because that is exactly
 what running it answers, and repeating a release is the case its idempotence
 exists for.
 
-**`--set` writes claim metadata**, restricted to the profile's keys —
-`lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl`. They survive both
-renew and takeover, which is what stops a new owner from re-pushing or
-re-requesting review on a head the previous owner already handled.
+**`--set` writes claim metadata**, restricted to the profile's keys. The pr
+profile records `lastPushedHead`, `reviewRequestedHead` and
+`summaryCommentUrl`; the issue profile records `branch`, `pullRequest` and
+`lastCommentUrl`. They survive both renew and takeover, and that is the whole
+point of them: they stop a new owner re-pushing a head, re-requesting a review,
+re-creating a branch, re-opening a pull request or re-posting a comment the
+previous owner already handled.
 
-**`list --stale`** selects LOCKs whose lease has expired and reports each pull
-request's open, closed, draft and merged state — the abandoned-claim-on-a-
-merged-PR case. Recovery is the ordinary path: `claim` (which takes over), then
-`release --outcome skipped`.
+`pullRequest` is a **decimal string**, not a number, because every `--set`
+value arrives as a string; the literal `null` writes a null.
+
+**`list --stale`** selects LOCKs whose lease has expired and reports the
+claimed item's state — the abandoned-claim-on-a-merged-PR case. Under the pr
+profile that is `state`, `draft` and `merged`. Under the issue profile it is
+`state`, `stateReason` and a `pullRequest` boolean, because GitHub's issues
+endpoint serves pull requests too and an issue claim standing on a
+pull-request number is worth seeing. Recovery is the ordinary path: `claim`
+(which takes over), then `release --outcome skipped`.
+
+### Holding an issue claim for days
+
+A multi-hour hold is a **renew cadence, never a long TTL**.
+`MAX_TTL_CEILING_MINUTES` is 360 and `MAX_GRACE_MINUTES` is 60, so the longest
+lease this package will validate is six hours. The maximal shape is
+
+```json
+{
+  "ttlMinutes": 360,
+  "renewMinutes": 120,
+  "graceMinutes": 60,
+  "minRemainingSeconds": 3600
+}
+```
+
+An hourly `renew --if-due` from cron holds it indefinitely; the claim becomes
+takeable **TTL plus grace — seven hours — after the last successful renew**. A
+cron host that sleeps loses the claim, correctly, and the recovery is the
+ordinary path: the next `claim` takes over automatically.
+
+Every renew rotates the token, so re-read `claim.token` from each document's
+`next` rather than reusing the one the acquire printed.
+
+### One run id per repository
+
+`generateRunId` runs only inside an acquiring transition, so one run id cannot
+span repositories. A sweep across three repositories holds three claims under
+three run ids with three configuration documents, because `repository` names
+exactly one. `family` and `guard` are **single-repository** primitives: a
+family shares one context and one `repository`, and a guard's repeated pairs
+must all be in it.
+
+Use `--run-id-prefix issue-sweep` so the three are recognizable as one sweep,
+and keep the `{repo, issue, token, runId}` tuple yourself — nothing in this
+package holds it for you.
+
+### Issues and pull requests share one number space
+
+GitHub gives issues and pull requests one sequence, and
+`repos/{owner}/{repo}/issues/{n}` serves both. So
+`refs/mento-claims/v1/pr/872` and `refs/mento-claims/v1/issue/872` are two
+independent mutexes over at most one real item, and a ref name carries a number
+and no kind — nothing in the claim layer can tell the difference.
+
+Two things surface it. `claims list` reports a `pullRequest` boolean per issue
+entry, after the fact. And `claims.verifySubjectKind: true` refuses it before
+the first write: `claim` and `takeover` read the issue after the login and exit
+10 `not-eligible` when the number is really a pull request. It is `false` by
+default because it costs a round trip on the hot path; an issue policy should
+set it to `true`.
 
 **`--outcome`** accepts `ready-for-maintainer-decision`, `needs-decision`,
 `blocked`, `skipped`, `budget-exhausted`, `family-rollback`, `rehearsal` and
@@ -462,6 +547,12 @@ The coarse rule, which a calling agent can follow without the table:
 and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 ```
 
+**The pull-request wording in rows 10 and 13 and in the coarse rule is
+deliberate, and the issue profile inherits it unchanged.** Consuming skills
+copy those strings verbatim into their own instructions, so rewording them to
+say "item" would silently invalidate every copy. Read "this pull request" as
+"this claimed item" under the issue profile.
+
 **A refusal is not an ambiguity.** A write the server refused (`permission`,
 exit 21) and a missing `gh` (`config`, exit 3) answer the request rather than
 leaving it open, so the compare-and-swap loop stops on them and reports them as
@@ -533,7 +624,7 @@ transition is an exact-`beforeOid` compare-and-swap, so two acquirers cannot
 both win. That is unforgeability against accident and against a racing peer, not
 against a writer that deliberately borrows a published identity. Binding
 possession to a secret the reference only stores a digest of would close the
-gap; 0.1.0 does not do it.
+gap; 0.2.0 does not do it.
 
 ## The `--config` schema
 
@@ -543,15 +634,15 @@ and `coordination.claims` are read.
 
 **Required** in the claims block:
 
-| Key                                          | Value                                                      |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `schema`                                     | `mento-claims-config:v1`                                   |
-| `profile`                                    | `pr` (see below)                                           |
-| `namespace`                                  | a `refs/…` prefix                                          |
-| `scopeTemplate`                              | the namespace plus `/{pr}`, exactly one `{pr}`             |
-| `label`                                      | a GitHub label name, or `null`                             |
-| `package`                                    | `{ "name": "@mento-protocol/issues", "version": "0.1.0" }` |
-| `ttlMinutes`, `renewMinutes`, `graceMinutes` | on a lease-capable profile only                            |
+| Key                                          | Value                                                                        |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| `schema`                                     | `mento-claims-config:v1`                                                     |
+| `profile`                                    | `pr` or `issue` (see below)                                                  |
+| `namespace`                                  | a `refs/…` prefix                                                            |
+| `scopeTemplate`                              | the namespace plus `/{pr}` or `/{issue}`, matching the profile, exactly once |
+| `label`                                      | a GitHub label name, or `null`                                               |
+| `package`                                    | `{ "name": "@mento-protocol/issues", "version": "0.2.0" }`                   |
+| `ttlMinutes`, `renewMinutes`, `graceMinutes` | on a lease-capable profile only                                              |
 
 **Optional**, with defaults:
 
@@ -568,6 +659,7 @@ and `coordination.claims` are read.
 | `advisoryBefore`       | `["summary-comment", "inline-reply", "long-wait"]` |
 | `allowOverrides`       | `false`                                            |
 | `allowCloudWriters`    | `false`                                            |
+| `verifySubjectKind`    | `false`                                            |
 | `command`              | `null`                                             |
 
 Every validation failure exits 3 **before any network call**. The arithmetic
@@ -600,11 +692,26 @@ refuse a job whose schema disagrees with it. `gh.timeoutSeconds` is the
 per-`gh` wall-clock default that `--timeout-seconds` overrides, and the loader
 bounds it exactly as the flag is bounded: a positive integer of at most 86400.
 
+Two refusals exist for the mistakes a **copied policy** makes, both exit 3 at
+load:
+
+- `CLAIM_CONFIG_SCOPE_TEMPLATE_TOKEN` — the template carries the other
+  profile's placeholder, as in `profile: "issue"` beside
+  `scopeTemplate: "…/issue/{pr}"`. Without it the generic count answers "must
+  contain {issue} exactly once, found 0", which names the symptom and not the
+  cause.
+- `CLAIM_CONFIG_NAMESPACE_OVERLAP` — the namespace equals, is a prefix of, or
+  is prefixed by another configurable profile's default namespace. A
+  `profile: "issue"` pointed at `refs/mento-claims/v1/pr` passes every other
+  rule here and then puts two skills on one set of references, where the
+  payloads fail closed one at a time as `CLAIM_REF_INVALID` — a reading that
+  looks like a corrupt reference rather than the configuration that caused it.
+
 `profile: "issue-board"` is a valid **library** profile — it is the executable
 proof that this package is a byte-for-byte drop-in for monitoring's mutex — but
 the configuration loader refuses it (`CLAIM_CONFIG_PROFILE_UNSUPPORTED`): its
 canonical scope needs a Project owner and number that no command line supplies.
-The configurable profile is `pr`.
+The configurable profiles are `pr` and `issue`.
 
 `dependabot-prep-policy:v3` is rejected by name, and so is a v4-shaped document
 that still declares the retired repository-wide `coordination.lockPath` without
@@ -650,6 +757,29 @@ policy stops a run rather than silently downgrading it.
   "statePath": "…",
   "warnings": [],
   "error": null,
+}
+```
+
+An issue claim is the same envelope with its own scope, ref and metadata, and
+with `--issue` in every generated line:
+
+```jsonc
+{
+  "command": "claims.claim",
+  "status": "acquired",
+  "ref": "refs/mento-claims/v1/issue/4312",
+  "scope": { "repo": "mento-protocol/monitoring-monorepo", "issue": 4312 },
+  "claim": {
+    "metadata": {
+      "branch": "sweep/4312",
+      "pullRequest": "1187",
+      "lastCommentUrl": null,
+    },
+    // …every other claim field is unchanged
+  },
+  "next": {
+    "renew": "mento-issues claims renew --config … --issue 4312 --token … --if-due",
+  },
 }
 ```
 
@@ -710,7 +840,7 @@ A consuming repository carries the claims block inside its
       "allowOverrides": false,
       "allowCloudWriters": false,
       "command": ["pnpm", "dependabot:claim", "--"],
-      "package": { "name": "@mento-protocol/issues", "version": "0.1.0" }
+      "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
     }
   },
   "forbiddenActions": ["delete-claim-refs"]
@@ -739,6 +869,38 @@ Four facts a consuming repository must agree with this package on:
   and a guarded argv inherits that directory. Guarded git commands therefore
   name their own tree explicitly: `git -C <pr-worktree> …`.
 
+An issue sweep carries a standalone `mento-issues-config:v1` document instead,
+**one per repository**, because `repository` names exactly one:
+
+```json
+{
+  "schema": "mento-issues-config:v1",
+  "repository": "mento-protocol/monitoring-monorepo",
+  "claims": {
+    "schema": "mento-claims-config:v1",
+    "profile": "issue",
+    "namespace": "refs/mento-claims/v1/issue",
+    "scopeTemplate": "refs/mento-claims/v1/issue/{issue}",
+    "ttlMinutes": 360,
+    "renewMinutes": 120,
+    "graceMinutes": 60,
+    "minRemainingSeconds": 3600,
+    "maxTtlMinutes": 360,
+    "label": "issue-sweep:claimed",
+    "verifySubjectKind": true,
+    "requiredBefore": ["branch-push", "review-request"],
+    "advisoryBefore": ["summary-comment", "inline-reply", "long-wait"],
+    "allowOverrides": false,
+    "allowCloudWriters": false,
+    "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
+  }
+}
+```
+
+That is the maximal lease — see "Holding an issue claim for days" — and
+`verifySubjectKind` is on because an issue sweep is exactly the caller that can
+be handed a pull-request number.
+
 ## Reference retention
 
 **This package deletes nothing.** No code path deletes a reference,
@@ -757,6 +919,12 @@ gh api repos/<owner>/<repo>/git/matching-refs/mento-claims --jq length
 # what each one currently says
 mento-issues claims list --config <policy> --stale
 ```
+
+The `matching-refs` count covers both namespaces at once, because they share
+the `mento-claims` prefix. The listing does not: it reads the namespace of the
+config it was given, so a repository running both sweeps needs one
+`claims list` per configuration document, and the quarterly prune weighs `pr`
+and `issue` separately.
 
 Pruning references for closed and released items is a quarterly operator
 action, and a policy that forbids the agent from doing it —

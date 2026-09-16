@@ -70,7 +70,7 @@ function resolveCandidate(runtime, number) {
  */
 export async function runAdopt(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const { scope, ref } = markFailureContext(runtime, number);
   const candidate = resolveCandidate(runtime, number);
   // A closed vocabulary, judged against that vocabulary and never echoed: the

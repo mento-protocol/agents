@@ -10,8 +10,9 @@
  * The order of refusals is deliberate and is what makes "zero operations"
  * assertable: argument grammar first (exit 2), then flag values such as a
  * token's 40-hex shape (exit 2), then the config document (exit 3), then the
- * gated-flag and environment rules (exit 3), and only then anything that can
- * reach the network. The viewer login is part of that last group: it is
+ * number flag the loaded profile selects (exit 2), then the gated-flag and
+ * environment rules (exit 3), and only then anything that can reach the
+ * network. The viewer login is part of that last group: it is
  * resolved by `runtime.ensureLogin()`, which every mutating handler calls
  * after its own input checks and before its first write, so a command refused
  * for a bad `--set`, an impossible family member or a malformed guard pair
@@ -38,6 +39,7 @@ import {
   assertObjectId,
   assertTimeoutSeconds,
   commandMutates,
+  numberFlagMode,
   parseCommandLine,
 } from "./args.mjs";
 import { assertPackageIdentity, loadClaimConfig } from "./config.mjs";
@@ -240,6 +242,61 @@ function leaseWithOverrides(config, flags) {
 }
 
 /**
+ * Settle which number flag this run uses, and refuse the other one.
+ *
+ * The grammar declares `--pr` and `--issue` on every command that names an
+ * item, because the parser cannot know which profile is loaded. The loaded
+ * config can, and it decides: a sweep that types `--pr` from muscle memory
+ * against an issue configuration must never claim the wrong namespace quietly.
+ *
+ * Exit 2, before `ensureLogin` and before `assertMutationAllowed`, so the
+ * refusal costs no round trip.
+ *
+ * A command given no `--config` — `markers build`, and any non-claims command
+ * run without one — leaves `runtime.config` null and returns here immediately.
+ * Reading `config.profile.numberKey` unguarded threw a `TypeError` for a
+ * command that names no item at all.
+ *
+ * @param {object} runtime the CLI runtime, with its config loaded or null.
+ * @returns {void}
+ * @throws {ClaimUsageError} when the command line names the other profile's
+ *   flag.
+ */
+function resolveNumberFlags(runtime) {
+  const mode = numberFlagMode(runtime.spec);
+  if (mode === null) return;
+  if (runtime.config === null) return;
+
+  const profile = runtime.config.profile;
+  const plural = mode.names[0].endsWith("s");
+  const expected = plural ? `${profile.numberKey}s` : profile.numberKey;
+  for (const name of mode.names) {
+    if (name === expected) continue;
+    if (!Object.hasOwn(runtime.flags, name)) continue;
+    throw new ClaimUsageError(
+      `The loaded config selects the ${profile.id} profile, so ${runtime.key} takes --${expected}, not --${name}`,
+      {
+        details: {
+          command: runtime.key,
+          profile: profile.id,
+          expected: `--${expected}`,
+          supplied: `--${name}`,
+          config: runtime.configPath,
+        },
+      },
+    );
+  }
+
+  runtime.numberFlag = profile.numberKey;
+  const single = runtime.flags[profile.numberKey];
+  // `guard` collects repeated occurrences, so its value is an array and its
+  // `number` stays null exactly as it always has.
+  runtime.number =
+    single === undefined || Array.isArray(single) ? null : single;
+  runtime.numbers = runtime.flags[`${profile.numberKey}s`] ?? null;
+}
+
+/**
  * Build everything a command needs, in refusal order.
  *
  * @param {object} parsed the parsed command line.
@@ -287,7 +344,11 @@ async function createRuntime(parsed, options) {
     clock: null,
     stateStore: null,
     spawn: options.spawn,
-    number: flags.pr === undefined || Array.isArray(flags.pr) ? null : flags.pr,
+    // Filled in by `resolveNumberFlags`, once the config has named the profile
+    // that decides whether this run reads `--pr` or `--issue`.
+    numberFlag: null,
+    number: null,
+    numbers: null,
   };
   // `--config` is a global flag, so a command that does not require one may
   // still be given one. Loading it either way is what lets `markers` refuse a
@@ -299,6 +360,7 @@ async function createRuntime(parsed, options) {
       ...assertPackageIdentity(runtime.config, options.packageIdentity),
     );
   }
+  resolveNumberFlags(runtime);
   assertGatedFlags(parsed.gated, runtime.config, runtime.configPath);
   assertClockNotSupplied(parsed, runtime.config);
   runtime.clock = buildClock(flags, env, options.clock);

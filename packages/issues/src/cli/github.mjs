@@ -1,10 +1,11 @@
 /**
- * The two GitHub reads only the CLI needs.
+ * The GitHub reads only the CLI needs.
  *
- * `claims list` reports each pull request's open/closed state alongside its
- * claim (AMENDMENTS §J), and `claims doctor` reports the token's scopes. Both
- * take an injectable runner, exactly like every wrapper in `../gh`, so the
- * offline suite never spawns `gh`.
+ * `claims list` reports each claimed item's state alongside its claim
+ * (AMENDMENTS §J) — a pull request's under the `pr` profile, an issue's under
+ * the `issue` profile — and `claims doctor` reports the token's scopes. All of
+ * them take an injectable runner, exactly like every wrapper in `../gh`, so
+ * the offline suite never spawns `gh`.
  */
 
 import { ghJson } from "../gh/graphql.mjs";
@@ -67,6 +68,65 @@ export async function readPullRequestState(
       state: null,
       draft: null,
       merged: null,
+      error: String(error?.message ?? error).split("\n")[0],
+    };
+  }
+}
+
+/**
+ * The state of one issue, and whether that number is really a pull request.
+ *
+ * The same never-throw contract `readPullRequestState` has, and the same guard
+ * on the number before it is spliced into the unencoded REST path.
+ *
+ * `repos/{owner}/{repo}/issues/{n}` serves pull requests too — GitHub gives
+ * issues and pull requests one number space — so the response carries a
+ * `pull_request` object exactly when the number is a pull request. That is
+ * reported as a boolean, because an issue claim standing on a pull-request
+ * number is the thing in this listing worth acting on.
+ *
+ * @param {{repo: string, dryRun?: boolean, timeoutMs?: number}} options
+ * @param {number} number the issue number.
+ * @param {{json?: Function}} [deps]
+ * @returns {Promise<{number: number, state: string|null,
+ *   stateReason: string|null, pullRequest: boolean|null, error: string|null}>}
+ */
+export async function readIssueState(options, number, { json = ghJson } = {}) {
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return {
+      number,
+      state: null,
+      stateReason: null,
+      pullRequest: null,
+      error: `Issue number must be a positive integer, got: ${String(number)}`,
+    };
+  }
+  const { nameWithOwner } = splitRepo(options.repo);
+  try {
+    const read = await json(
+      [
+        "api",
+        `repos/${nameWithOwner}/issues/${number}`,
+        "--jq",
+        "{state: .state, stateReason: .state_reason, pullRequest: (.pull_request != null)}",
+      ],
+      callOptions(options, false),
+    );
+    return {
+      number,
+      state: typeof read?.state === "string" ? read.state : null,
+      stateReason:
+        typeof read?.stateReason === "string" ? read.stateReason : null,
+      pullRequest:
+        typeof read?.pullRequest === "boolean" ? read.pullRequest : null,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      number,
+      state: null,
+      stateReason: null,
+      pullRequest: null,
       error: String(error?.message ?? error).split("\n")[0],
     };
   }
