@@ -490,7 +490,11 @@ test("non-fast-forward candidate fails before push", (t) => {
 
 test("GitHub CLI drift fails before push", (t) => {
   const fixture = createFixture(t);
-  writeFileSync(fixture.ghPath, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+  // Keep the canonical interpreter so the refusal comes from the drifted
+  // probe, not from the interpreter rule (/bin/sh is a symlink on Ubuntu).
+  writeFileSync(fixture.ghPath, `#!${process.execPath}\nprocess.exit(99);\n`, {
+    mode: 0o700,
+  });
   chmodSync(fixture.ghPath, 0o700);
 
   assert.throws(
