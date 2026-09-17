@@ -80,8 +80,9 @@ BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 The harness reports in TAP 13: one `ok` or `not ok` line per case, the
 detail of a failure as `#` comment lines, a `1..N` plan, and a last comment
 line with the passed, failed and skipped counts. A case whose capability is
-missing on this machine, such as `python3`, calls `skip` and is reported as
-`ok N - name # SKIP reason`, which is a verdict of its own and never a pass.
+missing on this machine, such as `python3`, calls `case_skip` and is reported
+as `ok N - name # SKIP reason`, which is a verdict of its own and never a
+pass.
 
 ## Shell scripts
 
