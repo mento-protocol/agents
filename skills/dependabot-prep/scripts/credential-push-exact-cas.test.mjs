@@ -280,17 +280,36 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   };
 }
 
-test("the ancestry walk ignores the candidate commit-graph", (t) => {
+test("object reads verify integrity first and ignore candidate indexes", (t) => {
   const fixture = createFixture(t);
   pushExactCas(fixture.request, fixture.trusted);
-  const args = JSON.parse(
-    readFileSync(path.join(fixture.root, "merge-base-args"), "utf8"),
-  );
-  assert.deepEqual(args.slice(0, 3), [
+  const options = [
     "-c",
     "core.commitGraph=false",
-    "merge-base",
+    "-c",
+    "core.multiPackIndex=false",
+  ];
+  const fsck = JSON.parse(
+    readFileSync(path.join(fixture.root, "fsck-args"), "utf8"),
+  );
+  assert.deepEqual(fsck, [
+    ...options,
+    "fsck",
+    "--strict",
+    "--no-reflogs",
+    "--no-progress",
   ]);
+  const ancestry = JSON.parse(
+    readFileSync(path.join(fixture.root, "merge-base-args"), "utf8"),
+  );
+  assert.deepEqual(ancestry.slice(0, 5), [...options, "merge-base"]);
+
+  const corrupt = createFixture(t, { fsckFails: true });
+  assert.throws(
+    () => pushExactCas(corrupt.request, corrupt.trusted),
+    /failed integrity verification/,
+  );
+  assert.equal(readFileSync(corrupt.pushCount, "utf8"), "0");
 });
 
 test("an env-node shebang is refused for toolchain programs", (t) => {
