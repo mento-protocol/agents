@@ -79,6 +79,17 @@ description: a folded name with no leading blank line
 Body.
 `;
 
+// The quote opens and the frontmatter ends before it closes. No YAML loader
+// reads this document, so the validator must not fall back to the plain scalar
+// reader and measure the quote character as part of the text.
+const UNTERMINATED_QUOTE_SKILL = `---
+name: noted
+description: "unterminated
+---
+
+Body.
+`;
+
 test("a valid minimal skill validates and reports the count", (t) => {
   const root = makeSkillsDir();
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -146,4 +157,20 @@ test("the validator still runs when it is started through a symlink", (t) => {
   const clean = runValidator(link, root);
   assert.equal(clean.status, 0);
   assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// A quoted value that never closes is refused, and the raw text is kept as the
+// value so the length check stays quiet about it. The message names the field
+// and the shape, and the length limit must not be reported on top of it.
+test("an unterminated quoted description is reported once, without its length", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(root, "noted", UNTERMINATED_QUOTE_SKILL);
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" has an unterminated or malformed quoted scalar',
+  );
 });
