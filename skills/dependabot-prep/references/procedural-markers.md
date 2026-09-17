@@ -61,8 +61,10 @@ ASCII space between tokens, including before `-->`. Emit lowercase SHA-256 hex.
 Build the submitted body as the exact visible-body bytes, two LF bytes, then the
 marker bytes. Do not append a final newline.
 
-The marker revision is the policy's `markers.revision`, or `claims.markerRevision`
-when `markers.revision` is absent; `v2` is the default. Use v1 when repository
+The marker revision is the policy's `markers.revision`, or its claims block's
+`markerRevision` when `markers.revision` is absent (`coordination.claims` in a
+`dependabot-prep-policy:v4` document, top-level `claims` in a
+`mento-issues-config:v1` document); `v2` is the default. Use v1 when repository
 policy prescribes no claims, or when that revision is `v1`:
 
 `<!-- dependabot-prep-comment:v1 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> -->`

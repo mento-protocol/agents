@@ -17,6 +17,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { inspectSealedExecutable } from "./credential-helper-toolchain.mjs";
 import {
   pushExactCas,
   requirePushPorcelain,
@@ -359,11 +360,26 @@ test("a script executable binds its interpreter and refuses an unsealed one", (t
   writeFileSync(fixture.ghPath, `#!${looseNode}\nprocess.exit(0);\n`, {
     mode: 0o700,
   });
+  // Inspect the hostile script directly: through pushExactCas the rewritten
+  // gh would already fail the manifest pin, which proves nothing about the
+  // interpreter checks.
   assert.throws(
-    () => pushExactCas(fixture.request, fixture.trusted),
-    /Unsealed toolchain path component|pin mismatched/,
+    () => inspectSealedExecutable(fixture.ghPath),
+    /Unsealed toolchain path component/,
   );
+  assert.throws(() => pushExactCas(fixture.request, fixture.trusted));
   assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
+
+  // An operand would name code the manifest does not bind.
+  writeFileSync(
+    fixture.ghPath,
+    `#!${process.execPath} --require=${path.join(open, "hook.cjs")}\nprocess.exit(0);\n`,
+    { mode: 0o700 },
+  );
+  assert.throws(
+    () => inspectSealedExecutable(fixture.ghPath),
+    /interpreter takes no operands/,
+  );
 
   // An alias to the trusted interpreter inside a writable directory could be
   // repointed after inspection; the shebang must name the canonical path.
@@ -373,9 +389,10 @@ test("a script executable binds its interpreter and refuses an unsealed one", (t
     mode: 0o700,
   });
   assert.throws(
-    () => pushExactCas(fixture.request, fixture.trusted),
-    /Untrusted toolchain executable|pin mismatched/,
+    () => inspectSealedExecutable(fixture.ghPath),
+    /Untrusted toolchain executable/,
   );
+  assert.throws(() => pushExactCas(fixture.request, fixture.trusted));
   assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
 });
 

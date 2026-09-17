@@ -175,6 +175,10 @@ function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
   }
   if (!path.isAbsolute(interpreterPath))
     reject("Toolchain script interpreter is not absolute.");
+  // An operand such as `--require=<file>` names code the manifest does not
+  // bind, so an absolute interpreter takes none.
+  if (operands.length !== 0)
+    reject("Toolchain script interpreter takes no operands.");
   // The kernel follows the shebang path at every start, so the interpreter
   // must be canonical: an alias could be repointed after inspection.
   const interpreter = inspectExecutable(
