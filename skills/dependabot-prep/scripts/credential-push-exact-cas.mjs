@@ -164,7 +164,6 @@ function validateHost(value) {
     parsed.username !== "" ||
     parsed.password !== "" ||
     parsed.host !== value ||
-    parsed.hostname === "" ||
     parsed.pathname !== "/" ||
     parsed.search !== "" ||
     parsed.hash !== ""
@@ -229,7 +228,15 @@ function runGit(gitPath, args, options) {
       : result.signal
         ? `signal ${result.signal}`
         : `git exit ${result.status}`;
-    reject(`${options.errorMessage} (${cause})`);
+    // A non-zero exit is Git's own refusal and nothing was written. A signal
+    // (the timeout) or a spawn error such as ENOBUFS says nothing about the
+    // remote, so the caller's abort suffix names the readback it now owes.
+    const aborted = result.error || result.signal;
+    reject(
+      `${options.errorMessage} (${cause})${
+        aborted && options.abortSuffix ? `; ${options.abortSuffix}` : ""
+      }`,
+    );
   }
   return result;
 }
@@ -495,9 +502,34 @@ export function requirePushPorcelain(stdout, expectedNewOid, headRefName) {
   }
 }
 
+function isAtOrBelow(root, target) {
+  const relative = path.relative(root, target);
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative))
+  );
+}
+
 export function pushExactCas(requestInput, trustedInput) {
   const request = validateRequest(requestInput);
   const trusted = validateTrustedConfig(trustedInput);
+  // The candidate tree is model-writable, so nothing the push trusts may live
+  // inside it (references/preparation.md). Keep in step with loadContext in
+  // credential-helper.mjs, which applies the same rule to its own inputs.
+  for (const trustedPath of [
+    trusted.helperPath,
+    trusted.ghConfigDir,
+    trusted.globalConfigPath,
+    trusted.homePath,
+    trusted.hooksPath,
+    trusted.templatesPath,
+    trusted.tempPath,
+  ]) {
+    if (isAtOrBelow(request.candidateRoot, trustedPath))
+      reject("Trusted path is inside the candidate root.");
+  }
   const initialManifest = verifyCredentialPushToolchain(
     trusted.expectedToolchainSha256,
     trusted.toolchainOptions,
@@ -568,6 +600,7 @@ export function pushExactCas(requestInput, trustedInput) {
   const push = runGit(finalManifest.git.resolvedPath, pushArguments, {
     cwd: request.candidateRoot,
     env: pushEnvironment,
+    abortSuffix: "the push may have run, so live readback is required",
     errorMessage: "Exact CAS push failed or raced.",
     status: 0,
     timeout: 60_000,

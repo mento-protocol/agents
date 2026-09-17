@@ -111,7 +111,7 @@ The command forms, their flags and what each one writes:
 `config validate` is a read-only rollout check: it proves the policy's claims
 block parses and writes nothing.
 
-`label ensure` is a rollout operation, not a check. It creates the repository's
+`claims label ensure` is a rollout operation, not a check. It creates the repository's
 claim label, which is a remote metadata mutation outside the preparation grant.
 An operator runs it once, with explicit authorization, when claims are rolled
 out — never at invocation time, and never in audit or read-only mode. A claim

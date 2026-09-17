@@ -377,6 +377,13 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
     () => pushExactCas(unsafeRef, fixture.trusted),
     /Head ref name is invalid/,
   );
+  const insideHome = path.join(fixture.request.candidateRoot, "home");
+  mkdirSync(insideHome, { mode: 0o700 });
+  const insideCandidate = { ...fixture.trusted, homePath: insideHome };
+  assert.throws(
+    () => pushExactCas(fixture.request, insideCandidate),
+    /inside the candidate root/,
+  );
   const zeroOld = { ...fixture.request, expectedOldOid: "0".repeat(40) };
   assert.throws(
     () => pushExactCas(zeroOld, fixture.trusted),

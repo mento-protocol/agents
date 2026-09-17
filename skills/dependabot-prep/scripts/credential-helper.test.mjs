@@ -968,18 +968,16 @@ test("current directory must equal the explicit candidate root", (t) => {
   assert.deepEqual(providerEntries(fixture), []);
 });
 
-test("candidate subdirectory cwd cannot admit a provider from its parent", (t) => {
+test("a provider inside the candidate root is refused", (t) => {
   const fixture = createFixture(t);
+  // Same bytes as the trusted provider, so the digest pin passes and only the
+  // containment rule can refuse it.
   const candidateProvider = path.join(fixture.candidate, "candidate-gh");
   writeFileSync(candidateProvider, readFileSync(fixture.provider), {
     mode: 0o700,
   });
   chmodSync(candidateProvider, 0o700);
-
-  const subdirectory = path.join(fixture.candidate, "nested");
-  mkdirSync(subdirectory);
   fixture.environment.DEPENDABOT_PREP_GH_PATH = realpathSync(candidateProvider);
-  fixture.candidate = subdirectory;
 
   const result = run(fixture, "get");
   assertSilentFailure(result);
