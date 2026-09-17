@@ -395,6 +395,32 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
     );
   }
 
+  for (const pin of [
+    "gitConfigModuleSha256",
+    "helperSha256",
+    "toolchainModuleSha256",
+    "wrapperSha256",
+  ]) {
+    const digest = fixture.trusted[pin];
+    const flipped = (digest[0] === "0" ? "1" : "0") + digest.slice(1);
+    assert.throws(
+      () =>
+        pushExactCas(fixture.request, { ...fixture.trusted, [pin]: flipped }),
+      /pin mismatched/,
+      `${pin} accepted a wrong digest`,
+    );
+  }
+  const otherShell = {
+    ...fixture.trusted,
+    toolchainOptions: {
+      ...fixture.trusted.toolchainOptions,
+      shellPath: "/bin/bash",
+    },
+  };
+  assert.throws(
+    () => pushExactCas(fixture.request, otherShell),
+    /shell path must be \/bin\/sh/,
+  );
   const unsafeRef = { ...fixture.request, headRefName: "-upload-pack=evil" };
   assert.throws(
     () => pushExactCas(unsafeRef, fixture.trusted),

@@ -255,6 +255,8 @@ function inspectToolchain(
   // inspected here and never executed.
   if (envPath !== "/usr/bin/env")
     reject("The env path must be /usr/bin/env, which the helper shebang runs.");
+  if (shellPath !== "/bin/sh")
+    reject("The shell path must be /bin/sh, the shell the manifest binds.");
   const git = inspectExecutable(gitPath, true, requireSealed);
   const gh = inspectExecutable(ghPath, true, requireSealed);
   const node = inspectExecutable(nodePath, true, requireSealed);
@@ -302,9 +304,13 @@ function inspectToolchain(
   } catch {
     reject("Git exec-path is unavailable.");
   }
-  if (!statSync(resolvedExecPath).isDirectory()) {
-    reject("Git exec-path is not a directory.");
+  let execPathIsDirectory = false;
+  try {
+    execPathIsDirectory = statSync(resolvedExecPath).isDirectory();
+  } catch {
+    reject("Git exec-path is unavailable.");
   }
+  if (!execPathIsDirectory) reject("Git exec-path is not a directory.");
   const reportedExecPathComponents =
     requireSealed && reportedExecPath !== resolvedExecPath
       ? inspectAliasComponents(reportedExecPath)
@@ -314,7 +320,13 @@ function inspectToolchain(
     const invocationPath = path.join(resolvedExecPath, name);
     const executable = inspectExecutable(invocationPath, false, requireSealed);
     const reportedInvocationPath = path.join(reportedExecPath, name);
-    if (realpathSync(reportedInvocationPath) !== executable.resolvedPath) {
+    let reportedResolved;
+    try {
+      reportedResolved = realpathSync(reportedInvocationPath);
+    } catch {
+      reject("Git exec-path aliases disagree.");
+    }
+    if (reportedResolved !== executable.resolvedPath) {
       reject("Git exec-path aliases disagree.");
     }
     return Object.freeze({ name, reportedInvocationPath, ...executable });
