@@ -255,6 +255,8 @@ export function inspectSealedExecutable(executablePath) {
 
 function runVersion(executable, args, pattern) {
   const result = spawnSync(executable, args, {
+    // Never the caller's cwd, which may be a candidate clone.
+    cwd: path.dirname(executable),
     encoding: "utf8",
     env: { LANG: "C", LC_ALL: "C" },
     maxBuffer: 4096,
@@ -274,6 +276,7 @@ function runVersion(executable, args, pattern) {
 
 function probeGhAuthTokenCapabilities(executable) {
   const result = spawnSync(executable, ["auth", "token", "--help"], {
+    cwd: path.dirname(executable),
     encoding: "utf8",
     env: { LANG: "C", LC_ALL: "C", NO_COLOR: "1" },
     maxBuffer: 16_384,
@@ -340,6 +343,7 @@ function inspectToolchain(
   const env = inspectExecutable(envPath, false, requireSealed);
 
   const execPathResult = spawnSync(git.resolvedPath, ["--exec-path"], {
+    cwd: path.dirname(git.resolvedPath),
     encoding: "utf8",
     env: {
       GIT_CONFIG_NOSYSTEM: "1",

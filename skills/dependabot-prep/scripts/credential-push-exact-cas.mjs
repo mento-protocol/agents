@@ -23,6 +23,10 @@ const ZERO_OID = "0".repeat(40);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REF_NAME_PATTERN =
   /^(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)|\/\/|[~^:?*\\\[]))[A-Za-z0-9][A-Za-z0-9._\/-]*[A-Za-z0-9]$/;
+// Every other key fails closed. The absence of `extensions.objectformat` is
+// what refuses a sha256 repository (preparation.md step 12); the absence of
+// `include.path`, `remote.*` and `credential.*` is what keeps a candidate from
+// smuggling configuration into the push.
 const SAFE_CONFIG_KEYS = new Set([
   "commit.gpgsign",
   "core.bare",
