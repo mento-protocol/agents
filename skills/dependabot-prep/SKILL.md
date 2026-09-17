@@ -148,7 +148,11 @@ and never clear someone else's slot. When repository policy
 prescribes claims, the claim ref is the sole per-PR writer authority: claim each
 selected PR before its first write to that PR, never write to a PR another live
 owner holds, and never take a claim from another owner except through the claim
-command's own takeover. Act on the claim command's exit codes: 0 proceed;
+command's own takeover. Before the first write, require the loaded policy to
+list `branch-push` and `review-request` in `requiredBefore`. The claim command
+honors a policy that demotes either gate to `advisoryBefore` and would run the
+push without a held claim, so refuse such a policy before any write and report
+it. Act on the claim command's exit codes: 0 proceed;
 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR and treat
 work in flight as forfeit; 3/16/21 stop and report; 20 retry.
 

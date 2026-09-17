@@ -81,8 +81,10 @@ The command forms, their flags and what each one writes:
   one in `claim.token`, which its `next` lines carry.
 - `claims guard --pr <n> --token <t> --run-id <r> --gate <gate> -- <argv>` runs
   one command under the claim; the gates are `push`, `review-request` and
-  `wait`. `push` and `review-request` are mandatory: guard refuses to start the
-  command without a held claim, and stops the command when the claim is lost.
+  `wait`. `push` and `review-request` are mandatory while the policy lists them
+  in `requiredBefore`, which SKILL.md requires before any write: guard refuses to
+  start the command without a held claim, and stops the command when the claim
+  is lost.
   `wait` is advisory: guard prints the verdict and runs the command anyway.
   Repeat `--pr <n> --token <t>` for a family; one `--run-id` covers every pair,
   and guard verifies and renews all of them, so a family survives a wait longer

@@ -85,9 +85,11 @@ The repository's configured summary marker — `reporting.prCommentMarker`, or
 discovery token for the one summary comment per author login per PR. Keep it
 unchanged, on the comment's first line.
 
-When policy prescribes claims and the marker revision is `v2`, it also names a
-claim-marker schema (`reporting.prCommentClaimMarkerSchema`). Add that line on
-its own line immediately after the discovery marker:
+When policy prescribes claims, it also names a claim-marker schema
+(`reporting.prCommentClaimMarkerSchema`), whatever the marker revision: the
+revision governs comment and reply markers only, and `markers summary` always
+emits the claim line. Add that line on its own line immediately after the
+discovery marker:
 
 `<!-- <claim-marker schema> pr=<decimal> claim=<40hex> run-sha256=<64hex> operator-sha256=<64hex> [supersedes=<40hex>] -->`
 
@@ -102,8 +104,7 @@ For example, with the Mento schema:
 `reporting.prCommentMarker`. When the configured discovery marker is a different
 line, keep the configured marker first and use `v2Line` alone.
 
-A marker revision of `v1`, and a repository that prescribes no claims, keep the
-discovery marker alone.
+A repository that prescribes no claims keeps the discovery marker alone.
 
 `pr` is decimal with no leading zero. `run-sha256` is `sha256(utf8(<owner run
 id>))` and is provenance only: it records which run last wrote the body. The
