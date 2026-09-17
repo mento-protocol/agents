@@ -39,46 +39,79 @@ baseline_limit() {
 	fi
 }
 
-# Reports every function longer than MAX_FUNCTION_LINES in the file named in
-# $1. A function starts at a line of the form `name() {`, `function name {`
-# or `function name() {` in column one and ends at the first `}` in column
-# one, which is how shfmt lays them out. The payload of a here document is
-# skipped, so a `}` inside one does not end the function early.
-check_functions() {
-	awk -v max="$MAX_FUNCTION_LINES" -v file="$1" '
-		in_doc != "" {
-			line = $0
-			if (doc_strip) sub(/^\t+/, "", line)
-			if (line == in_doc) in_doc = ""
-			next
-		}
-		{
-			probe = $0
-			gsub(/<<</, "", probe)
-			if (match(probe, /<<-?[ \t]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*/)) {
-				tok = substr(probe, RSTART, RLENGTH)
+# The awk program behind check_functions. A function starts at a line of the
+# form `name() {`, `function name {` or `function name() {` in column one and
+# ends at the first `}` in column one, which is how shfmt lays them out. The
+# payload of a here document is skipped, so a `}` inside one does not end the
+# function early. A here document or function still open at end of file is
+# reported: the scan lost its place, and an unmeasured function must not pass.
+# The `$0` and `$1` below are awk fields, not shell parameters.
+# shellcheck disable=SC2016
+FUNCTION_SCAN='
+	in_doc != "" {
+		line = $0
+		if (doc_strip) sub(/^\t+/, "", line)
+		if (line == in_doc) in_doc = ""
+		next
+	}
+	{
+		# Look for a here-document operator. One inside a quoted string or a
+		# comment is text, not an operator: the quotes before it are then
+		# unbalanced, or a bare # precedes it. A here-string is not one.
+		probe = $0
+		gsub(/<<</, "", probe)
+		if (match(probe, /<<-?[ \t]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*/)) {
+			tok = substr(probe, RSTART, RLENGTH)
+			pre = substr(probe, 1, RSTART - 1)
+			sq = pre
+			gsub(/"[^"]*"/, "", sq)
+			nsq = gsub(/'"'"'/, "", sq)
+			dq = pre
+			gsub(/'"'"'[^'"'"']*'"'"'/, "", dq)
+			ndq = gsub(/"/, "", dq)
+			bare = pre
+			gsub(/"[^"]*"/, "", bare)
+			gsub(/'"'"'[^'"'"']*'"'"'/, "", bare)
+			if (nsq % 2 == 0 && ndq % 2 == 0 && !match(bare, /(^|[ \t])#/)) {
 				doc_strip = (substr(tok, 3, 1) == "-")
 				sub(/^<<-?[ \t]*['"'"'"]?/, "", tok)
 				in_doc = tok
+				doc_line = NR
 			}
 		}
-		/^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*(\(\))?[ \t]*\{/ {
-			name = $0
-			sub(/^function[ \t]+/, "", name)
-			sub(/[ \t]*(\(\))?[ \t]*\{.*/, "", name)
-			start = NR
-			next
+	}
+	/^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*(\(\))?[ \t]*\{/ {
+		name = $0
+		sub(/^function[ \t]+/, "", name)
+		sub(/[ \t]*(\(\))?[ \t]*\{.*/, "", name)
+		start = NR
+		next
+	}
+	/^\}/ && start {
+		len = NR - start + 1
+		if (len > max) {
+			printf "%s:%d: function %s is %d lines, the limit is %d\n", file, start, name, len, max
+			bad = 1
 		}
-		/^\}/ && start {
-			len = NR - start + 1
-			if (len > max) {
-				printf "%s:%d: function %s is %d lines, the limit is %d\n", file, start, name, len, max
-				bad = 1
-			}
-			start = 0
+		start = 0
+	}
+	END {
+		if (in_doc != "") {
+			printf "%s:%d: here document <<%s is never closed\n", file, doc_line, in_doc
+			bad = 1
 		}
-		END { exit bad }
-	' "$1" >&2
+		if (start) {
+			printf "%s:%d: function %s is never closed\n", file, start, name
+			bad = 1
+		}
+		exit bad
+	}
+'
+
+# Reports every function longer than MAX_FUNCTION_LINES in the file named in
+# $1, and any construct the scan could not close.
+check_functions() {
+	awk -v max="$MAX_FUNCTION_LINES" -v file="$1" "$FUNCTION_SCAN" "$1" >&2
 }
 
 # Every baseline entry must name a tracked file exactly once, carry a numeric
@@ -87,7 +120,8 @@ check_functions() {
 check_baseline() {
 	local file limit seen=" "
 	[ -f "$BASELINE" ] || return 0
-	while read -r file limit; do
+	# The `|| [ -n "$file" ]` keeps a final row without a trailing newline.
+	while read -r file limit || [ -n "$file" ]; do
 		case "$file" in
 		'' | '#'*) continue ;;
 		esac
