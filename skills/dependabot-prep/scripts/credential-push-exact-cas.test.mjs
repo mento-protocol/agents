@@ -278,6 +278,42 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   };
 }
 
+test("a grafted or shallow candidate is refused before any Git call", (t) => {
+  for (const relative of ["info/grafts", "shallow"]) {
+    const fixture = createFixture(t);
+    const target = path.join(fixture.request.candidateRoot, ".git", relative);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, `${NEW_OID} ${OLD_OID}\n`, { mode: 0o600 });
+    assert.throws(
+      () => pushExactCas(fixture.request, fixture.trusted),
+      /ancestry overrides/,
+      `${relative} was accepted`,
+    );
+    assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
+  }
+});
+
+test("the wrapper refuses to run under a Node other than the pinned one", (t) => {
+  const fixture = createFixture(t);
+  const otherDir = path.join(fixture.root, "other-node");
+  mkdirSync(otherDir, { mode: 0o700 });
+  const otherNode = path.join(otherDir, "node");
+  cpSync(process.execPath, otherNode);
+  chmodSync(otherNode, 0o700);
+  const options = { ...fixture.trusted.toolchainOptions, nodePath: otherNode };
+  const manifest = inspectCredentialPushToolchain(options);
+  const trusted = {
+    ...fixture.trusted,
+    expectedToolchainSha256: manifest.manifestSha256,
+    toolchainOptions: options,
+  };
+  assert.throws(
+    () => pushExactCas(fixture.request, trusted),
+    /not running under the pinned Node/,
+  );
+  assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
+});
+
 test("the candidate config gate refuses drift, extra keys and a bad pin", (t) => {
   const extra = createFixture(t, {
     configExtraRecord: "extensions.objectformat\nsha256",

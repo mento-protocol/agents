@@ -149,7 +149,8 @@ prescribes claims, the claim ref is the sole per-PR writer authority: claim each
 selected PR before its first write to that PR, never write to a PR another live
 owner holds, and never take a claim from another owner except through the claim
 command's own takeover. Before the first write, require the loaded policy to
-list `branch-push` and `review-request` in `requiredBefore`. The claim command
+list the push gate (spelled `branch-push` or its canonical `push`) and
+`review-request` in `requiredBefore`. The claim command
 honors a policy that demotes either gate to `advisoryBefore` and would run the
 push without a held claim, so refuse such a policy before any write and report
 it. Act on the claim command's exit codes: 0 proceed;

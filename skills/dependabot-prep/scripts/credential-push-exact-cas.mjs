@@ -246,9 +246,26 @@ function runGit(gitPath, args, options) {
   return result;
 }
 
+// `.git/info/grafts` and `.git/shallow` declare parents Git believes without
+// proof, so `merge-base --is-ancestor` would accept a candidate that is not
+// a descendant. GIT_NO_REPLACE_OBJECTS covers replace refs only.
+function requireNoAncestryOverrides(gitDirectory) {
+  for (const relative of ["info/grafts", "shallow"]) {
+    const target = path.join(gitDirectory, relative);
+    let present = true;
+    try {
+      lstatSync(target);
+    } catch {
+      present = false;
+    }
+    if (present) reject("Candidate declares ancestry overrides.");
+  }
+}
+
 function validateLocalConfig(gitPath, cwd, env, expectedSha256, hooksPath) {
   const gitDirectory = path.join(cwd, ".git");
   requireCanonicalPath(gitDirectory, "directory");
+  requireNoAncestryOverrides(gitDirectory);
   const configPath = requireCanonicalPath(
     path.join(gitDirectory, "config"),
     "file",
@@ -542,6 +559,11 @@ export function pushExactCas(requestInput, trustedInput) {
   );
   if (initialManifest.gh.sha256 !== trusted.ghSha256)
     reject("GitHub CLI pin mismatched.");
+  // The pinned Node must be the Node running this wrapper, or every check
+  // here runs under an interpreter the manifest does not describe. Keep in
+  // step with loadContext in credential-helper.mjs.
+  if (realpathSync(process.execPath) !== initialManifest.node.resolvedPath)
+    reject("Push wrapper is not running under the pinned Node executable.");
   // Git's exec path joins the push PATH, so it gets the same containment rule
   // as the configured paths although it comes from `git --exec-path`.
   for (const execPath of [
@@ -579,6 +601,7 @@ export function pushExactCas(requestInput, trustedInput) {
     reject("GitHub CLI pin mismatched.");
   const finalHelper = inspectSealedExecutable(trusted.helperPath);
   requireDigest(finalHelper.sha256, trusted.helperSha256, "credential helper");
+  requireNoAncestryOverrides(path.join(request.candidateRoot, ".git"));
   const finalConfigPath = requireCanonicalPath(
     path.join(request.candidateRoot, ".git", "config"),
     "file",
