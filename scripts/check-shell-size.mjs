@@ -14,6 +14,12 @@
 // the file: a file that shrinks fails the check until its entry is lowered,
 // so the allowance only ever ratchets down. An entry at or below the file
 // limit is refused, and only the two named legacy files may be listed.
+//
+// When SHELL_SIZE_BASE names a git ref (CI sets it to the pull request's
+// base branch), every entry is also compared with that ref's copy of the
+// baseline: an entry higher than the base's, or one the base no longer has,
+// is refused. That is what stops a change from growing a legacy file and
+// raising its entry in the same commit.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -31,6 +37,8 @@ const LEGACY_FILES = ["scripts/link-skills.sh", "scripts/test-link-skills.sh"];
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const BASELINE = join(HERE, "shell-size-baseline.txt");
+const BASELINE_REL = "scripts/shell-size-baseline.txt";
+const BASE_REF = process.env.SHELL_SIZE_BASE ?? "";
 
 const problems = [];
 const problem = (message) => problems.push(message);
@@ -147,9 +155,68 @@ function checkFile(file, limits) {
   checkFunctions(file, text);
 }
 
+// Parses baseline text into a map of path to count, ignoring malformed rows;
+// the current baseline gets full validation in readBaseline.
+function parseRows(text) {
+  const rows = new Map();
+  for (const raw of text.split("\n")) {
+    const row = raw.trim();
+    if (row === "" || row.startsWith("#")) continue;
+    const [file, count] = row.split(/\s+/);
+    if (/^[0-9]+$/.test(count ?? "")) rows.set(file, Number(count));
+  }
+  return rows;
+}
+
+// Refuses any baseline entry that is higher than, or missing from, the copy
+// at BASE_REF. A ref that does not resolve is a problem, not a pass.
+function checkRatchet(limits) {
+  if (BASE_REF === "") {
+    console.log(
+      "check-shell-size: SHELL_SIZE_BASE unset; baseline not compared with a base ref",
+    );
+    return;
+  }
+  const git = (args) =>
+    execFileSync("git", args, {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  try {
+    git(["rev-parse", "--verify", "--quiet", `${BASE_REF}^{commit}`]);
+  } catch {
+    problem(`SHELL_SIZE_BASE=${BASE_REF} does not resolve to a commit`);
+    return;
+  }
+  let text;
+  try {
+    text = git(["show", `${BASE_REF}:${BASELINE_REL}`]);
+  } catch {
+    console.log(
+      `check-shell-size: ${BASE_REF} has no ${BASELINE_REL}; entries accepted as new`,
+    );
+    return;
+  }
+  const base = parseRows(text);
+  for (const [file, limit] of limits) {
+    const before = base.get(file);
+    if (before === undefined) {
+      problem(
+        `${BASELINE_REL}: ${file} is not listed in ${BASE_REF}; a removed entry may not return`,
+      );
+    } else if (limit > before) {
+      problem(
+        `${BASELINE_REL}: ${file} rose from ${before} to ${limit}; an entry may only go down`,
+      );
+    }
+  }
+}
+
 function main() {
   const tracked = trackedShellFiles();
   const limits = readBaseline(tracked);
+  checkRatchet(limits);
   for (const file of tracked) checkFile(file, limits);
   if (problems.length > 0) {
     for (const message of problems) console.error(message);

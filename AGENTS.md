@@ -128,9 +128,11 @@ Two files predate these limits and are listed in
 `scripts/link-skills.sh` and `scripts/test-link-skills.sh`. The check
 refuses any other path in that file. A change may not grow either of them. Add a case or a function by first splitting the topic it
 belongs to out of the monolith, then lower the baseline entry to the new
-count: the check fails while the entry is above the file's real length, so
-the allowance only ratchets down. Remove the entry once the file fits the
-limit; the check refuses an entry at or below 500 lines.
+count: the check fails while the entry is above the file's real length, and
+on a pull request CI also compares each entry with the base branch's copy
+and refuses any increase, so the allowance only ratchets down. Remove the
+entry once the file fits the limit; the check refuses an entry at or below
+500 lines, and a removed entry may not return.
 
 Run the check locally before opening a pull request, after `pnpm install`:
 
