@@ -404,9 +404,10 @@ function validateTrustedConfig(trusted) {
   );
   requireExactKeys(
     trusted.authorizedPush,
-    ["headRefName", "host", "owner", "repository"],
+    ["headRefName", "host", "login", "owner", "repository"],
     "authorized push",
   );
+  validateLogin(trusted.authorizedPush.login);
   if (!SHA256_PATTERN.test(trusted.expectedToolchainSha256))
     reject("Toolchain pin is absent.");
   if (!SHA256_PATTERN.test(trusted.helperSha256))
@@ -596,7 +597,7 @@ export function pushExactCas(requestInput, trustedInput) {
   // The request is model-reachable, so a well-formed ref is not an authorized
   // one. The launcher binds the API-authenticated repository and Dependabot
   // head ref in trusted data, and the push may move only that ref.
-  for (const field of ["headRefName", "host", "owner", "repository"]) {
+  for (const field of ["headRefName", "host", "login", "owner", "repository"]) {
     if (request[field] !== trusted.authorizedPush[field])
       reject("Push target is not the authorized Dependabot head.");
   }
@@ -685,6 +686,14 @@ export function pushExactCas(requestInput, trustedInput) {
   const remoteRef = `refs/heads/${request.headRefName}`;
   const pushArguments = [
     ...buildCredentialHelperGitConfig(finalHelper.resolvedPath),
+    // The push enumerates and packs objects, so it reads them under the same
+    // index-free options as preflight, and without push bitmaps, which are
+    // another candidate-supplied index fsck did not verify.
+    ...OBJECT_READ_OPTIONS,
+    "-c",
+    "pack.useBitmaps=false",
+    "-c",
+    "push.useBitmaps=false",
     "-c",
     `core.hooksPath=${trusted.hooksPath}`,
     "-c",

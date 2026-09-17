@@ -244,6 +244,7 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
     authorizedPush: {
       headRefName: REF_NAME,
       host: request.host,
+      login: request.login,
       owner: request.owner,
       repository: request.repository,
     },
@@ -540,6 +541,16 @@ test("one-shot wrapper emits one exact compare-and-swap push", (t) => {
     "https://github.com/mento-protocol/frontend-monorepo.git",
     `${NEW_OID}:refs/heads/${REF_NAME}`,
   ]);
+  for (const option of [
+    "core.commitGraph=false",
+    "core.multiPackIndex=false",
+    "pack.useBitmaps=false",
+    "push.useBitmaps=false",
+  ]) {
+    const at = invocation.args.indexOf(option);
+    assert.ok(at > 0 && invocation.args[at - 1] === "-c", `${option} missing`);
+    assert.ok(at < invocation.args.indexOf("push"), `${option} after push`);
+  }
   assert.equal(Object.hasOwn(invocation.env, "GH_TOKEN"), false);
   assert.equal(Object.hasOwn(invocation.env, "GITHUB_TOKEN"), false);
   assert.equal(
@@ -667,6 +678,14 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
     () =>
       pushExactCas(
         { ...fixture.request, headRefName: "main" },
+        fixture.trusted,
+      ),
+    /not the authorized Dependabot head/,
+  );
+  assert.throws(
+    () =>
+      pushExactCas(
+        { ...fixture.request, login: "someone-else" },
         fixture.trusted,
       ),
     /not the authorized Dependabot head/,
