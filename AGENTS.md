@@ -81,8 +81,10 @@ BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 
 Bash gets the same modularity rules as JavaScript. A script is a set of
 small files with one topic each, not one file that holds everything.
-`scripts/check-shell-size.sh` enforces the limits and CI runs it on every
-pull request.
+`scripts/check-shell-size.mjs` enforces the limits and CI runs it on every
+pull request. It reads function boundaries with the shfmt parser
+(`mvdan-sh`), so they follow bash grammar, and a file the parser rejects
+fails the check.
 
 Limits:
 
@@ -123,15 +125,15 @@ Rules for a module file:
 
 Two files predate these limits and are listed in
 `scripts/shell-size-baseline.txt` with their current line count:
-`scripts/link-skills.sh` and `scripts/test-link-skills.sh`. A change may not
-grow either of them. Add a case or a function by first splitting the topic it
+`scripts/link-skills.sh` and `scripts/test-link-skills.sh`. The check
+refuses any other path in that file. A change may not grow either of them. Add a case or a function by first splitting the topic it
 belongs to out of the monolith, then lower the baseline entry to the new
 count: the check fails while the entry is above the file's real length, so
 the allowance only ratchets down. Remove the entry once the file fits the
 limit; the check refuses an entry at or below 500 lines.
 
-Run the check locally before opening a pull request:
+Run the check locally before opening a pull request, after `pnpm install`:
 
 ```bash
-bash scripts/check-shell-size.sh
+pnpm check:shell
 ```

@@ -38,6 +38,9 @@ jobs:
       - name: Test
         run: pnpm --filter @mento-protocol/issues test
 
+      - name: Check shell file and function sizes
+        run: pnpm check:shell
+
       - name: Trunk Code Quality
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
 
@@ -67,9 +70,6 @@ jobs:
 
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
-
-      - name: Check shell file and function sizes
-        run: bash scripts/check-shell-size.sh
 
       - name: Validate skills
         run: node scripts/validate-skills.mjs
