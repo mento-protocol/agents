@@ -318,9 +318,10 @@ Repeat this section independently for each admitted PR.
     destination with the explicit
     `<expectedNewOid>:refs/heads/<headRefName>` refspec and an exact expected-OID lease for
     `refs/heads/<headRefName>:<authenticatedOldHeadOid>`. The launcher's trusted
-    configuration names the one authorized target (`authorizedPush`: host, owner,
-    repository, the operator login the token belongs to, and the
-    API-authenticated `dependabot/` head ref); the wrapper
+    configuration names the one authorized transition (`authorizedPush`: host,
+    owner, repository, the operator login the token belongs to, the
+    API-authenticated `dependabot/` head ref, and the approved old and new
+    OIDs); the wrapper
     refuses any other ref, including the base branch. Both OIDs are 40-hex
     SHA-1 object names; the wrapper refuses a repository whose
     `extensions.objectFormat` is `sha256`. This is a

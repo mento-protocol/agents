@@ -404,10 +404,25 @@ function validateTrustedConfig(trusted) {
   );
   requireExactKeys(
     trusted.authorizedPush,
-    ["headRefName", "host", "login", "owner", "repository"],
+    [
+      "expectedNewOid",
+      "expectedOldOid",
+      "headRefName",
+      "host",
+      "login",
+      "owner",
+      "repository",
+    ],
     "authorized push",
   );
   validateLogin(trusted.authorizedPush.login);
+  for (const oid of [
+    trusted.authorizedPush.expectedOldOid,
+    trusted.authorizedPush.expectedNewOid,
+  ]) {
+    if (!OID_PATTERN.test(oid) || oid === ZERO_OID)
+      reject("Authorized push OID is invalid.");
+  }
   if (!SHA256_PATTERN.test(trusted.expectedToolchainSha256))
     reject("Toolchain pin is absent.");
   if (!SHA256_PATTERN.test(trusted.helperSha256))
@@ -594,10 +609,19 @@ function isAtOrBelow(root, target) {
 export function pushExactCas(requestInput, trustedInput) {
   const request = validateRequest(requestInput);
   const trusted = validateTrustedConfig(trustedInput);
-  // The request is model-reachable, so a well-formed ref is not an authorized
-  // one. The launcher binds the API-authenticated repository and Dependabot
-  // head ref in trusted data, and the push may move only that ref.
-  for (const field of ["headRefName", "host", "login", "owner", "repository"]) {
+  // The request is model-reachable, so a well-formed ref or OID is not an
+  // authorized one. The launcher binds the API-authenticated repository, the
+  // Dependabot head ref, the login and the approved old-to-new transition in
+  // trusted data, and the push may perform only that transition.
+  for (const field of [
+    "expectedNewOid",
+    "expectedOldOid",
+    "headRefName",
+    "host",
+    "login",
+    "owner",
+    "repository",
+  ]) {
     if (request[field] !== trusted.authorizedPush[field])
       reject("Push target is not the authorized Dependabot head.");
   }

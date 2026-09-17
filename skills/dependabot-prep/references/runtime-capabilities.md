@@ -107,7 +107,8 @@ The command forms, their flags and what each one writes:
   LOCK oid the claim command printed.
 - `claims adopt --pr <n> --from-state`, or the same command with `--candidate
 <oid>` and `--operation-id <id>`, resolves an unknown outcome after exit 12. It
-  writes nothing; the failed command's own `next.adopt` field prints the exact
+  writes no GitHub state, and for a landed LOCK it records host-local lease state
+  unless `--dry-run` is set; the failed command's own `next.adopt` field prints the exact
   form.
 
 `config validate` is a read-only rollout check: it proves the policy's claims

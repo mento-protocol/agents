@@ -242,6 +242,8 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   };
   const trusted = {
     authorizedPush: {
+      expectedNewOid: NEW_OID,
+      expectedOldOid: OLD_OID,
       headRefName: REF_NAME,
       host: request.host,
       login: request.login,
@@ -690,6 +692,17 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
       ),
     /not the authorized Dependabot head/,
   );
+  for (const field of ["expectedOldOid", "expectedNewOid"]) {
+    assert.throws(
+      () =>
+        pushExactCas(
+          { ...fixture.request, [field]: "4".repeat(40) },
+          fixture.trusted,
+        ),
+      /not the authorized Dependabot head/,
+      `${field} drift was accepted`,
+    );
+  }
   const baseBranch = {
     ...fixture.trusted,
     authorizedPush: { ...fixture.trusted.authorizedPush, headRefName: "main" },
