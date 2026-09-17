@@ -110,7 +110,7 @@ const MAX_SKILL_MD_LINES = 500;
  * code units, so it counts every emoji and every other character outside the
  * basic multilingual plane twice.
  */
-function codePointLength(value) {
+export function codePointLength(value) {
   return Array.from(value).length;
 }
 
@@ -230,7 +230,7 @@ const TYPED_SCALAR_RES = [
  * typed scalar. A quoted value is always a string, so the caller checks the
  * quotes first.
  */
-function isNonStringScalar(raw) {
+export function isNonStringScalar(raw) {
   if (raw === "") return false;
   if (NON_STRING_VALUES.has(raw)) return true;
   if (raw.startsWith("[") || raw.startsWith("{")) return true;
@@ -257,7 +257,7 @@ function isNonStringScalar(raw) {
  * for the same reason. A quote inside a plain scalar is text, so this function
  * cuts at a " #" after one.
  */
-function stripInlineComment(value) {
+export function stripInlineComment(value) {
   if (value.startsWith("#")) return "";
   return value.replace(/[ \t]+#.*$/, "").trim();
 }
@@ -272,7 +272,7 @@ function stripInlineComment(value) {
  * for one quote inside single quotes. Quote state does not carry across lines,
  * so a quoted member that spans lines is out of scope.
  */
-function stripFlowComment(value) {
+export function stripFlowComment(value) {
   if (value.startsWith("#")) return "";
   let quote = "";
   for (let i = 0; i < value.length; i += 1) {
@@ -312,7 +312,7 @@ const YAML_SPACE_RE =
  * Trim a decoded scalar with the YAML whitespace set: JavaScript's trim set
  * plus U+0085, U+00A0, U+2028 and U+2029.
  */
-function trimYamlSpace(value) {
+export function trimYamlSpace(value) {
   return value.replace(YAML_SPACE_RE, "");
 }
 
@@ -322,7 +322,7 @@ function trimYamlSpace(value) {
  * surrogate range, and U+FFFE and U+FFFF. A loader refuses the whole document
  * on any of them, so the runtime never sees the frontmatter.
  */
-function isForbiddenCodePoint(code) {
+export function isForbiddenCodePoint(code) {
   if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
   if (code <= 0x08 || (code >= 0x0b && code <= 0x1f)) return true;
   if (code === 0x7f) return true;
@@ -339,7 +339,7 @@ function isForbiddenCodePoint(code) {
  * when the text holds none. The scan runs by code point, so an emoji stays one
  * character and a lone surrogate is still caught.
  */
-function findControlCharacter(lines, firstLineNumber) {
+export function findControlCharacter(lines, firstLineNumber) {
   for (let i = 0; i < lines.length; i += 1) {
     for (const ch of lines[i]) {
       const code = ch.codePointAt(0);
@@ -360,7 +360,7 @@ function findControlCharacter(lines, firstLineNumber) {
  * it as text, so the frontmatter says one thing to one runtime and another to
  * the next. The escaped "\N" carries the same character with no disagreement.
  */
-function findNelLine(lines, firstLineNumber) {
+export function findNelLine(lines, firstLineNumber) {
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].includes("\u0085")) return firstLineNumber + i;
   }
@@ -374,7 +374,7 @@ function findNelLine(lines, firstLineNumber) {
  * not, because an indented "---" is content and inside a block scalar it is
  * part of the scalar.
  */
-function isDelimiterLine(line) {
+export function isDelimiterLine(line) {
   return line.replace(/\r$/, "").replace(/[ \t]+$/, "") === "---";
 }
 
@@ -385,7 +385,7 @@ function isDelimiterLine(line) {
  * line at column zero, which they report. A comment-only line is skipped
  * before the width is read, so a tab in front of a comment is not seen.
  */
-function indentWidth(line) {
+export function indentWidth(line) {
   const match = /^ */.exec(line);
   return match[0].length;
 }
@@ -402,7 +402,7 @@ function indentWidth(line) {
  * Dropping the backslash instead would let a skill pass here that every YAML
  * parser rejects.
  */
-function decodeDoubleQuoted(body) {
+export function decodeDoubleQuoted(body) {
   const SIMPLE = new Map([
     ["0", "\0"],
     ["a", "\x07"],
@@ -467,7 +467,7 @@ function decodeDoubleQuoted(body) {
  * quote stands for one quote inside single quotes, so neither closes the
  * scalar.
  */
-function findClosingQuote(text, quote) {
+export function findClosingQuote(text, quote) {
   for (let i = 0; i < text.length; i += 1) {
     if (quote === '"' && text[i] === "\\") {
       i += 1;
@@ -489,7 +489,7 @@ function findClosingQuote(text, quote) {
  * even run every backslash is itself escaped, so the last one is text and the
  * break folds as usual.
  */
-function escapesLineBreak(segment) {
+export function escapesLineBreak(segment) {
   const run = /\\+$/.exec(segment);
   return run !== null && run[0].length % 2 === 1;
 }
@@ -524,7 +524,7 @@ function escapesLineBreak(segment) {
  * written, so the caller reports the escape alone and not an empty description
  * on top of it.
  */
-function readQuotedScalar(text, lines, start) {
+export function readQuotedScalar(text, lines, start) {
   const quote = text[0];
   if (quote !== '"' && quote !== "'") return null;
 
@@ -586,7 +586,7 @@ function readQuotedScalar(text, lines, start) {
  * newline, "+" keeps all of them, and a header with neither clips the value to
  * one final newline.
  */
-function chompingOf(header) {
+export function chompingOf(header) {
   if (header.includes("-")) return "strip";
   if (header.includes("+")) return "keep";
   return "clip";
@@ -614,7 +614,7 @@ function chompingOf(header) {
  * more-indented content line, and YAML keeps both its spaces and the line
  * breaks around it.
  */
-function foldBlockLines(content) {
+export function foldBlockLines(content) {
   let value = "";
   let started = false;
   let blanks = 0;
@@ -659,7 +659,7 @@ function foldBlockLines(content) {
  * than the block or holding a tab inside the block indentation, or -1 when
  * every line is indented enough with spaces.
  */
-function readBlockScalar(header, lines, start) {
+export function readBlockScalar(header, lines, start) {
   const literal = header.startsWith("|");
   const indicator = BLOCK_INDENT_RE.exec(header);
   const chomping = chompingOf(header);
@@ -760,7 +760,7 @@ function readBlockScalar(header, lines, start) {
  * comment that ended the value. Trailing blank lines are never consumed, so a
  * blank line before a column-zero key leaves that key for the caller to read.
  */
-function readPlainScalar(first, lines, start) {
+export function readPlainScalar(first, lines, start) {
   let flow = first[0] === "[" || first[0] === "{";
   let value = flow ? stripFlowComment(first) : stripInlineComment(first);
   let end = start;
@@ -809,7 +809,7 @@ function readPlainScalar(first, lines, start) {
  * text.length when it never closes. A "\\" escapes the next character inside
  * double quotes, and a doubled quote stands for one quote inside single quotes.
  */
-function quotedScalarEnd(text, start) {
+export function quotedScalarEnd(text, start) {
   const quote = text[start];
   for (let i = start + 1; i < text.length; i += 1) {
     const ch = text[i];
@@ -836,7 +836,7 @@ function quotedScalarEnd(text, start) {
  * one trailing comma, as in "[a, b, ]", and nothing else empty, so "[foo,,bar]"
  * closes and is still a document no loader reads.
  */
-function flowCollectionEnd(text, start) {
+export function flowCollectionEnd(text, start) {
   const close = text[start] === "[" ? "]" : "}";
   let filled = false;
   for (let i = start + 1; i < text.length; i += 1) {
@@ -877,7 +877,7 @@ function flowCollectionEnd(text, start) {
  * The entries of such a collection go on over the following lines, so the
  * rules that end a plain scalar do not reach them.
  */
-function opensOpenFlowCollection(text) {
+export function opensOpenFlowCollection(text) {
   if (text[0] !== "[" && text[0] !== "{") return false;
   return flowCollectionEnd(text, 0) === -1;
 }
@@ -899,7 +899,7 @@ const AFTER_FLOW_COLLECTION_RE = /^[ \t]*(?:#.*)?$/;
  * not the scalar it looks like: real YAML reads on into the next lines and
  * fails somewhere else.
  */
-function flowCollectionCloses(text) {
+export function flowCollectionCloses(text) {
   const openers = [];
   let quote = "";
   for (let i = 0; i < text.length; i += 1) {
@@ -942,7 +942,7 @@ function flowCollectionCloses(text) {
  * The text after the quoted scalar that a text opens, or null when the quote
  * never closes.
  */
-function afterQuotedScalar(text) {
+export function afterQuotedScalar(text) {
   const end = quotedScalarEnd(text, 0);
   return end === text.length ? null : text.slice(end + 1);
 }
@@ -953,7 +953,7 @@ function afterQuotedScalar(text) {
  * that scalar's closing quote: `"foo: bar"` is a string, while `"foo": bar` is
  * a mapping entry. A quote anywhere else in a line is ordinary text.
  */
-function opensMappingEntry(text) {
+export function opensMappingEntry(text) {
   if (text[0] !== '"' && text[0] !== "'") {
     return MAPPING_INDICATOR_RE.test(text);
   }
@@ -977,7 +977,7 @@ const NO_CONTINUATION = { index: -1, raw: "", text: "" };
  * scalar may run on to a later line. Returns NO_CONTINUATION when the key has
  * no such line.
  */
-function firstContinuation(lines, start) {
+export function firstContinuation(lines, start) {
   for (let i = start + 1; i < lines.length; i += 1) {
     const next = lines[i].replace(/\r$/, "");
     if (next.trim() === "") continue;
@@ -1009,7 +1009,7 @@ function firstContinuation(lines, start) {
  * or a ready message for a value whose own text is malformed, where the line
  * number alone would not say what is wrong.
  */
-function parseFrontmatter(lines, firstLineNumber) {
+export function parseFrontmatter(lines, firstLineNumber) {
   const fields = new Map();
   const invalid = [];
   for (let i = 0; i < lines.length; i += 1) {
@@ -1513,4 +1513,22 @@ function main() {
   process.exit(0);
 }
 
-main();
+/**
+ * True when node started this file, rather than another module importing it.
+ * The unit tests import the parser helpers above, and an import must not walk
+ * skills/ or call process.exit. Both paths go through realpathSync so an
+ * invocation through a symlink still matches; an argv[1] that is missing or
+ * cannot be resolved is not this file, so the module was imported.
+ */
+function isEntryPoint() {
+  try {
+    const entry = realpathSync(process.argv[1]);
+    return entry === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+// Run the validator only when this file is the process entry point, so that
+// importing it for the unit tests has no side effects.
+if (isEntryPoint()) main();
