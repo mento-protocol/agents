@@ -3184,47 +3184,6 @@ have_node() {
 	command -v node >/dev/null 2>&1
 }
 
-validator_folds_block_scalar_description() {
-	local out rc
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	mkdir -p "$CASE_DIR/folded/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: >-\n'
-		printf '  A folded description that YAML writes over\n'
-		printf '  more than one line.\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a folded description must validate: $out"
-	fi
-
-	mkdir -p "$CASE_DIR/empty/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: >-\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/empty/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/empty" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "an empty folded description must fail: $out"
-	fi
-	case "$out" in
-	*description*) ;;
-	*) fail "the failure must name the description: $out" ;;
-	esac
-}
-
 validator_accepts_crlf_frontmatter() {
 	local out rc
 	if ! have_node; then
@@ -3286,136 +3245,6 @@ validator_ignores_finder_metadata() {
 	*"skills/notes.txt: not a directory"*) ;;
 	*) fail "stray file not reported: $out" ;;
 	esac
-}
-
-# YAML accepts the indentation indicator and the chomping indicator of a block
-# scalar in either order, so "|2-" and "|-2" are the same header. Both must be
-# read as a block scalar, not as a literal description.
-validator_block_indicator_either_order() {
-	local out rc
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	mkdir -p "$CASE_DIR/empty/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: |2-\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/empty/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/empty" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "an empty |2- description must fail: $out"
-	fi
-
-	mkdir -p "$CASE_DIR/empty-swapped/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: |-2\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/empty-swapped/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/empty-swapped" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "an empty |-2 description must fail: $out"
-	fi
-	case "$out" in
-	*description*) ;;
-	*) fail "the failure must name the description: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/full/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: |-2\n'
-		printf '  A literal description that YAML writes over\n'
-		printf '  more than one line.\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/full/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/full" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a |-2 description with a body must validate: $out"
-	fi
-
-	mkdir -p "$CASE_DIR/other/skills/blocky"
-	{
-		printf -- '---\n'
-		printf 'name: blocky\n'
-		printf 'description: >2-\n'
-		printf '  A folded description.\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/other/skills/blocky/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/other" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a >2- description must validate: $out"
-	fi
-}
-
-# The indentation indicator of a block scalar header is one digit from 1 to 9.
-# "|0", "|10" and "|01" are no headers, so YAML reads the line as a plain
-# scalar that starts with an indicator character and refuses the document. A
-# validator that takes them as headers measures a description a parser never
-# produces.
-validator_rejects_bad_block_header() {
-	local out rc header n
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	n=0
-	for header in '|0' '|10' '|01'; do
-		n=$((n + 1))
-		mkdir -p "$CASE_DIR/badhdr-$n/skills/blocky"
-		{
-			printf -- '---\n'
-			printf 'name: blocky\n'
-			printf 'description: %s\n' "$header"
-			printf '  A description under a broken header.\n'
-			printf -- '---\n\n'
-			printf 'Body.\n'
-		} >"$CASE_DIR/badhdr-$n/skills/blocky/SKILL.md"
-		out=$(node "$VALIDATOR" "$CASE_DIR/badhdr-$n" 2>&1)
-		rc=$?
-		if [ "$rc" -eq 0 ]; then
-			fail "the header '$header' must fail: $out"
-			continue
-		fi
-		case "$out" in
-		*"is not valid YAML"*) ;;
-		*) fail "the header '$header' must be reported as invalid YAML: $out" ;;
-		esac
-	done
-
-	# A single digit from 1 to 9 is a header, in either order with the
-	# chomping indicator.
-	n=0
-	for header in '|2-' '|-2'; do
-		n=$((n + 1))
-		mkdir -p "$CASE_DIR/okhdr-$n/skills/blocky"
-		{
-			printf -- '---\n'
-			printf 'name: blocky\n'
-			printf 'description: %s\n' "$header"
-			printf '  A description under a real header.\n'
-			printf -- '---\n\n'
-			printf 'Body.\n'
-		} >"$CASE_DIR/okhdr-$n/skills/blocky/SKILL.md"
-		out=$(node "$VALIDATOR" "$CASE_DIR/okhdr-$n" 2>&1)
-		rc=$?
-		if [ "$rc" -ne 0 ]; then
-			fail "the header '$header' must validate: $out"
-		fi
-	done
 }
 
 # An unquoted value loses its inline comment, so a description that holds only
@@ -3652,104 +3481,6 @@ check_keeps_duplicate_link_not_orphan() {
 	assert_out_has "kept the existing link" "link keeps it, as check said"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
 		"alpha still points at the first source"
-}
-
-# A block scalar header may carry a trailing comment. The comment must not stop
-# the header from being recognised, or the two marker characters read as the
-# whole description and an empty body passes.
-validator_block_header_with_comment() {
-	local out rc
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	mkdir -p "$CASE_DIR/empty/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >- # note\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/empty/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/empty" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a commented block header with no body must fail: $out"
-	fi
-	case "$out" in
-	*description*) ;;
-	*) fail "the failure must name the description: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/filled/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >- # note\n'
-		printf '  a real folded description that spans\n'
-		printf '  two lines of the block scalar\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/filled/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/filled" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a commented block header with a real body must validate: $out"
-	fi
-}
-
-# Only a space or a tab separates a comment from a block scalar header. Behind
-# a U+00A0 the "#" is part of the header, which PyYAML refuses with "expected
-# chomping or indentation indicators, but found '\xa0'", so the validator must
-# refuse the line instead of folding the body under it.
-validator_rejects_block_header_nbsp_comment() {
-	local out rc nbsp
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	nbsp=$(printf '\302\240')
-
-	mkdir -p "$CASE_DIR/nbsp-header/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-%s# note\n' "$nbsp"
-		printf '  a real folded description that spans\n'
-		printf '  two lines of the block scalar\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/nbsp-header/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/nbsp-header" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a block header with a NBSP before the comment must fail: $out"
-	fi
-	case "$out" in
-	'skills/noted: frontmatter line 3 is not valid YAML') ;;
-	*) fail "the header line must be reported by its number: $out" ;;
-	esac
-
-	# The same header with a space is the comment YAML reads.
-	mkdir -p "$CASE_DIR/space-header/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >- # note\n'
-		printf '  a real folded description that spans\n'
-		printf '  two lines of the block scalar\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/space-header/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/space-header" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a block header with a space before the comment must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
 }
 
 # The manifest is the only record of what this script may remove later, so a
@@ -6418,62 +6149,6 @@ validator_folds_plain_scalar_across_blank_line() {
 	esac
 }
 
-# A folded block joins its lines with single spaces, but a blank line between
-# them is a paragraph break worth exactly one newline. Folding it to two
-# spaces, or dropping it, measures a value the runtime never sees. 1022 "a", a
-# blank line and "b" decode to exactly 1024 characters; one more "a" is over
-# the limit.
-validator_folded_block_paragraph_break() {
-	local out rc fits over
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	fits=$(printf '%1022s' '' | tr ' ' 'a')
-	over=$(printf '%1023s' '' | tr ' ' 'a')
-	mkdir -p "$CASE_DIR/folded-break/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$fits"
-		printf '\n'
-		printf '  b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-break/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-break" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a 1024-character folded description must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/folded-break-long/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$over"
-		printf '\n'
-		printf '  b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-break-long/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-break-long" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a 1025-character folded description must fail: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
-}
-
 # A mkdir shim that loses one race for the lock path: the first time the script
 # under test tries to make the lock directory, the shim removes the lock that
 # is already there and reports failure, so the run finds an empty lock path
@@ -6613,293 +6288,6 @@ unreadable_name_not_repointed() {
 	assert_out_has "errors 0" "a clean run"
 	assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha still points at the first source"
 	assert_file_has "$HOME/.agents/skills/.skill-links" "$CASE_DIR/one/alpha" "the manifest still records it"
-}
-
-# A folded block folds no line break next to a more-indented line, so a blank
-# line before such a line is worth two newlines: the break that ends the
-# previous line, plus the paragraph break. Counting only the paragraph break
-# measures a description shorter than the runtime sees, and a value one
-# character over the limit validates. 1020 "a", a blank line and a
-# more-indented "b" decode to 1025 characters; 1019 "a" decode to 1024. With
-# no blank line, "a" x 1016, a more-indented "y" and "z" decode to exactly
-# 1024, which pins the separator on both sides of a more-indented line.
-validator_folded_block_more_indented_boundary() {
-	local out rc fits over chainfits chainover
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	fits=$(printf '%1019s' '' | tr ' ' 'a')
-	over=$(printf '%1020s' '' | tr ' ' 'a')
-
-	mkdir -p "$CASE_DIR/folded-more-indent-over/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$over"
-		printf '\n'
-		printf '    b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-more-indent-over/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-over" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a 1025-character folded description must fail across a more-indented line: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/folded-more-indent-fits/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$fits"
-		printf '\n'
-		printf '    b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-more-indent-fits/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-fits" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a 1024-character folded description must validate across a more-indented line: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	# No blank line here: the break before the more-indented line and the break
-	# after it are each worth one newline, so the value is
-	# "a" x 1016 + "\n" + "    y" + "\n" + "z".
-	chainfits=$(printf '%1016s' '' | tr ' ' 'a')
-	chainover=$(printf '%1017s' '' | tr ' ' 'a')
-
-	mkdir -p "$CASE_DIR/folded-more-indent-chain/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$chainfits"
-		printf '      y\n'
-		printf '  z\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-more-indent-chain/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-chain" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a 1024-character folded description around a more-indented line must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/folded-more-indent-chain-over/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$chainover"
-		printf '      y\n'
-		printf '  z\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/folded-more-indent-chain-over/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/folded-more-indent-chain-over" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a 1025-character folded description around a more-indented line must fail: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
-}
-
-# A line of spaces indented past a block's own indentation is not a blank
-# line: YAML keeps every space the indentation does not cover. In a folded
-# block it is a more-indented line, so the breaks on both sides of it survive
-# as well, and the value is two characters longer than the visible text.
-validator_block_keeps_overindented_space_line() {
-	local out rc over fits
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	# 1021 "a", a newline, the two spaces the indentation leaves, a newline and
-	# "b" measure 1026. One "a" fewer on each side of the limit tells the two
-	# apart.
-	over=$(printf '%1021s' '' | tr ' ' 'a')
-	fits=$(printf '%1019s' '' | tr ' ' 'a')
-
-	mkdir -p "$CASE_DIR/space-line-over/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$over"
-		printf '    \n'
-		printf '  b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/space-line-over/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-over" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a 1026-character folded description across a line of spaces must fail: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/space-line-fits/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '  %s\n' "$fits"
-		printf '    \n'
-		printf '  b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/space-line-fits/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-fits" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a 1024-character folded description across a line of spaces must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	# A literal block keeps the same spaces, with one newline per break.
-	mkdir -p "$CASE_DIR/space-line-literal/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |-\n'
-		printf '  %s\n' "$over"
-		printf '    \n'
-		printf '  b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/space-line-literal/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/space-line-literal" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a 1026-character literal description across a line of spaces must fail: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the literal failure must name the length limit: $out" ;;
-	esac
-}
-
-# The indentation of a block is the header's indicator, and without one the
-# indentation of the first non-blank body line. A later line indented less
-# than that ends the block in the middle of the frontmatter, and no YAML
-# loader reads the document. Taking the smallest indentation instead accepted
-# files every runtime refuses.
-validator_rejects_underindented_block_line() {
-	local out rc fits over
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	# With the indicator at 2, the four-space line leaves two spaces of
-	# content: 1020 "a", a newline and "  b" are 1024.
-	fits=$(printf '%1020s' '' | tr ' ' 'a')
-	over=$(printf '%1021s' '' | tr ' ' 'a')
-
-	mkdir -p "$CASE_DIR/under-indicator/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |2\n'
-		printf ' one space under a two space indicator\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/under-indicator/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/under-indicator" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a body line under the block indicator must fail: $out"
-	fi
-	case "$out" in
-	*"frontmatter line 4 is not valid YAML"*) ;;
-	*) fail "the under-indented line must be reported by number: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/under-first/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |\n'
-		printf '    four spaces set the indentation\n'
-		printf '  two spaces do not reach it\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/under-first/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/under-first" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a body line under the first line's indentation must fail: $out"
-	fi
-	case "$out" in
-	*"frontmatter line 5 is not valid YAML"*) ;;
-	*) fail "the shallower line must be reported by number: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/over-indicator-fits/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |2\n'
-		printf '  %s\n' "$fits"
-		printf '    b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/over-indicator-fits/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/over-indicator-fits" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a line indented past the indicator must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	# The two spaces the indicator does not cover are content: one "a" more
-	# and the same three lines are over the limit.
-	mkdir -p "$CASE_DIR/over-indicator-over/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |2\n'
-		printf '  %s\n' "$over"
-		printf '    b\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/over-indicator-over/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/over-indicator-over" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "the extra spaces of a deeper line must be measured: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
 }
 
 # YAML never reads a tab as indentation, and a loader refuses the document on
@@ -9038,77 +8426,6 @@ validator_rejects_symlinked_root_dir_with_skill_md() {
 	esac
 }
 
-# A blank line before the first content line of a folded block is content: the
-# value starts with one newline for each of them. Dropping those newlines
-# measures a value the runtime never sees. The description length cannot show
-# it, because the empty check trims a leading newline away before it measures,
-# so the name proves it instead: with the leading blank line the folded name
-# is "\nnoted", which is not the directory name.
-validator_folded_block_leading_blank() {
-	local out rc fits
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	mkdir -p "$CASE_DIR/lead-blank/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: >-\n'
-		printf '\n'
-		printf '  noted\n'
-		printf 'description: a folded name with a leading blank line\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/lead-blank/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/lead-blank" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "a folded name with a leading blank line must fail: $out"
-	fi
-	case "$out" in
-	*"must equal the directory name"*) ;;
-	*) fail "the failure must name the directory mismatch: $out" ;;
-	esac
-
-	mkdir -p "$CASE_DIR/no-lead-blank/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: >-\n'
-		printf '  noted\n'
-		printf 'description: a folded name with no leading blank line\n'
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/no-lead-blank/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/no-lead-blank" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a folded name without a leading blank line must validate: $out"
-	fi
-	case "$out" in
-	"validated 1 skills") ;;
-	*) fail "unexpected validator output: $out" ;;
-	esac
-
-	# The description keeps the newline too, but the empty check trims it, so a
-	# 1024 character description with a leading blank line still fits.
-	fits=$(printf '%1024s' '' | tr ' ' 'a')
-	mkdir -p "$CASE_DIR/lead-blank-desc/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: >-\n'
-		printf '\n'
-		printf '  %s\n' "$fits"
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/lead-blank-desc/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/lead-blank-desc" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 0 ]; then
-		fail "a trimmed 1024 character folded description must validate: $out"
-	fi
-}
-
 # A backslash at the end of a double-quoted line escapes the line break: the
 # break and the next line's leading whitespace go away and nothing takes their
 # place. Folding a space in there instead measures a value the runtime never
@@ -9177,38 +8494,6 @@ validator_quoted_escaped_line_break() {
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
 		fail "a blank line after an escaped break must still count: $out"
-	fi
-	case "$out" in
-	*"1-1024 chars"*) ;;
-	*) fail "the failure must name the length limit: $out" ;;
-	esac
-}
-
-# Only "---" at column zero closes the frontmatter. An indented "---" is
-# content, and inside a block scalar it belongs to the scalar, so the block
-# runs on to the real delimiter and the whole description is measured.
-validator_indented_delimiter_is_content() {
-	local out rc long
-	if ! have_node; then
-		printf '    (skipped: no node)\n'
-		return
-	fi
-	long=$(printf '%1100s' '' | tr ' ' 'a')
-	mkdir -p "$CASE_DIR/indented-delim/skills/noted"
-	{
-		printf -- '---\n'
-		printf 'name: noted\n'
-		printf 'description: |-\n'
-		printf '  short\n'
-		printf '  ---\n'
-		printf '  %s\n' "$long"
-		printf -- '---\n\n'
-		printf 'Body.\n'
-	} >"$CASE_DIR/indented-delim/skills/noted/SKILL.md"
-	out=$(node "$VALIDATOR" "$CASE_DIR/indented-delim" 2>&1)
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		fail "an indented delimiter must not close the frontmatter: $out"
 	fi
 	case "$out" in
 	*"1-1024 chars"*) ;;
@@ -10120,15 +9405,10 @@ main() {
 	run_case source_dotdot_after_symlink_resolves_physically
 	run_case source_dotdot_alias_missing_keeps_links
 	run_case manifest_two_column_lines_still_parse
-	run_case validator_folds_block_scalar_description
 	run_case validator_accepts_crlf_frontmatter
 	run_case validator_ignores_finder_metadata
-	run_case validator_block_indicator_either_order
-	run_case validator_rejects_bad_block_header
 	run_case validator_strips_inline_comment
 	run_case validator_keeps_text_after_nbsp_hash
-	run_case validator_block_header_with_comment
-	run_case validator_rejects_block_header_nbsp_comment
 	run_case validator_rejects_non_string_description
 	run_case validator_rejects_typed_scalars
 	run_case validator_rejects_tagged_and_more_numeric_scalars
@@ -10136,10 +9416,6 @@ main() {
 	run_case validator_counts_code_points
 	run_case validator_rejects_skill_over_500_lines
 	run_case validator_folds_plain_scalar_across_blank_line
-	run_case validator_folded_block_paragraph_break
-	run_case validator_folded_block_more_indented_boundary
-	run_case validator_block_keeps_overindented_space_line
-	run_case validator_rejects_underindented_block_line
 	run_case validator_rejects_tab_indentation
 	run_case validator_decodes_all_yaml_escapes
 	run_case validator_rejects_unknown_escape
@@ -10158,7 +9434,6 @@ main() {
 	run_case validator_rejects_nested_references_dir
 	run_case validator_rejects_symlinked_nested_skill_md
 	run_case validator_rejects_symlinked_root_dir_with_skill_md
-	run_case validator_folded_block_leading_blank
 	run_case validator_folds_plain_scalar_continuation
 	run_case validator_rejects_mapping_indicator_in_plain_scalar
 	run_case validator_rejects_mapping_indicator_on_later_continuation
@@ -10179,7 +9454,6 @@ main() {
 	run_case validator_rejects_unterminated_quote
 	run_case validator_block_scalar_keeps_internal_spaces
 	run_case validator_quoted_escaped_line_break
-	run_case validator_indented_delimiter_is_content
 	run_case mktemp_failure_arms_no_cleanup
 
 	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"

@@ -105,7 +105,14 @@ scripts/lib/<tool>/<topic>.sh  one topic per file; defines functions, runs nothi
 scripts/test-<tool>.sh         runner: sources tests/lib/, runs every tests/<tool>/*.sh
 scripts/tests/lib/<name>.sh    shared assertions, fixtures, and shims
 scripts/tests/<tool>/<topic>.sh cases for one topic, in the same order as lib/
+scripts/tests/<tool>/<topic>.test.mjs  node:test cases for a JavaScript subject, one topic per file
+scripts/tests/<tool>/helpers/<name>.mjs shared fixtures and builders for those cases
 ```
+
+The parser tests for `scripts/validate-skills.mjs` live under
+`scripts/tests/validate-skills/`: each file covers one YAML topic, and
+`cli.test.mjs` runs the command itself over a temporary skills/ tree. Run
+them with `pnpm test:scripts`.
 
 Rules for a module file:
 
