@@ -268,12 +268,19 @@ comment or an inline reply: `claims verify --gate summary-comment` or
 `claims verify --gate inline-reply` while this run holds the claim, `claims read`
 otherwise. These two gates are advisory only while the policy's `advisoryBefore`
 lists them, the default. A policy that moves either into `requiredBefore` makes
-that gate mandatory: run the publishing command itself under
-`claims guard --gate summary-comment` or `claims guard --gate inline-reply`,
-which refuses to start it without a held claim and stops it when the claim is
-lost, so a point-in-time `verify` never stands in for the fence; an exit 20 that
-bounded retries cannot resolve stops that publication, because the run cannot
-prove it still holds the fence. For an advisory gate the direction is one way. An unknown
+that gate mandatory, and a point-in-time `verify` never stands in for a mandatory
+fence. A reply or comment whose marker is v1 carries no claim token: run its
+publishing command under `claims guard --gate inline-reply` or
+`claims guard --gate summary-comment`, which refuses to start it without a held
+claim and stops it when the claim is lost. A marker that carries the claim token
+(every v2 comment or reply marker, and every summary comment under claims)
+cannot be published that way: guard renews and rotates the token before and
+while it runs the command and hands the command no token, so a marker built
+beforehand names a stale claim at post time. The claim tool has no
+marker-aware guarded publication, so stop that publication and report the
+mandatory gate as the blocker. An exit 20 that bounded retries cannot resolve
+stops a mandatory publication too. For an advisory gate the direction is one
+way. An unknown
 verdict does not block the comment: exit 20 `transport` is retried, and a claim
 this run still believes it holds but could not read is posted against anyway,
 because the procedural-marker contract reconciles a duplicate. A verdict that
