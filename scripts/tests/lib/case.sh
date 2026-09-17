@@ -10,7 +10,7 @@
 # case_tap_summary), CURRENT (case_fail), FAIL (_case_tap, case_tap_summary),
 # HARNESS_PATH (case_setup), LS (case_run_script, case_run_script_in), PASS
 # (_case_tap, case_tap_summary), ROOT (case_cleanup, case_setup, case_run),
-# SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE (skip, _case_tap),
+# SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE (case_skip, _case_tap),
 # SOURCE_SCRIPT (case_setup).
 # Writes: CASE_DIR, CASE_FAILS, CASE_NUM, CURRENT, FAIL, HOME, LS, LS_OUT,
 # LS_RC, PASS, PATH, SAVED_PATH, SKIPPED, SKIP_NOTE, and the
@@ -33,7 +33,7 @@
 
 # A case body ends in an exit status that the parent reads as the verdict: 0
 # for a pass, 1 to CASE_FAIL_MAX for that many failed assertions,
-# CASE_SKIP_STATUS for a case that skip() stopped. The cap keeps a count of
+# CASE_SKIP_STATUS for a case that case_skip stopped. The cap keeps a count of
 # failures inside the eight bits an exit status carries and below the status a
 # skip claims.
 CASE_FAIL_MAX=250
@@ -58,7 +58,7 @@ case_fail() {
 # is either present or it is not, so a skip is a verdict of its own and never
 # a pass. The reason travels to the parent in a file because the exit status
 # carries the verdict alone.
-skip() {
+case_skip() {
 	printf '%s\n' "$*" >"$SKIP_NOTE"
 	exit "$CASE_SKIP_STATUS"
 }
