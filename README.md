@@ -367,7 +367,9 @@ The harness prints TAP 13 and ends with a
 `# N passed, N failed, N skipped (interpreter <name>)` line. It is
 `scripts/test-link-skills.sh`, a runner that holds no case: it sources six
 modules from `scripts/tests/lib/` and one file per topic from
-`scripts/tests/link-skills/`, with the shared `install-hooks-common.sh` first. The cases for `scripts/validate-skills.mjs` are
+`scripts/tests/link-skills/`, where the shared `install-hooks-common.sh` comes
+before the install-hooks topics that call it. The cases for
+`scripts/validate-skills.mjs` are
 `node:test` files under `scripts/tests/validate-skills/`.
 
 Each package's own README documents its usage; run its suite directly with

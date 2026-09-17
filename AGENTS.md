@@ -93,11 +93,11 @@ The harness is `scripts/test-link-skills.sh`, which holds no case of its own.
 It sources six modules from `scripts/tests/lib/` (`case.sh`, `assert.sh`,
 `fs.sh`, `fixtures.sh`, `shims.sh`, `probe.sh`) and then one file per topic
 from `scripts/tests/link-skills/`, each by absolute path from an explicit
-ordered list. That second list opens with
-`scripts/tests/link-skills/install-hooks-common.sh`, which holds no case: it
-carries the settings-file builders more than one install-hooks topic calls, so
-it is sourced before them. `BASH_BIN` sets the interpreter the script under
-test runs under; it defaults to `bash`.
+ordered list. `scripts/tests/link-skills/install-hooks-common.sh` holds no
+case either: it carries the settings-file builders more than one install-hooks
+topic calls, so the list sources it before every install-hooks topic that calls
+them. `BASH_BIN` sets the interpreter the script under test runs under; it
+defaults to `bash`.
 
 The harness reports in TAP 13: a `TAP version 13` line, a `# interpreter:`
 comment naming the interpreter and its version, one `ok` or `not ok` line per
