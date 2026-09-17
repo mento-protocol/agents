@@ -102,3 +102,9 @@ _hook_deadline_check_elapsed() {
 		case_fail "the hook took $1s, expected it to return inside ${HOOK_DEADLINE_TEST_MAX}s"
 	fi
 }
+
+# The cases of this topic, in the order the runner ran them.
+cases_hook_deadline() {
+	case_run hook_bounded_by_deadline
+	case_run hook_bounded_without_tmpdir
+}
