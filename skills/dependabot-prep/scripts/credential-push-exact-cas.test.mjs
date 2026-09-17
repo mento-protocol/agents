@@ -302,8 +302,9 @@ test("an env-node shebang is refused for toolchain programs", (t) => {
   );
 });
 
-test("a grafted, shallow or alternates candidate is refused before any Git call", (t) => {
+test("a grafted, shallow, alternates or commondir candidate is refused before any Git call", (t) => {
   for (const relative of [
+    "commondir",
     "info/grafts",
     "shallow",
     "objects/info/alternates",
