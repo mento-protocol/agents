@@ -90,6 +90,29 @@ description: "unterminated
 Body.
 `;
 
+// YAML reads ": " inside an unquoted value as a mapping indicator and refuses
+// the document, so the line is reported by its own number.
+const MAPPING_INDICATOR_SKILL = `---
+name: noted
+description: hello: world
+---
+
+Body.
+`;
+
+// The collection opens with "[" and closes with "}", which pairs with
+// nothing. A flow collection is refused as a non-string on the two string
+// fields before its delimiters are read, so the fixture sits under an
+// optional key.
+const MISMATCHED_FLOW_SKILL = `---
+name: noted
+description: a description
+allowed-tools: [Read}
+---
+
+Body.
+`;
+
 test("a valid minimal skill validates and reports the count", (t) => {
   const root = makeSkillsDir();
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -172,5 +195,31 @@ test("an unterminated quoted description is reported once, without its length", 
   assert.equal(
     output.trim(),
     'skills/noted: "description" has an unterminated or malformed quoted scalar',
+  );
+});
+
+test("a mapping indicator in a plain scalar is reported by its line number", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(root, "noted", MAPPING_INDICATOR_SKILL);
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.ok(
+    output.includes("skills/noted: frontmatter line 3 is not valid YAML"),
+    `the mapping indicator must be reported by line: ${output}`,
+  );
+});
+
+test("a flow collection that closes with the other delimiter is reported by its line number", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(root, "noted", MISMATCHED_FLOW_SKILL);
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    "skills/noted: frontmatter line 4 is not valid YAML",
   );
 });
