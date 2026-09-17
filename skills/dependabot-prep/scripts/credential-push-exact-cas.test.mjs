@@ -71,7 +71,12 @@ function createSealedFixtureRoot(t) {
 
 function createFixture(
   t,
-  { ancestry = true, execPathAlias = null, mutateGhOnPush = false } = {},
+  {
+    ancestry = true,
+    execPathAlias = null,
+    mutateOnPush = null,
+    raceAfterWrite = false,
+  } = {},
 ) {
   const root = createSealedFixtureRoot(t);
 
@@ -107,6 +112,7 @@ function createFixture(
   writeFileSync(remoteState, OLD_OID, { mode: 0o600 });
 
   const ghPath = path.join(tools, "gh");
+  const helperPath = path.join(tools, "credential-helper.mjs");
   // The exec path the fake Git reports: the sealed directory itself, a symlink
   // to it inside the sealed root, or a symlink beneath a world-writable
   // directory that the inspector must refuse.
@@ -151,9 +157,14 @@ writeFileSync(${JSON.stringify(pushCount)}, String(count + 1), "utf8");
 writeFileSync(${JSON.stringify(pushLog)}, JSON.stringify({ args, env: process.env }), "utf8");
 const lease = args.find((value) => value.startsWith("--force-with-lease="));
 const expected = lease?.slice(lease.lastIndexOf(":") + 1);
-if (readFileSync(${JSON.stringify(remoteState)}, "utf8") !== expected) process.exit(1);
+if (readFileSync(${JSON.stringify(remoteState)}, "utf8") !== expected) {
+  process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/frontend-monorepo.git\n!\t${NEW_OID}:refs/heads/${REF_NAME}\t[rejected] (stale info)\nDone\n`)});
+  process.exit(1);
+}
 writeFileSync(${JSON.stringify(remoteState)}, ${JSON.stringify(NEW_OID)}, "utf8");
-${mutateGhOnPush ? `appendFileSync(${JSON.stringify(ghPath)}, "\\n");` : ""}
+${raceAfterWrite ? "process.exit(1);" : ""}
+${mutateOnPush === "gh" ? `appendFileSync(${JSON.stringify(ghPath)}, "\\n");` : ""}
+${mutateOnPush === "helper" ? `appendFileSync(${JSON.stringify(helperPath)}, "\\n");` : ""}
 process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/frontend-monorepo.git\n \t${NEW_OID}:refs/heads/${REF_NAME}\t1111111..2222222\nDone\n`)});
 `;
   writeFileSync(gitPath, fakeGit, { mode: 0o700 });
@@ -180,7 +191,6 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   );
   chmodSync(ghPath, 0o700);
 
-  const helperPath = path.join(tools, "credential-helper.mjs");
   copyFileSync(
     fileURLToPath(new URL("./credential-helper.mjs", import.meta.url)),
     helperPath,
@@ -262,14 +272,17 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   };
 }
 
-test("toolchain drift after the push reports ambiguity, not refusal", (t) => {
-  const fixture = createFixture(t, { mutateGhOnPush: true });
-  assert.throws(
-    () => pushExactCas(fixture.request, fixture.trusted),
-    /after the push ran; live readback is required/,
-  );
-  assert.equal(readFileSync(fixture.pushCount, "utf8"), "1");
-  assert.equal(readFileSync(fixture.remoteState, "utf8"), NEW_OID);
+test("toolchain or helper drift after the push reports ambiguity", (t) => {
+  for (const mutateOnPush of ["gh", "helper"]) {
+    const fixture = createFixture(t, { mutateOnPush });
+    assert.throws(
+      () => pushExactCas(fixture.request, fixture.trusted),
+      /after the push ran; live readback is required/,
+      `${mutateOnPush} drift was not reported`,
+    );
+    assert.equal(readFileSync(fixture.pushCount, "utf8"), "1");
+    assert.equal(readFileSync(fixture.remoteState, "utf8"), NEW_OID);
+  }
 });
 
 test("a sealed exec-path alias is bound; a writable alias fails closed", (t) => {
@@ -327,10 +340,20 @@ test("stale lease performs one failed push and leaves the ref unchanged", (t) =>
 
   assert.throws(
     () => pushExactCas(fixture.request, fixture.trusted),
-    /failed or raced/,
+    /failed or raced\. \(git exit 1\)$/,
   );
   assert.equal(readFileSync(fixture.pushCount, "utf8"), "1");
   assert.equal(readFileSync(fixture.remoteState, "utf8"), racedOid);
+});
+
+test("a non-zero exit without a porcelain rejection is ambiguous", (t) => {
+  const fixture = createFixture(t, { raceAfterWrite: true });
+  assert.throws(
+    () => pushExactCas(fixture.request, fixture.trusted),
+    /\(git exit 1\); the push may have run, so live readback is required/,
+  );
+  assert.equal(readFileSync(fixture.pushCount, "utf8"), "1");
+  assert.equal(readFileSync(fixture.remoteState, "utf8"), NEW_OID);
 });
 
 test("non-fast-forward candidate fails before push", (t) => {
@@ -382,6 +405,17 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
   const insideCandidate = { ...fixture.trusted, homePath: insideHome };
   assert.throws(
     () => pushExactCas(fixture.request, insideCandidate),
+    /inside the candidate root/,
+  );
+  const insideGh = path.join(fixture.request.candidateRoot, "gh");
+  copyFileSync(fixture.ghPath, insideGh);
+  chmodSync(insideGh, 0o700);
+  const insideToolchain = {
+    ...fixture.trusted,
+    toolchainOptions: { ...fixture.trusted.toolchainOptions, ghPath: insideGh },
+  };
+  assert.throws(
+    () => pushExactCas(fixture.request, insideToolchain),
     /inside the candidate root/,
   );
   const zeroOld = { ...fixture.request, expectedOldOid: "0".repeat(40) };

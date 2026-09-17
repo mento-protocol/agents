@@ -231,10 +231,15 @@ function readCredentialRecord() {
   const input = Buffer.alloc(MAX_INPUT_BYTES + 1);
   let length = 0;
 
-  while (length < input.length) {
-    const count = readSync(0, input, length, input.length - length, null);
-    if (count === 0) break;
-    length += count;
+  try {
+    while (length < input.length) {
+      const count = readSync(0, input, length, input.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+  } catch {
+    input.fill(0);
+    reject();
   }
 
   if (length === input.length) {

@@ -218,23 +218,28 @@ function runGit(gitPath, args, options) {
     timeout: options.timeout ?? 15_000,
   });
   if (result.error || result.signal || result.status !== options.status) {
+    // A push proves it wrote nothing only when Git's porcelain reports the
+    // ref as rejected (a `!` record). A non-zero exit without that record, a
+    // signal (the timeout) or a spawn error such as ENOBUFS says nothing
+    // about the remote, so the caller's abort suffix names the readback it
+    // now owes. The output is read for that one pattern and then discarded,
+    // because it can carry credential material.
+    const refused =
+      !result.error &&
+      !result.signal &&
+      options.refusalPattern instanceof RegExp &&
+      Buffer.isBuffer(result.stdout) &&
+      options.refusalPattern.test(result.stdout.toString("utf8"));
     if (Buffer.isBuffer(result.stdout)) result.stdout.fill(0);
     if (Buffer.isBuffer(result.stderr)) result.stderr.fill(0);
-    // Output is discarded because it can carry credential material; the exit
-    // status, signal or spawn error code is what separates a rejected lease
-    // (git exits 1) from a transport or spawn failure for the operator.
     const cause = result.error
       ? `spawn ${result.error.code ?? "error"}`
       : result.signal
         ? `signal ${result.signal}`
         : `git exit ${result.status}`;
-    // A non-zero exit is Git's own refusal and nothing was written. A signal
-    // (the timeout) or a spawn error such as ENOBUFS says nothing about the
-    // remote, so the caller's abort suffix names the readback it now owes.
-    const aborted = result.error || result.signal;
     reject(
       `${options.errorMessage} (${cause})${
-        aborted && options.abortSuffix ? `; ${options.abortSuffix}` : ""
+        !refused && options.abortSuffix ? `; ${options.abortSuffix}` : ""
       }`,
     );
   }
@@ -526,6 +531,7 @@ export function pushExactCas(requestInput, trustedInput) {
     trusted.hooksPath,
     trusted.templatesPath,
     trusted.tempPath,
+    ...Object.values(trusted.toolchainOptions),
   ]) {
     if (isAtOrBelow(request.candidateRoot, trustedPath))
       reject("Trusted path is inside the candidate root.");
@@ -602,6 +608,7 @@ export function pushExactCas(requestInput, trustedInput) {
     env: pushEnvironment,
     abortSuffix: "the push may have run, so live readback is required",
     errorMessage: "Exact CAS push failed or raced.",
+    refusalPattern: /^!\t/mu,
     status: 0,
     timeout: 60_000,
   });
@@ -617,13 +624,16 @@ export function pushExactCas(requestInput, trustedInput) {
   }
 
   // The push ran. Any failure from here on is ambiguity, not refusal: the
-  // manifest digest binds every pinned digest, so a drift or a failed probe
-  // means the remote may have moved under an unverified toolchain.
+  // manifest digest binds the toolchain digests and the helper is rehashed,
+  // so a drift or a failed probe means the remote may have moved under an
+  // unverified toolchain or helper.
   try {
     verifyCredentialPushToolchain(
       trusted.expectedToolchainSha256,
       trusted.toolchainOptions,
     );
+    const postHelper = inspectSealedExecutable(trusted.helperPath);
+    requireDigest(postHelper.sha256, trusted.helperSha256, "credential helper");
   } catch (error) {
     throw new Error(
       "Toolchain drifted or could not be verified after the push ran; live readback is required.",
