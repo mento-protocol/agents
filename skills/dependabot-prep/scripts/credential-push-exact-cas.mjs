@@ -350,6 +350,10 @@ function validateTrustedConfig(trusted) {
     reject("Toolchain module pin is absent.");
   if (!SHA256_PATTERN.test(trusted.wrapperSha256))
     reject("Push wrapper pin is absent.");
+  // Defense in depth: ESM evaluates the two imported modules before this
+  // function runs, so these digests cannot establish code identity on their
+  // own. The launcher verifies every pinned file before it loads any of them
+  // (references/launch-boundary.md); this catches a swap after that check.
   requireDigest(
     sha256File(GIT_CONFIG_MODULE_PATH),
     trusted.gitConfigModuleSha256,

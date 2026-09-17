@@ -174,8 +174,8 @@ function buildSummaryVector(input) {
 }
 
 // The default `generatedBy` records the package NAME and no version. The
-// serialized fixture is byte-compared by `markers vectors --check`, and a
-// separate skill repository copies the file verbatim, so a version in this
+// serialized fixture is byte-compared by `markers vectors --check`, and the
+// bundled skill under skills/dependabot-prep carries a verbatim copy, so a version in this
 // field would make every release rewrite the fixture and fail that check until
 // someone regenerated it. The name answers the only question the field is
 // asked — which tool wrote these bytes — and it does not move on a release.

@@ -69,7 +69,8 @@ change to this contract.
   to the original issue comment's positive safe-integer REST database ID and
   exact current API body. Follow the visible body with one blank line and the
   marker grammar of the revision that contract selects from repository policy:
-  v1 without claims or with `markerRevision: v1`, otherwise v2, which appends
+  v1 without claims or when the policy's marker revision (`markers.revision`,
+  else `claims.markerRevision`) is `v1`, otherwise v2, which appends
   `claim=<40hex>` after `decision`. The v1 form is:
 
   `<!-- dependabot-prep-comment:v1 root-id-sha256=<64 lowercase hex> root-body-sha256=<64 lowercase hex> head=<40 lowercase hex> visible-body-sha256=<64 lowercase hex> operator-sha256=<64 lowercase hex> decision=<fixed|wont-fix> -->`

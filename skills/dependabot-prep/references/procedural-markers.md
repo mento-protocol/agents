@@ -59,23 +59,23 @@ ASCII space between tokens, including before `-->`. Emit lowercase SHA-256 hex.
 Build the submitted body as the exact visible-body bytes, two LF bytes, then the
 marker bytes. Do not append a final newline.
 
-Use v1 when repository policy prescribes no claims, or prescribes claims with a
-`markerRevision` of `v1`:
+The marker revision is the policy's `markers.revision`, or `claims.markerRevision`
+when `markers.revision` is absent; `v2` is the default. Use v1 when repository
+policy prescribes no claims, or when that revision is `v1`:
 
 `<!-- dependabot-prep-comment:v1 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> -->`
 
 `<!-- dependabot-prep-reply:v1 ... -->` carries the same fields on a review reply.
 
-Use v2 when repository policy prescribes claims and its `markerRevision` is `v2`,
-the default:
+Use v2 when repository policy prescribes claims and that revision is `v2`:
 
 `<!-- dependabot-prep-comment:v2 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> claim=<40hex> -->`
 
 `<!-- dependabot-prep-reply:v2 ... -->` carries the same fields on a review reply.
 
-`claim` is appended after `decision`, so every v1 byte position before it is
-unchanged and a reader that knows only v1 still matches the v1 prefix. The schema
-token is the gate: `claim` is required for a `:v2` schema and forbidden for a
+`claim` is appended after `decision`, so the v2 field order is the v1 order plus
+one field; the schema token differs, so a reader that matches `:v1` exactly does
+not discover a v2 marker. The schema token is the gate: `claim` is required for a `:v2` schema and forbidden for a
 `:v1` schema.
 
 ## Summary comment
@@ -85,7 +85,7 @@ The repository's configured summary marker — `reporting.prCommentMarker`, or
 discovery token for the one summary comment per author login per PR. Keep it
 unchanged, on the comment's first line.
 
-When policy prescribes claims and its `markerRevision` is `v2`, it also names a
+When policy prescribes claims and the marker revision is `v2`, it also names a
 claim-marker schema (`reporting.prCommentClaimMarkerSchema`). Add that line on
 its own line immediately after the discovery marker:
 
@@ -101,7 +101,7 @@ the Mento discovery marker, and then the v2 claim line. It does not read
 line, keep the configured marker first and take only the second line from the
 command output.
 
-A `markerRevision` of `v1`, and a repository that prescribes no claims, keep the
+A marker revision of `v1`, and a repository that prescribes no claims, keep the
 discovery marker alone.
 
 `pr` is decimal with no leading zero. `run-sha256` is `sha256(utf8(<owner run

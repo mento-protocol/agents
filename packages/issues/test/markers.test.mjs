@@ -117,8 +117,8 @@ test("the two checked-in v1 marker vectors re-derive byte-for-byte", () => {
 test("the default generatedBy names the package without its version, so a release never rewrites the fixture", () => {
   // The default used to be `name@version`. A version bump therefore changed
   // one line of the serialized fixture, and `markers vectors --check` answered
-  // exit 3 until someone regenerated it — here and in the separate skill
-  // repository that copies the file verbatim.
+  // exit 3 until someone regenerated it — here and in the bundled skill copy
+  // under skills/dependabot-prep.
   const manifest = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -691,11 +691,18 @@ test("a summary marker whose pr is not a safe integer does not parse as v2", () 
 });
 
 // The skill that consumes these vectors carries a verbatim copy of the fixture
-// as its byte authority; the two files must not drift apart.
-test("the dependabot-prep skill carries the fixture byte for byte", () => {
+// as its byte authority. The stored package fixture must be what the generator
+// produces today, and the skill copy must equal it, or the two suites validate
+// stale bytes against each other.
+test("the dependabot-prep skill carries the generated fixture byte for byte", () => {
   const packageCopy = readFileSync(
     new URL("../fixtures/comment-marker-vectors.json", import.meta.url),
     "utf8",
+  );
+  assert.equal(
+    serializeFixture(generateMarkerVectors()),
+    packageCopy,
+    "package fixture drifted from the generator",
   );
   const skillCopy = readFileSync(
     new URL(
