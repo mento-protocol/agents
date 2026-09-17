@@ -3,4 +3,4 @@
 # Lower the count as the file shrinks; delete the line once it fits, and
 # keep this file even when it holds no entries.
 scripts/link-skills.sh 4066
-scripts/test-link-skills.sh 5899
+scripts/test-link-skills.sh 5606
