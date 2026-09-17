@@ -20,6 +20,10 @@ SKIPPED=0
 CASE_NUM=0
 CURRENT=""
 CASE_FAILS=0
+# The next case to report, and the number of cases that run at once. case.sh
+# resolves the worker count from HARNESS_JOBS on the first case.
+NEXT_REPORT=1
+CASE_JOBS=0
 
 # The PATH this run started with. case_setup restores it before every case,
 # so a shim a case installed is gone whatever that case did with it.
@@ -52,6 +56,12 @@ SAVED_PATH=""
 . "$HERE/tests/lib/shims.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/shims.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/probe.sh
 . "$HERE/tests/lib/probe.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/probe.sh >&2 && exit 2; }
+
+# The cases of a topic that has moved out of this file live in
+# tests/link-skills/, one file per topic, and are sourced from their own
+# ordered list, by absolute path, the same way.
+# shellcheck source=tests/link-skills/hook-deadline.sh
+. "$HERE/tests/link-skills/hook-deadline.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/hook-deadline.sh >&2 && exit 2; }
 
 # ------------------------------------------------------------------ cases ---
 
@@ -2760,7 +2770,7 @@ mktemp_failure_arms_no_cleanup() {
 	mkdir -p "$work/subdir"
 	printf 'sentinel-contents\n' >"$work/sentinel.txt"
 	printf 'nested\n' >"$work/subdir/nested.txt"
-	out=$(cd "$work" && TMPDIR="$CASE_DIR/no-such-tmpdir" "$BASH_BIN" "$HERE/test-link-skills.sh" 2>&1)
+	out=$(cd "$work" && HARNESS_JOBS=1 TMPDIR="$CASE_DIR/no-such-tmpdir" "$BASH_BIN" "$HERE/test-link-skills.sh" 2>&1)
 	rc=$?
 	if [ "$rc" -ne 1 ]; then
 		case_fail "harness exit code $rc, expected 1"
@@ -3132,42 +3142,6 @@ hardlinked_stamp_not_truncated() {
 	assert_out_has "it was not written" "the refusal is reported"
 	assert_file_has "$notes" "KEEP ME" "the hard-linked file keeps its content"
 	assert_file_has "$stamp" "KEEP ME" "the stamp path was not truncated"
-}
-
-# The hook must end the session start it runs in, whatever it started. A git
-# subcommand that outlasts the deadline is stopped with everything below it.
-hook_bounded_by_deadline() {
-	local started elapsed childpid
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	fixtures_push_beta
-	# SKILL_SOURCES_FETCH_INTERVAL_HOURS is 0 for every case, so the hook does
-	# fetch here; the shim hangs on the behind count that follows the fetch.
-	shims_hanging_git "$CASE_DIR/bin"
-	shims_use "$CASE_DIR/bin"
-	LS_TEST_SLEEP_PID="$CASE_DIR/sleep.pid"
-	export LS_TEST_SLEEP_PID
-	started=$(date +%s)
-	case_run_script hook
-	elapsed=$(($(date +%s) - started))
-	unset LS_TEST_SLEEP_PID
-	shims_drop
-	assert_rc 0 "hook"
-	assert_out_has "hook timed out after 25s" "the deadline is reported"
-	if [ "$elapsed" -gt 30 ]; then
-		case_fail "the hook took ${elapsed}s, expected it to return inside 30s"
-	fi
-	childpid=$(cat "$CASE_DIR/sleep.pid" 2>/dev/null || printf '')
-	if [ -z "$childpid" ]; then
-		case_fail "the git shim did not record the pid of its sleep"
-	elif probe_pid_is_live "$childpid"; then
-		case_fail "the sleep the hook started outlived the deadline"
-		kill -9 "$childpid" 2>/dev/null || true
-	fi
-	fs_assert_absent "$HOME/.agents/skills/beta" "the hook links nothing"
 }
 
 # A path the script cannot use fails every other command with exit 2 and ends
@@ -4396,42 +4370,6 @@ candidate_containing_runtime_path_refused() {
 	fs_assert_absent "$CASE_DIR/assembly/alpha" "no link to the home directory"
 	fs_assert_link "$CASE_DIR/assembly/beta" "$CASE_DIR/src/beta" "the other skill is linked again"
 	fs_assert_link "$HOME/.claude/skills" "$CASE_DIR/assembly" "the runtime link is created again"
-}
-
-# A host that gives the hook no temporary file loses the output capture and
-# nothing else: the body still runs as a bounded job, so a git subcommand that
-# outlasts the deadline is still stopped and the session still starts.
-hook_bounded_without_tmpdir() {
-	local started elapsed saved
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	fixtures_push_beta
-	shims_hanging_git "$CASE_DIR/bin"
-	shims_use "$CASE_DIR/bin"
-
-	saved=${TMPDIR-}
-	TMPDIR="$CASE_DIR/no-such-tmp/"
-	export TMPDIR
-	started=$(date +%s)
-	case_run_script hook
-	elapsed=$(($(date +%s) - started))
-	if [ -n "$saved" ]; then
-		TMPDIR=$saved
-		export TMPDIR
-	else
-		unset TMPDIR
-	fi
-	shims_drop
-
-	assert_rc 0 "hook with no temporary directory"
-	assert_out_has "hook timed out" "the deadline is reported"
-	if [ "$elapsed" -gt 30 ]; then
-		case_fail "the hook took ${elapsed}s, expected it to return inside 30s"
-	fi
-	fs_assert_absent "$CASE_DIR/no-such-tmp" "no temporary directory is created"
 }
 
 # An entry that already carries this exact command still runs under the type

@@ -1,34 +1,39 @@
 # shellcheck shell=bash
 #
 # case.sh - case lifecycle for the link-skills harness: per-case setup, the
-# wrapper that runs one case in a subshell and reports it in TAP, the skip
+# workers that run the cases a few at a time and report them in TAP, the skip
 # marker, the two run helpers that invoke the script under test, the traps the
 # run ends under, and case_cleanup, which removes the temporary root.
 #
 # Reads: BASH_BIN (case_run_script, case_run_script_in, case_tap_header),
-# CASE_FAILS (case_fail, _case_body), CASE_FAIL_MAX (_case_body, _case_tap),
-# CASE_NUM (case_run, _case_tap, case_tap_summary), CASE_SKIP_STATUS
-# (case_skip, _case_tap), CURRENT (case_fail), FAIL (_case_tap,
-# case_tap_summary), HARNESS_PATH (case_setup), LS (case_run_script,
-# case_run_script_in), PASS (_case_tap, case_tap_summary), ROOT (case_cleanup,
-# case_setup, case_run), SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE
-# (case_skip, _case_tap), SOURCE_SCRIPT (case_setup).
-# Writes: CASE_DIR, CASE_FAILS, CASE_NUM, CURRENT, FAIL, HOME, LS, LS_OUT,
-# LS_RC, PASS, PATH, SAVED_PATH, SKIPPED, SKIP_NOTE, and the
-# GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM,
-# GIT_TERMINAL_PROMPT and SKILL_SOURCES_FETCH_INTERVAL_HOURS variables the run
-# under test inherits; case_setup also unsets SKILL_SOURCES_FILE and
-# SKILLS_ASSEMBLY_DIR.
+# CASE_ALIVE (case_run, case_tap_summary), CASE_FAILS (case_fail, _case_body),
+# CASE_FAIL_MAX (_case_body, _case_tap), CASE_JOBS (case_run), CASE_NAMES and
+# CASE_PID and CASE_STATUS (_case_poll, _case_report_ready), CASE_NUM
+# (case_run, _case_poll, _case_report_ready, case_tap_summary),
+# CASE_SKIP_STATUS (case_skip, _case_tap), CURRENT (case_fail), FAIL
+# (_case_tap, case_tap_summary), HARNESS_JOBS (_case_jobs), HARNESS_PATH
+# (case_setup), LS (case_run_script, case_run_script_in), NEXT_REPORT
+# (_case_poll, _case_report_ready), PASS (_case_tap, case_tap_summary), ROOT
+# (case_cleanup, case_setup, _case_start, _case_tap), SKIPPED (_case_tap,
+# case_tap_summary), SKIP_NOTE (case_skip), SOURCE_SCRIPT (case_setup).
+# Writes: CASE_ALIVE, CASE_DIR, CASE_FAILS, CASE_JOBS, CASE_NAMES, CASE_NUM,
+# CASE_PID, CASE_STATUS, CURRENT, FAIL, HOME, LS, LS_OUT, LS_RC, NEXT_REPORT,
+# PASS, PATH, SAVED_PATH, SKIPPED, SKIP_NOTE, and the GIT_CONFIG_GLOBAL,
+# GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT,
+# LINK_SKILLS_TEST_LOCK_WAIT_SECONDS and SKILL_SOURCES_FETCH_INTERVAL_HOURS
+# variables the run under test inherits; case_setup also unsets
+# SKILL_SOURCES_FILE and SKILLS_ASSEMBLY_DIR.
 # Writes at load, and never again: CASE_FAIL_MAX, the largest count of failed
 # assertions a case body can report through its exit status, and
 # CASE_SKIP_STATUS, the exit status a case that case_skip stopped ends with.
 # Both are constants this module owns and every reader of them is named above.
 #
 # The runner owns the initialisation of PASS, FAIL, SKIPPED, CASE_NUM,
-# CURRENT, CASE_FAILS, ROOT, CASE_DIR, HARNESS_PATH, SKIP_NOTE, LS, LS_OUT and
-# LS_RC, and calls case_arm_traps once ROOT is a directory of its own.
-# case_run points SKIP_NOTE into ROOT, which exists only once the run has a
-# temporary root.
+# CURRENT, CASE_FAILS, ROOT, CASE_DIR, HARNESS_PATH, SKIP_NOTE, LS, LS_OUT,
+# LS_RC, CASE_JOBS and NEXT_REPORT, and calls case_arm_traps once ROOT is a
+# directory of its own. _case_start points SKIP_NOTE into ROOT, which exists
+# only once the run has a temporary root. CASE_NAMES, CASE_PID and CASE_STATUS
+# are arrays this module fills as it goes, one entry per case number.
 # BASH_BIN, CURRENT and LS stay globals rather than arguments: the cases call
 # case_fail and the two run helpers several hundred times between them, so
 # passing each value would touch every call site, not one line.
@@ -130,6 +135,13 @@ case_setup() {
 	export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT
 	SKILL_SOURCES_FETCH_INTERVAL_HOURS=0
 	export SKILL_SOURCES_FETCH_INTERVAL_HOURS
+	# A test-only knob: the script under test waits two seconds for a lock
+	# another run holds instead of ten. Two is the floor, because
+	# lock_vanish_is_retried needs the six retries that LOCK_WAIT_SECONDS
+	# times five leaves it. Every refusal, retry and stale-lock check still
+	# runs; only the waiting is shorter.
+	LINK_SKILLS_TEST_LOCK_WAIT_SECONDS=2
+	export LINK_SKILLS_TEST_LOCK_WAIT_SECONDS
 	unset SKILL_SOURCES_FILE || true
 	unset SKILLS_ASSEMBLY_DIR || true
 	LS="$SOURCE_SCRIPT"
@@ -151,50 +163,116 @@ _case_body() {
 	exit "$CASE_FAILS"
 }
 
-# The TAP line for one finished case, and the tally it belongs to.
+# The TAP line for one finished case, the tally it belongs to, and whatever
+# the case printed, as TAP comment lines directly after its line.
 _case_tap() {
-	local name status reason
-	name=$1
-	status=$2
+	local num name status reason log
+	num=$1
+	name=$2
+	status=$3
+	log="$ROOT/.case-output.$num"
 	if [ "$status" -eq "$CASE_SKIP_STATUS" ]; then
-		reason=$(head -n 1 "$SKIP_NOTE" 2>/dev/null)
+		reason=$(head -n 1 "$ROOT/.skip-reason.$num" 2>/dev/null)
 		if [ -z "$reason" ]; then
 			reason="no reason given"
 		fi
 		SKIPPED=$((SKIPPED + 1))
-		printf 'ok %d - %s # SKIP %s\n' "$CASE_NUM" "$name" "$reason"
-		return
-	fi
-	if [ "$status" -eq 0 ]; then
+		printf 'ok %d - %s # SKIP %s\n' "$num" "$name" "$reason"
+	elif [ "$status" -eq 0 ]; then
 		PASS=$((PASS + 1))
-		printf 'ok %d - %s\n' "$CASE_NUM" "$name"
-		return
+		printf 'ok %d - %s\n' "$num" "$name"
+	else
+		FAIL=$((FAIL + 1))
+		printf 'not ok %d - %s\n' "$num" "$name"
+		if [ "$status" -gt "$CASE_FAIL_MAX" ]; then
+			printf '# the case exited %d, which is no verdict this harness gives\n' \
+				"$status"
+		fi
 	fi
-	FAIL=$((FAIL + 1))
-	printf 'not ok %d - %s\n' "$CASE_NUM" "$name"
-	if [ "$status" -gt "$CASE_FAIL_MAX" ]; then
-		printf '# the case exited %d, which is no verdict this harness gives\n' \
-			"$status"
-	fi
-}
-
-# The output of a case is written to a file rather than read through a pipe:
-# a case that leaves a process running would hold a pipe open and stall the
-# harness, and the file lets the TAP line be printed before its detail.
-case_run() {
-	local name status log
-	name=$1
-	CASE_NUM=$((CASE_NUM + 1))
-	log="$ROOT/.case-output.$CASE_NUM"
-	SKIP_NOTE="$ROOT/.skip-reason"
-	rm -f "$SKIP_NOTE" "$log"
-	(_case_body "$name") >"$log" 2>&1
-	status=$?
-	_case_tap "$name" "$status"
 	if [ -s "$log" ]; then
 		sed 's/^/# /' "$log"
 	fi
-	rm -f "$log"
+	rm -f "$log" "$ROOT/.skip-reason.$num"
+}
+
+# How many cases run at once. Every case has a HOME, a case directory and a
+# subshell of its own, so they do not have to run one after another. The time
+# a run takes is mostly waiting: for a lock, for a deadline, for git. Four is
+# the default; HARNESS_JOBS overrides it, and HARNESS_JOBS=1 runs one case at
+# a time. A value that is not a number from 1 to 99 keeps the default.
+_case_jobs() {
+	CASE_JOBS=4
+	case ${HARNESS_JOBS-} in [1-9] | [1-9][0-9]) CASE_JOBS=$HARNESS_JOBS ;; esac
+}
+
+# Count the cases still running and reap the ones that have finished. bash 3.2
+# has no wait -n, so a finished case is found by asking kill -0 about its pid;
+# wait then reports the status bash kept for it. Only the cases from the next
+# one to report to the last one registered can still be running.
+_case_poll() {
+	local num pid
+	CASE_ALIVE=0
+	num=$NEXT_REPORT
+	while [ "$num" -le "$CASE_NUM" ]; do
+		pid=${CASE_PID[num]-}
+		if [ -n "$pid" ]; then
+			if kill -0 "$pid" 2>/dev/null; then
+				CASE_ALIVE=$((CASE_ALIVE + 1))
+			else
+				wait "$pid"
+				CASE_STATUS[num]=$?
+				CASE_PID[num]=""
+			fi
+		fi
+		num=$((num + 1))
+	done
+	_case_report_ready
+}
+
+# Report every finished case whose predecessors have all been reported. A case
+# that is still running stops the report there, so the TAP lines come out in
+# registration order however the cases finish.
+_case_report_ready() {
+	local num
+	while [ "$NEXT_REPORT" -le "$CASE_NUM" ]; do
+		num=$NEXT_REPORT
+		if [ -n "${CASE_PID[num]-}" ]; then
+			return 0
+		fi
+		_case_tap "$num" "${CASE_NAMES[num]}" "${CASE_STATUS[num]}"
+		NEXT_REPORT=$((NEXT_REPORT + 1))
+	done
+}
+
+# Start one case as a background job. Its output and its skip reason go to
+# files named after its case number, so two cases that run at the same time
+# never write the same path. The output is written to a file rather than read
+# through a pipe: a case that leaves a process running would hold a pipe open
+# and stall the harness, and the file lets the TAP line be printed before its
+# detail.
+_case_start() {
+	local num name
+	num=$1
+	name=$2
+	SKIP_NOTE="$ROOT/.skip-reason.$num"
+	rm -f "$SKIP_NOTE" "$ROOT/.case-output.$num"
+	(_case_body "$name") >"$ROOT/.case-output.$num" 2>&1 &
+	CASE_PID[num]=$!
+	CASE_NAMES[num]=$name
+}
+
+# Register one case and start it as soon as a worker is free.
+case_run() {
+	if [ "$CASE_JOBS" -eq 0 ]; then
+		_case_jobs
+	fi
+	_case_poll
+	while [ "$CASE_ALIVE" -ge "$CASE_JOBS" ]; do
+		sleep 0.05
+		_case_poll
+	done
+	CASE_NUM=$((CASE_NUM + 1))
+	_case_start "$CASE_NUM" "$1"
 }
 
 # The TAP version line and the interpreter the script under test runs with.
@@ -208,9 +286,15 @@ case_tap_header() {
 	printf '# interpreter: %s (bash %s)\n' "$BASH_BIN" "$version"
 }
 
-# The plan line, then the human summary. The exit status follows the failures
-# alone, because a skipped case is a verdict of its own and not a failure.
+# The last cases are waited for and reported, then the plan line and the human
+# summary. The exit status follows the failures alone, because a skipped case
+# is a verdict of its own and not a failure.
 case_tap_summary() {
+	_case_poll
+	while [ "$CASE_ALIVE" -gt 0 ]; do
+		sleep 0.05
+		_case_poll
+	done
 	printf '1..%d\n' "$CASE_NUM"
 	printf '# %d passed, %d failed, %d skipped (interpreter %s)\n' \
 		"$PASS" "$FAIL" "$SKIPPED" "$BASH_BIN"

@@ -341,14 +341,16 @@ run still recognises it, and makes the command exit 1.
 pnpm install
 pnpm test                        # pnpm -r test — every package's test suite
 pnpm validate:skills             # node scripts/validate-skills.mjs
-bash scripts/test-link-skills.sh # the link-skills.sh harness
+bash scripts/test-link-skills.sh # the link-skills.sh harness, 4 cases at once
 trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
 ```
 
 CI runs the last two skill checks on Ubuntu and macOS. On macOS also run
 `BASH_BIN=/bin/bash bash scripts/test-link-skills.sh`, which exercises the
-bash 3.2 that `link-skills.sh` must keep working with.
+bash 3.2 that `link-skills.sh` must keep working with. `HARNESS_JOBS` sets how
+many cases the harness runs at a time, four by default;
+`HARNESS_JOBS=1 bash scripts/test-link-skills.sh` runs them one after another.
 
 Each package's own README documents its usage; run its suite directly with
 `pnpm --filter <package-name> test` during development.
