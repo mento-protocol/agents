@@ -49,7 +49,9 @@ assert_file_has() {
 }
 
 assert_file_lacks() {
-	if grep -q -F -- "$2" "$1" 2>/dev/null; then
+	if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+		case_fail "$3: $1 is not a readable file"
+	elif grep -q -F -- "$2" "$1" 2>/dev/null; then
 		case_fail "$3: $1 contains '$2'"
 	fi
 }

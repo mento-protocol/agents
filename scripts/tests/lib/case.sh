@@ -5,8 +5,9 @@
 # under test, and case_cleanup, which removes the temporary root.
 #
 # Reads: BASH_BIN (case_run_script, case_run_script_in), CASE_FAILS
-# (case_run), CURRENT (case_fail), LS (case_run_script, case_run_script_in),
-# ROOT (case_cleanup, case_setup), SOURCE_SCRIPT (case_setup).
+# (case_fail, case_run), CURRENT (case_fail), FAIL (case_run), LS
+# (case_run_script, case_run_script_in), PASS (case_run), ROOT (case_cleanup,
+# case_setup), SOURCE_SCRIPT (case_setup).
 # Writes: CASE_DIR, CASE_FAILS, CURRENT, FAIL, HOME, LS, LS_OUT, LS_RC, PASS,
 # and the GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM,
 # GIT_TERMINAL_PROMPT and SKILL_SOURCES_FETCH_INTERVAL_HOURS variables the run
