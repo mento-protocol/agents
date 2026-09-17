@@ -55,6 +55,30 @@ description: >-${NBSP}# note
 Body.
 `;
 
+// A blank line before the first content line of a folded block is content, so
+// the folded name is "\nnoted", which is not the directory name. The parser
+// suite asserts that value; this case asserts the decision the validator makes
+// on it, so a name check that stopped comparing the value with the directory
+// would fail here.
+const LEADING_BLANK_NAME_SKILL = `---
+name: >-
+
+  noted
+description: a folded name with a leading blank line
+---
+
+Body.
+`;
+
+const NO_LEADING_BLANK_NAME_SKILL = `---
+name: >-
+  noted
+description: a folded name with no leading blank line
+---
+
+Body.
+`;
+
 test("a valid minimal skill validates and reports the count", (t) => {
   const root = makeSkillsDir();
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -76,6 +100,26 @@ test("a broken block scalar header is reported by its line number", (t) => {
     output.trim(),
     "skills/noted: frontmatter line 3 is not valid YAML",
   );
+});
+
+test("a folded name with a leading blank line fails the directory check", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(root, "noted", LEADING_BLANK_NAME_SKILL);
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.ok(
+    output.includes(
+      'skills/noted: frontmatter "name" (\nnoted) must equal the directory name',
+    ),
+    `the mismatch must be reported: ${output}`,
+  );
+
+  writeSkill(root, "noted", NO_LEADING_BLANK_NAME_SKILL);
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
 });
 
 // The entry-point guard keeps an import of the parser from walking skills/ and
