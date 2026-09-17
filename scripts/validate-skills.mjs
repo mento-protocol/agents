@@ -114,6 +114,16 @@ export function codePointLength(value) {
   return Array.from(value).length;
 }
 
+/**
+ * True when a trimmed description holds a number of code points the validator
+ * accepts. The validator applies this rule, and the parser suites read the
+ * accept or reject for a row from it, so the limit has one definition and a
+ * test cannot drift from the number CI enforces.
+ */
+export function isValidDescriptionLength(trimmedLength) {
+  return trimmedLength >= 1 && trimmedLength <= 1024;
+}
+
 /** Collect one problem line per issue found. */
 const problems = [];
 
@@ -1474,7 +1484,7 @@ function validateSkill(name) {
   } else {
     const trimmed = trimYamlSpace(descriptionField.value);
     const trimmedLength = codePointLength(trimmed);
-    if (trimmedLength < 1 || trimmedLength > 1024) {
+    if (!isValidDescriptionLength(trimmedLength)) {
       problems.push(
         `skills/${name}: "description" must be 1-1024 chars after trimming`,
       );
