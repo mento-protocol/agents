@@ -2,35 +2,35 @@
 #
 # case.sh - case lifecycle for the link-skills harness: per-case setup, the
 # run wrapper that counts results, the two run helpers that invoke the script
-# under test, and the temporary root cleanup.
+# under test, and case_cleanup, which removes the temporary root.
 #
 # Reads: ROOT, CASE_DIR, BASH_BIN, SOURCE_SCRIPT, HOME.
 # Writes: PASS, FAIL, CURRENT, CASE_FAILS, CASE_DIR, HOME, LS, LS_OUT, LS_RC,
 # and the git and skill-sources environment variables a case runs under.
 #
 # The runner owns the initialisation of PASS, FAIL, CURRENT, CASE_FAILS, ROOT,
-# CASE_DIR, LS, LS_OUT and LS_RC, and registers cleanup as its EXIT trap.
+# CASE_DIR, LS, LS_OUT and LS_RC, and registers case_cleanup as its EXIT trap.
 #
 # LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
 # no reader while it lints this file on its own.
 # shellcheck disable=SC2034
 
-cleanup() {
+case_cleanup() {
 	if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
 		chmod -R u+rwX "$ROOT" 2>/dev/null || true
 		rm -rf "$ROOT"
 	fi
 }
 # The trap is registered in main(), only once ROOT is verified to be a fresh
-# directory this run created: a failed mktemp must not arm a cleanup that
+# directory this run created: a failed mktemp must not arm a case_cleanup that
 # could rm -rf an empty ROOT variable's worth of nothing, or worse.
 
-fail() {
+case_fail() {
 	CASE_FAILS=$((CASE_FAILS + 1))
 	printf '    ! %s: %s\n' "$CURRENT" "$*"
 }
 
-ls_run() {
+case_run_script() {
 	LS_OUT=$("$BASH_BIN" "$LS" "$@" 2>&1)
 	LS_RC=$?
 }
@@ -39,7 +39,7 @@ ls_run() {
 # runs from the directory of whatever project opens, so a case about relative
 # paths has to choose where the command starts. The subshell keeps the change
 # of directory out of the harness itself.
-ls_run_in() {
+case_run_script_in() {
 	local dir
 	dir=$1
 	shift
@@ -47,7 +47,7 @@ ls_run_in() {
 	LS_RC=$?
 }
 
-setup_case() {
+case_setup() {
 	CASE_DIR="$ROOT/$1"
 	rm -rf "$CASE_DIR"
 	mkdir -p "$CASE_DIR/home"
@@ -67,10 +67,10 @@ setup_case() {
 	LS_RC=0
 }
 
-run_case() {
+case_run() {
 	CURRENT=$1
 	CASE_FAILS=0
-	setup_case "$1"
+	case_setup "$1"
 	"$1"
 	if [ "$CASE_FAILS" -eq 0 ]; then
 		PASS=$((PASS + 1))

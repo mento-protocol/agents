@@ -10,14 +10,14 @@
 # it lints this file on its own.
 # shellcheck disable=SC2034
 
-gitc() {
+fixtures_git() {
 	local d
 	d=$1
 	shift
 	git -C "$d" -c user.name=t -c user.email=t@example.com "$@"
 }
 
-mkskill() {
+fixtures_skill() {
 	mkdir -p "$1/$2"
 	{
 		printf -- '---\n'
@@ -28,19 +28,19 @@ mkskill() {
 	} >"$1/$2/SKILL.md"
 }
 
-write_sources() {
+fixtures_write_sources() {
 	mkdir -p "$HOME/.agents"
 	: >"$HOME/.agents/skill-sources"
 }
 
-add_source() {
+fixtures_add_source() {
 	printf '%s\n' "$1" >>"$HOME/.agents/skill-sources"
 }
 
 # A bare repository, a seed clone that pushes commits, and the clone the
 # sources file points at. The script under test is committed into the repo so
 # that the clone looks exactly like a coworker's checkout.
-fixture_company() {
+fixtures_company() {
 	BARE="$CASE_DIR/remote.git"
 	SEED="$CASE_DIR/seed"
 	COMPANY="$CASE_DIR/company"
@@ -51,21 +51,21 @@ fixture_company() {
 	mkdir -p "$SEED/scripts"
 	cp "$SOURCE_SCRIPT" "$SEED/scripts/link-skills.sh"
 	chmod +x "$SEED/scripts/link-skills.sh"
-	mkskill "$SEED/skills" alpha
-	gitc "$SEED" add -A
-	gitc "$SEED" commit -q -m "init"
+	fixtures_skill "$SEED/skills" alpha
+	fixtures_git "$SEED" add -A
+	fixtures_git "$SEED" commit -q -m "init"
 	git -C "$SEED" push -q origin main
 	git clone --quiet "$BARE" "$COMPANY"
 	LS="$COMPANY/scripts/link-skills.sh"
 }
 
-push_beta() {
-	mkskill "$SEED/skills" beta
-	gitc "$SEED" add -A
-	gitc "$SEED" commit -q -m "add beta"
+fixtures_push_beta() {
+	fixtures_skill "$SEED/skills" beta
+	fixtures_git "$SEED" add -A
+	fixtures_git "$SEED" commit -q -m "add beta"
 	git -C "$SEED" push -q origin main
 }
 
-head_of() {
+fixtures_head_of() {
 	git -C "$1" rev-parse HEAD
 }

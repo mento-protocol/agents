@@ -5,35 +5,35 @@
 # case directory sits on a case-insensitive filesystem.
 #
 # Reads: CASE_DIR.
-# Writes: nothing directly; each failing assertion calls fail(), which raises
+# Writes: nothing directly; each failing assertion calls case_fail(), which raises
 # CASE_FAILS.
 
-assert_exists() {
+fs_assert_exists() {
 	if [ ! -e "$1" ]; then
-		fail "$2: $1 does not exist"
+		case_fail "$2: $1 does not exist"
 	fi
 }
 
-assert_absent() {
+fs_assert_absent() {
 	if [ -e "$1" ] || [ -L "$1" ]; then
-		fail "$2: $1 still exists"
+		case_fail "$2: $1 still exists"
 	fi
 }
 
-assert_is_dir_not_link() {
+fs_assert_is_dir_not_link() {
 	if [ -L "$1" ]; then
-		fail "$2: $1 is a symlink, expected a real directory"
+		case_fail "$2: $1 is a symlink, expected a real directory"
 		return
 	fi
 	if [ ! -d "$1" ]; then
-		fail "$2: $1 is not a directory"
+		case_fail "$2: $1 is not a directory"
 	fi
 }
 
-assert_link() {
+fs_assert_link() {
 	local got a b
 	if [ ! -L "$1" ]; then
-		fail "$3: $1 is not a symlink"
+		case_fail "$3: $1 is not a symlink"
 		return
 	fi
 	got=$(readlink "$1")
@@ -45,11 +45,11 @@ assert_link() {
 	if [ -n "$a" ] && [ "$a" = "$b" ]; then
 		return
 	fi
-	fail "$3: $1 -> $got, expected $2"
+	case_fail "$3: $1 -> $got, expected $2"
 }
 
 # Permission bits of a file as an octal string, on macOS and on Linux.
-file_mode() {
+fs_file_mode() {
 	local m
 	m=$(stat -f '%Lp' "$1" 2>/dev/null) || m=""
 	if [ -z "$m" ]; then

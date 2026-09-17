@@ -7,7 +7,7 @@
 # Reads: nothing.
 # Writes: nothing.
 
-have_python3() {
+probe_have_python3() {
 	command -v python3 >/dev/null 2>&1
 }
 
@@ -16,7 +16,7 @@ have_python3() {
 # reaped, so a case that asks whether something outlived a deadline must read
 # the process state as well. A state starting with Z is gone; a pid the
 # process table will not describe is judged by kill -0 alone.
-pid_is_live() {
+probe_pid_is_live() {
 	local state
 	if ! kill -0 "$1" 2>/dev/null; then
 		return 1
@@ -31,7 +31,7 @@ pid_is_live() {
 # True when ps reports a process start time here. A host or a sandbox that
 # refuses to run ps leaves the lock owner check with the pid alone, which is
 # the fallback, not the behaviour a case about start times can exercise.
-ps_reports_start_time() {
+probe_ps_reports_start_time() {
 	local out
 	out=$(ps -o lstart= -p "$$" 2>/dev/null | tr -d '[:space:]')
 	[ -n "$out" ]
