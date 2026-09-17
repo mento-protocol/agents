@@ -72,6 +72,12 @@ SAVED_PATH=""
 . "$HERE/tests/link-skills/names-and-casing.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/names-and-casing.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/output.sh
 . "$HERE/tests/link-skills/output.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/output.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/paths.sh
+. "$HERE/tests/link-skills/paths.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/paths.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/sources-entries.sh
+. "$HERE/tests/link-skills/sources-entries.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/sources-entries.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/sources-file.sh
+. "$HERE/tests/link-skills/sources-file.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/sources-file.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/unlink.sh
 . "$HERE/tests/link-skills/unlink.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/unlink.sh >&2 && exit 2; }
 
@@ -746,85 +752,6 @@ hook_never_takes_lock() {
 	rmdir "$lock"
 }
 
-# The token an older sources file carried after a path asked the hook to
-# update that clone. The hook only notifies now, so the token is refused
-# instead of being read as part of the path.
-sources_auto_update_token_refused() {
-	local lines
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one auto-update"
-
-	case_run_script link
-	assert_rc 2 "link with the auto-update token"
-	assert_out_has "unexpected token after the path" "the refusal is named"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
-
-	case_run_script hook
-	assert_rc 0 "hook with the auto-update token"
-	assert_out_has "unexpected token after the path" "the hook says the same"
-	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
-	if [ "$lines" != "1" ]; then
-		case_fail "expected one line from the hook, got $lines: $LS_OUT"
-	fi
-}
-
-# Only a trailing auto-update is a token. Nothing else can be told apart from
-# a path that holds a space, so a word after a directory belongs to the path:
-# the line names a directory that is not there, and that is a missing source,
-# not wrong usage.
-sources_line_with_extra_token_is_a_path() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one bogus-token"
-
-	case_run_script link
-	assert_rc 1 "link with a word after the path"
-	assert_out_has "source directory does not exist" "the line is read as a path"
-	assert_out_has "$CASE_DIR/one bogus-token" "the whole line is named"
-	assert_out_lacks "unexpected token after the path" "nothing is refused"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "nothing was linked"
-
-	case_run_script check
-	assert_rc 1 "check with a word after the path"
-	assert_out_has "source $CASE_DIR/one bogus-token: missing" \
-		"check reports the whole line as one missing source"
-	assert_out_lacks "unexpected token after the path" "check refuses nothing"
-
-	# A path that holds a space is one path, and still works.
-	fixtures_skill "$CASE_DIR/my repos/two" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/my repos/two"
-	case_run_script link
-	assert_rc 0 "link with a space in the source path"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/my repos/two/beta" "beta link"
-}
-
-# A source that is temporarily away, under a path that holds a space, used to
-# match the shape of a stray token whenever the text before the last space
-# named a directory. That blocked every command with wrong usage until the
-# source came back. It is a missing source like any other, and it links again
-# the moment it is there.
-sources_missing_path_with_space_is_missing() {
-	mkdir -p "$CASE_DIR/my"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/my skills"
-
-	case_run_script link
-	assert_rc 1 "link while the source is away"
-	assert_out_has "source directory does not exist" "the source is reported missing"
-	assert_out_lacks "unexpected token after the path" "nothing is refused"
-
-	case_run_script check
-	assert_rc 1 "check while the source is away"
-	assert_out_lacks "unexpected token after the path" "check refuses nothing"
-
-	fixtures_skill "$CASE_DIR/my skills" alpha
-	case_run_script link
-	assert_rc 0 "link once the source is back"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/my skills/alpha" "alpha link"
-}
-
 install_hooks_missing_file() {
 	local backups
 	if ! probe_have_python3; then
@@ -953,93 +880,6 @@ install_hooks_embeds_custom_paths() {
 	assert_out_has "already runs the hook" "the custom command is recognised"
 }
 
-# The manifest, the lock and the fetch stamps are this script's own record of
-# what it may remove later. A sources path that names one of them would have a
-# run read that record as a list of sources, or write a bootstrap sources file
-# over it.
-sources_path_inside_assembly_refused() {
-	local assembly
-	fixtures_skill "$CASE_DIR/one" alpha
-	assembly="$CASE_DIR/assembly"
-	case_run_script --assembly "$assembly" --sources "$assembly/.skill-links" link
-	assert_rc 2 "--sources at the manifest path"
-	assert_out_has "must not be an assembly control file" "refusal message"
-	fs_assert_absent "$assembly" "nothing was created"
-	case_run_script --assembly "$assembly" --sources "$assembly/.skill-links.lock" link
-	assert_rc 2 "--sources at the lock path"
-	fs_assert_absent "$assembly" "nothing was created for the lock path"
-	case_run_script --assembly "$assembly" --sources "$assembly/.skill-links.d" link
-	assert_rc 2 "--sources at the stamp directory"
-	case_run_script --assembly "$assembly" --sources "$assembly/.skill-links.d/fetch-1" link
-	assert_rc 2 "--sources inside the stamp directory"
-	fs_assert_absent "$assembly" "nothing was created for the stamp paths"
-
-	# A sources file anywhere else still works, inside the assembly included.
-	printf '%s\n' "$CASE_DIR/one" >"$CASE_DIR/sources"
-	case_run_script --assembly "$assembly" --sources "$CASE_DIR/sources" link
-	assert_rc 0 "a sources file elsewhere"
-	fs_assert_link "$assembly/alpha" "$CASE_DIR/one/alpha" "alpha link"
-}
-
-# The lock directory holds the pid file of whichever run writes the assembly.
-# A sources path below it would have a first run bootstrap its sources file
-# inside its own lock directory and then wait on itself.
-sources_under_lock_dir_refused() {
-	local assembly
-	assembly="$HOME/.agents/skills"
-
-	case_run_script --sources "$assembly/.skill-links.lock/pid" link
-	assert_rc 2 "--sources inside the lock directory"
-	assert_out_has "must not be an assembly control file" "refusal message"
-	fs_assert_absent "$assembly/.skill-links.lock" "no lock directory was created"
-	fs_assert_absent "$assembly" "nothing was created at all"
-
-	# The same path given to a command that only reads the sources file.
-	case_run_script --sources "$assembly/.skill-links.lock/pid" check
-	assert_rc 2 "check with the same sources path"
-	assert_out_has "must not be an assembly control file" "check names the refusal"
-	fs_assert_absent "$assembly" "check created nothing"
-}
-
-# A final symlink component is left as it is spelled, so an alias to the
-# manifest passed every textual control-path test while naming the manifest
-# itself: the run then read the manifest's own records as missing sources and
-# pruned every link it describes.
-sources_symlink_to_manifest_refused() {
-	local manifest alias inside
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "link"
-	manifest="$HOME/.agents/skills/.skill-links"
-	cp "$manifest" "$CASE_DIR/manifest.before"
-
-	alias="$CASE_DIR/alias"
-	ln -s "$manifest" "$alias"
-	case_run_script --sources "$alias" link
-	assert_rc 2 "link through an alias to the manifest"
-	assert_out_has "must not be an assembly control file" "link names the refusal"
-	case_run_script --sources "$alias" check
-	assert_rc 2 "check through the alias"
-	assert_out_has "must not be an assembly control file" "check names the refusal"
-	case_run_script --sources "$alias" unlink
-	assert_rc 2 "unlink through the alias"
-	assert_out_has "must not be an assembly control file" "unlink names the refusal"
-	assert_same_bytes "$manifest" "$CASE_DIR/manifest.before" "the manifest is untouched"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link kept"
-
-	# A symlink in the assembly root is a control path by its own name,
-	# whatever it points at.
-	inside="$HOME/.agents/skills/.skill-links-alias"
-	ln -s "$HOME/.agents/skill-sources" "$inside"
-	case_run_script --sources "$inside" link
-	assert_rc 2 "an alias inside the assembly"
-	assert_out_has "must not be an assembly control file" "the refusal is named"
-	assert_same_bytes "$manifest" "$CASE_DIR/manifest.before" "the manifest is still untouched"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link still kept"
-}
-
 personal_skill_untouched() {
 	fixtures_company
 	mkdir -p "$HOME/.agents/skills/personal"
@@ -1065,84 +905,6 @@ personal_skill_untouched() {
 	assert_rc 0 "unlink"
 	fs_assert_is_dir_not_link "$HOME/.agents/skills/personal" "personal skill is still a real directory"
 	assert_file_has "$HOME/.agents/skills/personal/SKILL.md" "personal" "personal skill after unlink"
-}
-
-# Two lines that name the same directory are one source, not a self-collision.
-source_listed_twice() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/one" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	fixtures_add_source "$CASE_DIR/one/"
-	case_run_script link
-	assert_rc 0 "second link"
-	assert_out_lacks "duplicate skill name" "no self-duplicate"
-	assert_out_has "linked 0, unchanged 2, pruned 0, errors 0" "summary"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "manifest"
-}
-
-# A second copy of a name must not remove the link that already works.
-duplicate_keeps_existing_link() {
-	fixtures_skill "$CASE_DIR/one" grilling
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	fixtures_skill "$CASE_DIR/two" grilling
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 1 "second link"
-	assert_out_has "duplicate skill name 'grilling'" "duplicate message"
-	assert_out_has "kept the existing link" "kept message"
-	assert_out_has "pruned 0" "nothing pruned"
-	fs_assert_link "$HOME/.agents/skills/grilling" "$CASE_DIR/one/grilling" "existing link kept"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "grilling" "manifest keeps the entry"
-}
-
-# A source that is gone for now must not take its links with it.
-missing_source_keeps_links() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/two" other
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 0 "first link"
-	mv "$CASE_DIR/two" "$CASE_DIR/two-moved"
-	case_run_script link
-	assert_rc 1 "second link"
-	assert_out_has "source directory does not exist" "missing source message"
-	assert_out_has "kept 1 link(s)" "kept message"
-	assert_out_has "pruned 0" "nothing pruned"
-	fs_assert_link "$HOME/.agents/skills/other" "$CASE_DIR/two/other" "link kept"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "other" "manifest keeps the entry"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-}
-
-# A source directory that is readable is authoritative even when it holds no
-# skill: its recorded links are stale and go, and the warning still prints.
-emptied_source_prunes_links() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/one" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	rm -rf "$CASE_DIR/one/alpha" "$CASE_DIR/one/beta"
-	case_run_script link
-	assert_rc 0 "second link"
-	assert_out_has "holds no skill" "empty source warning"
-	assert_out_has "pruned 2" "both links pruned"
-	assert_out_lacks "kept 2 link(s)" "nothing is kept for a readable source"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "alpha pruned"
-	fs_assert_absent "$HOME/.agents/skills/beta" "beta pruned"
-	assert_file_lacks "$HOME/.agents/skills/.skill-links" "alpha" "manifest dropped alpha"
-	assert_file_lacks "$HOME/.agents/skills/.skill-links" "beta" "manifest dropped beta"
 }
 
 # A matching symlink this script never recorded stays the other party's: it is
@@ -1183,105 +945,6 @@ foreign_dangling_not_pruned() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
-# Two spellings of one directory are one source, however they are written.
-source_listed_twice_by_symlink_alias() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/one" beta
-	ln -s "$CASE_DIR/one" "$CASE_DIR/alias"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/alias"
-	case_run_script link
-	assert_rc 0 "link"
-	assert_out_lacks "duplicate skill name" "one directory is one source"
-	assert_out_has "linked 2, unchanged 0, pruned 0, errors 0" "summary"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link"
-
-	if ! fs_case_insensitive "$CASE_DIR"; then
-		printf '    (case-variant spelling skipped: case-sensitive filesystem)\n'
-		return
-	fi
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/ONE"
-	case_run_script link
-	assert_rc 0 "case-variant link"
-	assert_out_lacks "duplicate skill name" "a case variant is the same source"
-	assert_out_has "linked 0, unchanged 2, pruned 0, errors 0" "case-variant summary"
-}
-
-# A sources line that names the assembly itself would make every link already
-# in the assembly a candidate whose target is its own entry: the record would
-# read as unchanged, its target would be rewritten to the assembly, and the day
-# the real target went away the dangling link would be called foreign, dropped
-# from the manifest and left unmanaged with no error. The old layout kept a
-# checkout at that path, so the line is a plausible mistake and is refused by
-# name.
-assembly_dir_refused_as_source() {
-	local manifest before tab
-	manifest="$HOME/.agents/skills/.skill-links"
-	before="$CASE_DIR/manifest.before"
-	tab=$(printf '\t')
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$HOME/.agents/skills"
-	case_run_script link
-	assert_rc 1 "link with the assembly listed as a source"
-	assert_out_has "source directory is the assembly $HOME/.agents/skills itself" \
-		"the refusal names the assembly"
-	assert_out_has "(from '$HOME/.agents/skills' in $HOME/.agents/skill-sources)" \
-		"the refusal names the line it came from"
-	assert_out_has "linked 1, unchanged 0, pruned 0, errors 1" "summary"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
-		"the listed checkout still linked its skill"
-	if grep -q -F -- "$tab$HOME/.agents/skills/" "$manifest" 2>/dev/null; then
-		case_fail "the manifest records a target inside the assembly"
-	fi
-
-	# A second run repeats the refusal and changes nothing it wrote before.
-	cp "$manifest" "$before"
-	case_run_script link
-	assert_rc 1 "second link with the assembly listed as a source"
-	assert_out_has "source directory is the assembly $HOME/.agents/skills itself" \
-		"the second run repeats the refusal"
-	assert_out_has "linked 0, unchanged 1, pruned 0, errors 1" "second summary"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link is untouched"
-	assert_same_bytes "$manifest" "$before" "the manifest is untouched"
-
-	case_run_script check
-	assert_rc 1 "check with the assembly listed as a source"
-	assert_out_has "source $HOME/.agents/skills: is the assembly directory itself" \
-		"check names the line for what it is"
-	assert_out_lacks "source $HOME/.agents/skills: ok" "check does not call it a source"
-
-	# The refusal reaches the session start's stderr the way an unreadable
-	# source does today, and the hook adds no notice of its own.
-	case_run_script hook
-	assert_rc 0 "hook with the assembly listed as a source"
-	assert_out_lacks "[link-skills]" "the hook says nothing about it"
-}
-
-# A sources file that names no source is not permission to empty the assembly.
-empty_sources_file_does_not_prune() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	fixtures_write_sources
-	case_run_script link
-	assert_rc 2 "empty sources file"
-	assert_out_has "no source is listed" "error message"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "link kept"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "manifest kept"
-	printf '# %s\n' "$CASE_DIR/one" >"$HOME/.agents/skill-sources"
-	case_run_script link
-	assert_rc 2 "comments-only sources file"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "link kept after the comments-only run"
-}
-
 # Every default path is derived from HOME, so a HOME that is not absolute stops
 # the run before anything is written.
 empty_home_refused() {
@@ -1310,23 +973,6 @@ unset_home_hook_exits_zero() {
 	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" link 2>&1)
 	LS_RC=$?
 	assert_rc 2 "link without HOME"
-}
-
-root_assembly_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script --assembly / link
-	assert_rc 2 "--assembly /"
-	assert_out_has "must name a directory below /" "refusal message"
-	case_run_script --assembly "" link
-	assert_rc 2 "--assembly with an empty value"
-	case_run_script --sources / link
-	assert_rc 2 "--sources /"
-	case_run_script --sources "" link
-	assert_rc 2 "--sources with an empty value"
-	case_run_script --assembly=/ link
-	assert_rc 2 "--assembly=/"
 }
 
 # A runtime whose home directory does not exist is named, not passed over in
@@ -1376,35 +1022,6 @@ unwritable_assembly_reports_failure() {
 	assert_out_has "could not link" "link failure reported"
 	assert_out_lacks "errors 0" "the summary must count the failure"
 	fs_assert_absent "$HOME/.agents/skills/alpha" "no link was made"
-}
-
-# Run through a symlink on PATH: the sources bootstrap and the hook marker must
-# both use the real clone, so install-hooks stays idempotent.
-script_reached_through_a_symlink() {
-	local n
-	fixtures_company
-	mkdir -p "$HOME/bin" "$HOME/.claude"
-	ln -s "$COMPANY/scripts/link-skills.sh" "$HOME/bin/link-skills"
-	LS="$HOME/bin/link-skills"
-	case_run_script
-	assert_rc 0 "link"
-	assert_file_has "$HOME/.agents/skill-sources" "$COMPANY/skills" "sources file bootstrapped"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$COMPANY/skills/alpha" "alpha link"
-	if ! probe_have_python3; then
-		printf '    (install-hooks part skipped: no python3)\n'
-		return
-	fi
-	case_run_script install-hooks
-	assert_rc 0 "first install-hooks"
-	case_run_script install-hooks
-	assert_rc 0 "second install-hooks"
-	case_run_script install-hooks
-	assert_rc 0 "third install-hooks"
-	n=$(assert_count_in_file "$HOME/.claude/settings.json" "link-skills.sh hook")
-	if [ "$n" != "1" ]; then
-		case_fail "expected one hook command after three runs, found $n"
-	fi
-	assert_file_lacks "$HOME/.claude/settings.json" "bin/link-skills" "the resolved clone path is used"
 }
 
 # A clone path with a space must produce a hook command that still runs.
@@ -1722,132 +1339,6 @@ install_hooks_rewrites_relative_script_path() {
 	case_run_script_in "$CASE_DIR" install-hooks
 	assert_rc 0 "install-hooks from another directory"
 	assert_out_has "already runs the hook" "the replacement is recognised anywhere"
-}
-
-# An assembly path that resolves to the filesystem root is refused, however it
-# is spelled: the check is on the physical path, not on the text.
-root_alias_assembly_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	ln -s / "$CASE_DIR/link-to-root"
-	case_run_script --assembly "$CASE_DIR/link-to-root" link
-	assert_rc 2 "--assembly through a symlink to /"
-	assert_out_has "must not be / or empty" "refusal message"
-	case_run_script --assembly /tmp/.. link
-	assert_rc 2 "--assembly /tmp/.."
-	assert_out_has "must not be / or empty" "refusal message"
-	case_run_script --assembly=/. link
-	assert_rc 2 "--assembly=/."
-	fs_assert_absent "/.skill-links" "no manifest at the filesystem root"
-	fs_assert_absent "/alpha" "no link at the filesystem root"
-	fs_assert_absent "$HOME/.agents/skills" "nothing was created"
-}
-
-# A source directory that exists but cannot be listed says nothing about what
-# belongs in the assembly, so its links stay.
-unreadable_source_keeps_links() {
-	if [ "$(id -u)" = "0" ]; then
-		case_skip "running as root"
-	fi
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/two" other
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 0 "first link"
-	chmod 000 "$CASE_DIR/two"
-	case_run_script link
-	chmod 700 "$CASE_DIR/two"
-	assert_rc 1 "second link"
-	assert_out_has "cannot be read" "unreadable source reported"
-	assert_out_has "kept 1 link(s)" "kept message"
-	assert_out_has "pruned 0" "nothing pruned"
-	assert_out_lacks "holds no skill" "an unreadable source is not an empty one"
-	fs_assert_link "$HOME/.agents/skills/other" "$CASE_DIR/two/other" "link kept"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "other" "manifest keeps the entry"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-
-	chmod 000 "$CASE_DIR/two"
-	case_run_script check
-	chmod 700 "$CASE_DIR/two"
-	assert_rc 1 "check with an unreadable source"
-	assert_out_has "cannot be read" "check names the unreadable source"
-	assert_out_lacks "will prune it" "check promises no prune that link will not do"
-}
-
-# A recorded link came from a source that cannot be read this run, and another
-# listed source holds a skill of the same name. That copy is then the only
-# candidate, but pointing the link at it would throw away a selection made
-# while both sources could be read: once the first source is back the two are
-# a duplicate, and the name keeps whichever copy this run wrote. A permission
-# problem must not decide that, so the link and its manifest entry stand.
-recorded_link_not_repointed_while_source_unavailable() {
-	local manifest
-	if [ "$(id -u)" = "0" ]; then
-		case_skip "running as root"
-	fi
-	manifest="$HOME/.agents/skills/.skill-links"
-	fixtures_skill "$CASE_DIR/one" alpha
-	mkdir -p "$CASE_DIR/two"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 0 "first link"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
-		"alpha comes from the first source"
-
-	# The second source takes the same name while the first cannot be read.
-	fixtures_skill "$CASE_DIR/two" alpha
-	chmod 000 "$CASE_DIR/one"
-	case_run_script link
-	chmod 700 "$CASE_DIR/one"
-	assert_rc 1 "link while the recorded source cannot be read"
-	assert_out_has "kept alpha pointing at $CASE_DIR/one/alpha" \
-		"the link is kept where it pointed"
-	assert_out_has "its source $CASE_DIR/one cannot be read now" \
-		"the message names the recorded source"
-	assert_out_has "so $CASE_DIR/two/alpha was not linked" \
-		"the message names the copy that was refused"
-	assert_out_has "kept 1 link(s)" "the kept counter covers it"
-	assert_out_has "linked 0" "nothing was linked"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
-		"alpha still points at the first source"
-	assert_file_has "$manifest" "$CASE_DIR/one/alpha" \
-		"the manifest still records the first source"
-	assert_file_lacks "$manifest" "$CASE_DIR/two/alpha" \
-		"the second source was not recorded"
-
-	# check and the hook say what link does: the link is kept, not stale, and
-	# not dangling either, though its target sits inside the unreadable source.
-	chmod 000 "$CASE_DIR/one"
-	case_run_script check
-	chmod 700 "$CASE_DIR/one"
-	assert_rc 1 "check while the recorded source cannot be read"
-	assert_out_has "link kept: alpha; its source cannot be read now" \
-		"check says the link is kept"
-	assert_out_lacks "link stale" "check does not call the kept link stale"
-	assert_out_lacks "link dangling" "check does not call the kept link dangling"
-	chmod 000 "$CASE_DIR/one"
-	case_run_script hook
-	chmod 700 "$CASE_DIR/one"
-	assert_rc 0 "hook while the recorded source cannot be read"
-	assert_out_lacks "stale" "the hook does not call the kept link stale"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
-		"check and the hook leave the link alone"
-
-	# Both sources readable again: the name is a duplicate and keeps its link.
-	case_run_script link
-	assert_rc 1 "link with both sources readable"
-	assert_out_has "duplicate skill name 'alpha'" "the duplicate is reported"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" \
-		"the duplicate keeps the link it had"
-	assert_file_has "$manifest" "$CASE_DIR/one/alpha" \
-		"the manifest keeps the first source"
-	assert_file_lacks "$manifest" "$CASE_DIR/two/alpha" \
-		"the duplicate records nothing new"
 }
 
 # One run at a time writes the assembly. A held lock stops link and unlink with
@@ -2209,93 +1700,6 @@ regular_file_at_lock_path_refused() {
 	assert_file_has "$lock" "not a lock" "the file is left alone by the hook"
 }
 
-# A path segment that exists and is not a directory ends the path. A '..' after
-# it must not pop through it into a directory the spelling never names. The
-# refusal is the caller's alone and names the path it was given, because
-# canonical_path reports nothing of its own.
-parent_traversal_through_file_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$CASE_DIR/parent"
-	printf 'file content\n' >"$CASE_DIR/parent/file"
-
-	case_run_script --assembly "$CASE_DIR/parent/file/.." link
-	assert_rc 2 "--assembly through a file"
-	assert_out_has \
-		"the assembly directory path $CASE_DIR/parent/file/.. runs through a name that is not a directory" \
-		"refusal message"
-	fs_assert_absent "$CASE_DIR/parent/alpha" "no link in the popped directory"
-	fs_assert_absent "$CASE_DIR/parent/.skill-links" "no manifest in the popped directory"
-	assert_file_has "$CASE_DIR/parent/file" "file content" "the file is untouched"
-
-	case_run_script --assembly "$CASE_DIR/parent/file/below" link
-	assert_rc 2 "--assembly below a file"
-	assert_out_has \
-		"the assembly directory path $CASE_DIR/parent/file/below runs through a name that is not a directory" \
-		"refusal message"
-	fs_assert_absent "$CASE_DIR/parent/file/below" "nothing was created below the file"
-
-	case_run_script --sources "$CASE_DIR/parent/file/../sources" link
-	assert_rc 2 "--sources through a file"
-	assert_out_has \
-		"the sources file path $CASE_DIR/parent/file/../sources runs through a name that is not a directory" \
-		"refusal message"
-	fs_assert_absent "$CASE_DIR/parent/sources" "no sources file in the popped directory"
-
-	fs_assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
-}
-
-# A FIFO at the sources path would hold the first open until something writes
-# to it. The bootstrap in a clone opens that path for writing, so the run would
-# never return. The path is judged before anything opens it.
-fifo_at_sources_path_refused() {
-	local out waited blocked pid
-	# The script must sit in a clone that carries skills, so that the run
-	# reaches the bootstrap write instead of the "no sources file" notice.
-	fixtures_company
-	mkdir -p "$HOME/.agents"
-	if ! mkfifo "$HOME/.agents/skill-sources" 2>/dev/null; then
-		case_skip "mkfifo is not available"
-	fi
-	out="$CASE_DIR/fifo-run.out"
-
-	# A bash-native timeout: the run goes to the background and the loop below
-	# gives it five seconds. 'timeout' is not on every machine this runs on.
-	"$BASH_BIN" "$LS" link >"$out" 2>&1 &
-	pid=$!
-	waited=0
-	blocked=1
-	while [ "$waited" -lt 50 ]; do
-		if ! kill -0 "$pid" 2>/dev/null; then
-			blocked=0
-			break
-		fi
-		sleep 0.1
-		waited=$((waited + 1))
-	done
-	if [ "$blocked" -eq 1 ]; then
-		kill -9 "$pid" 2>/dev/null
-		wait "$pid" 2>/dev/null
-		case_fail "link did not return within five seconds with a FIFO at the sources path"
-		return
-	fi
-	wait "$pid" 2>/dev/null
-	LS_RC=$?
-	LS_OUT=$(cat "$out")
-	assert_rc 2 "link with a FIFO at the sources path"
-	assert_out_has "is not a regular file" "refusal message"
-	fs_assert_absent "$HOME/.agents/skills" "nothing was created"
-
-	# A directory at the same path is refused the same way.
-	rm -f "$HOME/.agents/skill-sources"
-	mkdir "$HOME/.agents/skill-sources"
-	case_run_script link
-	assert_rc 2 "link with a directory at the sources path"
-	assert_out_has "is not a regular file" "refusal message"
-	fs_assert_absent "$HOME/.agents/skills" "nothing was created"
-}
-
 # A throttle written as '08' is eight hours, never an octal literal.
 interval_with_leading_zero_accepted() {
 	fixtures_company
@@ -2314,60 +1718,6 @@ interval_with_leading_zero_accepted() {
 	assert_rc 0 "second hook"
 	assert_out_lacks "value too great for base" "the interval parses as decimal"
 	assert_out_empty "the stamp is fresh, so the throttle holds"
-}
-
-# A '..' segment must be normalized by text, before the filesystem is asked
-# anything. Without that, '--assembly DIR/new/..' passes the root check, has
-# 'new' created under it by mkdir -p, and puts every link in DIR itself, and a
-# spelling such as '/tmp/new/../..' reaches the filesystem root.
-absent_parent_root_alias_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-
-	case_run_script --assembly "$CASE_DIR/asm/new/.." link
-	assert_rc 0 "--assembly through a parent that does not exist"
-	fs_assert_absent "$CASE_DIR/asm/new" "the popped directory is never created"
-	fs_assert_link "$CASE_DIR/asm/alpha" "$CASE_DIR/one/alpha" "the link lands in the normalized assembly"
-	fs_assert_exists "$CASE_DIR/asm/.skill-links" "the manifest lands in the normalized assembly"
-	fs_assert_absent "$CASE_DIR/alpha" "nothing is linked beside the assembly"
-	fs_assert_absent "$CASE_DIR/.skill-links" "no manifest beside the assembly"
-
-	case_run_script --assembly "/tmp/new/../.." link
-	assert_rc 2 "--assembly /tmp/new/../.."
-	assert_out_has "must not be / or empty" "assembly refusal message"
-
-	case_run_script --assembly "$CASE_DIR/a/b/../../../../../../../../../../../../../.." link
-	assert_rc 2 "--assembly that climbs past the root"
-	assert_out_has "must not be / or empty" "assembly refusal message"
-	fs_assert_absent "$CASE_DIR/a" "nothing was created for the refused path"
-
-	case_run_script --sources "/tmp/a/../.." link
-	assert_rc 2 "--sources /tmp/a/../.."
-	assert_out_has "must not be / or empty" "sources refusal message"
-
-	fs_assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
-	fs_assert_absent "/.skill-links" "no manifest at the filesystem root"
-	fs_assert_absent "/alpha" "no link at the filesystem root"
-}
-
-# A '..' after a symlinked directory belongs to the directory that link really
-# points at. Collapsing the text first would answer the directory that holds
-# the symlink, and every link would land there.
-symlink_then_parent_resolves_physically() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$CASE_DIR/path" "$CASE_DIR/other/child"
-	ln -s "$CASE_DIR/other/child" "$CASE_DIR/path/alias"
-
-	case_run_script --assembly "$CASE_DIR/path/alias/.." link
-	assert_rc 0 "--assembly through a symlink and a parent segment"
-	fs_assert_link "$CASE_DIR/other/alpha" "$CASE_DIR/one/alpha" "the link lands beside the symlink target"
-	fs_assert_exists "$CASE_DIR/other/.skill-links" "the manifest lands beside the symlink target"
-	fs_assert_absent "$CASE_DIR/path/alpha" "nothing is linked where the symlink sits"
-	fs_assert_absent "$CASE_DIR/path/.skill-links" "no manifest where the symlink sits"
-	fs_assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
 }
 
 # A prune that the filesystem refuses must keep the link's manifest entry, so
@@ -3424,110 +2774,6 @@ install_hooks_replacement_resets_timeout() {
 	fi
 }
 
-# The runtime skills paths become links into the assembly, so an assembly that
-# is one of them, or holds one of them, would be a link into itself: every
-# reader that walked below it would walk forever. The refusal comes before
-# anything is created.
-assembly_inside_runtime_home_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$HOME/.claude" "$HOME/.codex"
-
-	case_run_script --assembly "$HOME/.claude" link
-	assert_rc 2 "an assembly at the Claude Code home"
-	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
-	fs_assert_absent "$HOME/.claude/skills" "no runtime link is created"
-	fs_assert_absent "$HOME/.claude/.skill-links" "no manifest is written"
-
-	case_run_script --assembly "$HOME/.claude/skills" link
-	assert_rc 2 "an assembly at the Claude Code runtime path"
-	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
-	fs_assert_absent "$HOME/.claude/skills" "nothing is created at the runtime path"
-
-	case_run_script --assembly "$HOME/.codex/skills" link
-	assert_rc 2 "an assembly at the Codex runtime path"
-	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
-	fs_assert_absent "$HOME/.codex/skills" "nothing is created at the runtime path"
-
-	case_run_script --assembly "$HOME" link
-	assert_rc 2 "an assembly at the home directory"
-	assert_out_has "the assembly directory must not contain a runtime skills path" "the refusal is named"
-	fs_assert_absent "$HOME/alpha" "no skill link in the home directory"
-	fs_assert_absent "$HOME/.skill-links" "no manifest in the home directory"
-	fs_assert_absent "$HOME/.claude/skills" "no runtime link is created"
-
-	# A session start never fails on a path this script cannot use.
-	case_run_script --assembly "$HOME/.claude" hook
-	assert_rc 0 "the same refusal in hook mode"
-	assert_out_has "[link-skills] the assembly directory must not contain a runtime skills path" "one hook line"
-	fs_assert_absent "$HOME/.claude/skills" "the hook creates nothing"
-
-	# The default assembly is neither runtime path and holds neither, so it
-	# still works.
-	case_run_script link
-	assert_rc 0 "the default assembly"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
-	fs_assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "the Claude Code runtime link"
-	fs_assert_link "$HOME/.codex/skills" "$HOME/.agents/skills" "the Codex runtime link"
-}
-
-# A source line with a '..' names one directory whether or not that directory
-# is there at the moment it is read. A source that is renamed away is
-# unavailable, not deleted, so its links and its manifest entries stay and the
-# next run over the restored source is clean.
-relative_source_missing_keeps_links() {
-	local sources manifest
-	fixtures_skill "$CASE_DIR/src/skills" alpha
-	mkdir -p "$CASE_DIR/cfg"
-	sources="$CASE_DIR/cfg/skill-sources"
-	manifest="$HOME/.agents/skills/.skill-links"
-	printf '%s\n' '../src/skills' >"$sources"
-
-	case_run_script --sources "$sources" link
-	assert_rc 0 "link through a relative source"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" "alpha link"
-	assert_file_has "$manifest" "$CASE_DIR/src/skills/alpha" \
-		"the manifest records the source through its normalized path"
-
-	mv "$CASE_DIR/src" "$CASE_DIR/src-away"
-	case_run_script --sources "$sources" link
-	assert_rc 1 "link while the source is away"
-	assert_out_has "source directory does not exist" "the missing source is reported"
-	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" \
-		"the link is kept while the source is away"
-	assert_file_has "$manifest" "$CASE_DIR/src/skills/alpha" \
-		"the manifest entry is kept while the source is away"
-
-	mv "$CASE_DIR/src-away" "$CASE_DIR/src"
-	case_run_script --sources "$sources" link
-	assert_rc 0 "link once the source is back"
-	assert_out_has "unchanged 1" "the link is recognised again"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/src/skills/alpha" "alpha link again"
-}
-
-# A component that is a symlink to nothing is a component that exists. A '..'
-# after it must not pop through it: that would answer with the directory
-# holding the link, which the spelling never names, and the run would write
-# there.
-dangling_symlink_component_refused() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$CASE_DIR/parent"
-	ln -s "$CASE_DIR/parent/gone" "$CASE_DIR/parent/dangling"
-
-	case_run_script --assembly "$CASE_DIR/parent/dangling/.." link
-	assert_rc 2 "--assembly through a dangling symlink"
-	assert_out_has \
-		"the assembly directory path $CASE_DIR/parent/dangling/.. runs through a name that is not a directory" \
-		"refusal message"
-	fs_assert_absent "$CASE_DIR/parent/alpha" "no link beside the dangling symlink"
-	fs_assert_absent "$CASE_DIR/parent/.skill-links" "no manifest beside the dangling symlink"
-	fs_assert_absent "$CASE_DIR/parent/gone" "the missing target is not created"
-}
-
 # A pid is not an identity: the number is reused, and after the owner of a lock
 # dies an unrelated process can carry it. The start time recorded beside the
 # pid tells the two apart, and the lock of a process that really is the owner
@@ -3572,58 +2818,6 @@ stale_lock_with_reused_pid_is_cleared() {
 	wait "$pid" 2>/dev/null
 	rm -f "$lock/pid"
 	rmdir "$lock"
-}
-
-# A candidate that is the assembly, or a directory the assembly sits below,
-# would be linked into itself. It is refused and counted, and nothing is
-# written inside it.
-candidate_containing_assembly_refused() {
-	fixtures_skill "$CASE_DIR/src" foo
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/src"
-
-	case_run_script --assembly "$CASE_DIR/src/foo" link
-	assert_rc 1 "link into an assembly the candidate holds"
-	assert_out_has "contains the assembly" "the refusal is reported"
-	assert_out_has "errors 1" "the summary counts it"
-	fs_assert_absent "$CASE_DIR/src/foo/foo" "no self-referential link"
-	fs_assert_exists "$CASE_DIR/src/foo/SKILL.md" "the candidate directory is left alone"
-}
-
-# A candidate that resolves to a runtime home is a loop waiting to be walked:
-# the assembly would hold alpha -> $HOME/.claude while ensure_runtime_links
-# points $HOME/.claude/skills back at the assembly.
-candidate_containing_runtime_path_refused() {
-	mkdir -p "$HOME/.claude" "$CASE_DIR/src"
-	printf 'Body.\n' >"$HOME/.claude/SKILL.md"
-	ln -s "$HOME/.claude" "$CASE_DIR/src/alpha"
-	fixtures_skill "$CASE_DIR/src" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/src"
-
-	case_run_script link
-	assert_rc 1 "link with a candidate on the Claude Code home"
-	assert_out_has "contains the runtime path $HOME/.claude/skills" \
-		"the refusal names the runtime path"
-	assert_out_has "errors 1" "the summary counts it"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "no link to the runtime home"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/src/beta" "the other skill is linked"
-	fs_assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "the runtime link is created"
-	fs_assert_exists "$HOME/.claude/SKILL.md" "the runtime home is left alone"
-
-	# A candidate on the home directory holds both runtime paths. The assembly
-	# here sits outside the home, so the runtime guard is what refuses it and
-	# not the guard on the assembly.
-	printf 'Body.\n' >"$HOME/SKILL.md"
-	rm "$CASE_DIR/src/alpha" "$HOME/.claude/skills"
-	ln -s "$HOME" "$CASE_DIR/src/alpha"
-	case_run_script --assembly "$CASE_DIR/assembly" link
-	assert_rc 1 "link with a candidate on the home directory"
-	assert_out_has "contains the runtime path" "the refusal is reported"
-	assert_out_lacks "contains the assembly" "the runtime guard is the one that fires"
-	fs_assert_absent "$CASE_DIR/assembly/alpha" "no link to the home directory"
-	fs_assert_link "$CASE_DIR/assembly/beta" "$CASE_DIR/src/beta" "the other skill is linked again"
-	fs_assert_link "$HOME/.claude/skills" "$CASE_DIR/assembly" "the runtime link is created again"
 }
 
 # An entry that already carries this exact command still runs under the type
@@ -3996,137 +3190,6 @@ install_hooks_refuses_when_settings_changed_underneath() {
 	assert_file_has "$file" "meddled" "the concurrent edit is still there"
 }
 
-# A source reached through a symlink alias records its links under the
-# directory the alias points at, so once the alias is gone nothing in a
-# recorded target names the line that is still listed. The source spelling the
-# manifest records is what keeps those links.
-source_alias_missing_keeps_links() {
-	local manifest
-	fixtures_skill "$CASE_DIR/real" alpha
-	ln -s "$CASE_DIR/real" "$CASE_DIR/alias"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/alias"
-	manifest="$HOME/.agents/skills/.skill-links"
-
-	case_run_script link
-	assert_rc 0 "link through the alias"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" "alpha link"
-	assert_file_has "$manifest" "$CASE_DIR/alias" \
-		"the manifest records the source as the line spells it"
-
-	rm "$CASE_DIR/alias"
-	case_run_script link
-	assert_rc 1 "link while the alias is gone"
-	assert_out_has "source directory does not exist" "the missing source is reported"
-	assert_out_has "kept 1 link(s)" "the kept link is reported"
-	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" \
-		"the link is kept while the alias is gone"
-	assert_file_has "$manifest" "$CASE_DIR/real/alpha" \
-		"the manifest entry is kept while the alias is gone"
-
-	ln -s "$CASE_DIR/real" "$CASE_DIR/alias"
-	case_run_script link
-	assert_rc 0 "link once the alias is back"
-	assert_out_has "unchanged 1" "the link is recognised again"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/real/alpha" "alpha link again"
-}
-
-# A '..' after a symlink goes to the target's parent, because that is where the
-# kernel goes. Collapsing the line's text first answers with the alias's own
-# parent instead, and the run then links skills from a directory the line never
-# names. Both directories hold a skill here, so the wrong one is not silent.
-source_dotdot_after_symlink_resolves_physically() {
-	local manifest
-	mkdir -p "$CASE_DIR/a" "$CASE_DIR/b/child"
-	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
-	fixtures_skill "$CASE_DIR/b/skills" alpha
-	fixtures_skill "$CASE_DIR/a/skills" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/a/alias/../skills"
-	manifest="$HOME/.agents/skills/.skill-links"
-
-	case_run_script link
-	assert_rc 0 "link through a '..' after the alias"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
-		"the skill under the alias target's parent is linked"
-	fs_assert_absent "$HOME/.agents/skills/beta" \
-		"nothing is linked from the lexically collapsed directory"
-	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" \
-		"the manifest records the target the kernel resolves"
-	assert_file_lacks "$manifest" "$CASE_DIR/a/skills/beta" \
-		"the lexically collapsed directory is recorded nowhere"
-
-	case_run_script check
-	assert_rc 0 "check"
-	assert_out_has "link ok: alpha" "the link is in sync"
-	assert_out_lacks "not linked" "no drift is counted"
-}
-
-# The same line once the alias is gone. A '..' after a name that is not there
-# must not fall back to the collapsed text: the line names no directory, so it
-# is a missing source and its links are kept, exactly as a plain alias line is
-# treated. Falling back would link the other directory's skill and prune the
-# recorded one.
-source_dotdot_alias_missing_keeps_links() {
-	local manifest
-	mkdir -p "$CASE_DIR/a" "$CASE_DIR/b/child"
-	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
-	fixtures_skill "$CASE_DIR/b/skills" alpha
-	fixtures_skill "$CASE_DIR/a/skills" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/a/alias/../skills"
-	manifest="$HOME/.agents/skills/.skill-links"
-
-	case_run_script link
-	assert_rc 0 "link through a '..' after the alias"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" "alpha link"
-
-	rm "$CASE_DIR/a/alias"
-	case_run_script link
-	assert_rc 1 "link while the alias is gone"
-	assert_out_has "source directory does not exist: $CASE_DIR/a/alias/../skills" \
-		"the missing source is reported as the line names it"
-	assert_out_lacks "pruned alpha" "nothing is pruned for a source that is only away"
-	assert_out_lacks "linked beta" "the collapsed directory is not linked from"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
-		"the link is kept while the alias is gone"
-	fs_assert_absent "$HOME/.agents/skills/beta" \
-		"the lexically collapsed directory is still linked from nowhere"
-	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" \
-		"the manifest entry is kept while the alias is gone"
-
-	case_run_script check
-	assert_rc 1 "check while the alias is gone"
-	assert_out_has "source $CASE_DIR/a/alias/../skills: missing" \
-		"check names the line's own path as missing"
-
-	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
-	case_run_script link
-	assert_rc 0 "link once the alias is back"
-	assert_out_has "unchanged 1" "the link is recognised again"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" "alpha link again"
-	fs_assert_absent "$HOME/.agents/skills/beta" "beta is still linked from nowhere"
-
-	# The line that collapses to the same text as the alias line is another
-	# source: it is listed first, its beta links, and while the alias is gone
-	# alpha stays tied to the alias line and is not pruned on beta's account.
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/a/skills"
-	fixtures_add_source "$CASE_DIR/a/alias/../skills"
-	case_run_script link
-	assert_rc 0 "link with both lines"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/a/skills/beta" "beta link"
-	rm "$CASE_DIR/a/alias"
-	case_run_script link
-	assert_rc 1 "link with both lines while the alias is gone"
-	assert_out_lacks "pruned alpha" "alpha is not pruned on the other line's account"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" \
-		"alpha is kept beside the other line"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/a/skills/beta" "beta is untouched"
-	assert_file_has "$manifest" "$CASE_DIR/b/skills/alpha" "alpha's manifest entry is kept"
-}
-
 # ------------------------------------------------------------------- main ---
 
 main() {
@@ -4180,54 +3243,33 @@ main() {
 	case_run hook_notifies_collision
 	case_run hook_notifies_stale_link
 	case_run hook_never_takes_lock
-	case_run sources_auto_update_token_refused
-	case_run sources_line_with_extra_token_is_a_path
-	case_run sources_missing_path_with_space_is_missing
+	cases_sources_file
 	case_run hook_bounded_by_deadline
 	case_run hook_exits_zero_on_init_failure
 	case_run install_hooks_missing_file
 	case_run install_hooks_existing_groups_preserved
 	case_run install_hooks_idempotent
 	case_run install_hooks_embeds_custom_paths
-	case_run sources_path_inside_assembly_refused
-	case_run sources_under_lock_dir_refused
-	case_run sources_symlink_to_manifest_refused
 	case_run install_hooks_replaces_other_installation
 	case_run install_hooks_replaces_malformed_option_command
 	case_run install_hooks_replaces_unbalanced_quote_command
 	case_run install_hooks_removes_bad_duplicate_beside_valid_entry
 	case_run install_hooks_repairs_one_and_removes_other_bad_entries
 	case_run install_hooks_replacement_resets_timeout
-	case_run assembly_inside_runtime_home_refused
-	case_run relative_source_missing_keeps_links
-	case_run dangling_symlink_component_refused
+	cases_paths
+	cases_sources_entries
 	case_run stale_lock_with_reused_pid_is_cleared
-	case_run candidate_containing_assembly_refused
-	case_run candidate_containing_runtime_path_refused
 	case_run hook_bounded_without_tmpdir
 	case_run install_hooks_normalizes_exact_command_entry
 	case_run relink_creation_failure_restores_old_link
 	cases_unlink
 	case_run personal_skill_untouched
-	case_run source_listed_twice
-	case_run duplicate_keeps_existing_link
-	case_run missing_source_keeps_links
-	case_run unreadable_source_keeps_links
-	case_run recorded_link_not_repointed_while_source_unavailable
-	case_run emptied_source_prunes_links
 	case_run foreign_matching_link_not_adopted
 	case_run foreign_dangling_not_pruned
 	cases_manifest
-	case_run source_listed_twice_by_symlink_alias
-	case_run assembly_dir_refused_as_source
 	cases_names_and_casing
-	case_run empty_sources_file_does_not_prune
 	case_run empty_home_refused
 	case_run unset_home_hook_exits_zero
-	case_run root_assembly_refused
-	case_run root_alias_assembly_refused
-	case_run absent_parent_root_alias_refused
-	case_run symlink_then_parent_resolves_physically
 	case_run prune_failure_keeps_manifest_entry
 	case_run link_refuses_while_locked
 	case_run lock_taken_on_first_run
@@ -4244,14 +3286,11 @@ main() {
 	case_run malformed_pid_record_ages_out
 	case_run symlinked_lock_refused
 	case_run regular_file_at_lock_path_refused
-	case_run parent_traversal_through_file_refused
-	case_run fifo_at_sources_path_refused
 	case_run interval_with_leading_zero_accepted
 	case_run missing_runtime_home_reported
 	cases_output
 	case_run ds_store_only_claude_skills_replaced
 	case_run unwritable_assembly_reports_failure
-	case_run script_reached_through_a_symlink
 	case_run install_hooks_path_with_space
 	case_run install_hooks_symlinked_settings
 	case_run install_hooks_dangling_symlink_refused
@@ -4271,9 +3310,6 @@ main() {
 	case_run install_hooks_replaces_sh_invocation
 	case_run install_hooks_replaces_missing_interpreter
 	case_run install_hooks_replaces_non_executable_direct_script
-	case_run source_alias_missing_keeps_links
-	case_run source_dotdot_after_symlink_resolves_physically
-	case_run source_dotdot_alias_missing_keeps_links
 	cases_harness
 
 	case_tap_summary
