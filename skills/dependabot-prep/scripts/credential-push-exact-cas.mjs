@@ -484,13 +484,47 @@ function buildEnvironment(trusted, request, manifest, includeCredentialHelper) {
   return environment;
 }
 
+// Git trusts its pack and multi-pack indexes to map a name to bytes and does
+// not rehash a commit it parses, so a crafted index can present attacker bytes
+// under expectedNewOid. Every read below runs without those indexes' shortcuts
+// and after fsck has rehashed every object the candidate holds.
+const OBJECT_READ_OPTIONS = Object.freeze([
+  "-c",
+  "core.commitGraph=false",
+  "-c",
+  "core.multiPackIndex=false",
+]);
+
 function requireHead(gitPath, request, env) {
-  const head = runGit(gitPath, ["rev-parse", "--verify", "HEAD^{commit}"], {
-    cwd: request.candidateRoot,
-    env,
-    errorMessage: "Candidate HEAD could not be read.",
-    status: 0,
-  });
+  const integrity = runGit(
+    gitPath,
+    [
+      ...OBJECT_READ_OPTIONS,
+      "fsck",
+      "--strict",
+      "--no-reflogs",
+      "--no-progress",
+    ],
+    {
+      cwd: request.candidateRoot,
+      env,
+      errorMessage: "Candidate object database failed integrity verification.",
+      status: 0,
+      timeout: 300_000,
+    },
+  );
+  integrity.stdout.fill(0);
+  integrity.stderr.fill(0);
+  const head = runGit(
+    gitPath,
+    [...OBJECT_READ_OPTIONS, "rev-parse", "--verify", "HEAD^{commit}"],
+    {
+      cwd: request.candidateRoot,
+      env,
+      errorMessage: "Candidate HEAD could not be read.",
+      status: 0,
+    },
+  );
   try {
     if (head.stdout.toString("ascii").trim() !== request.expectedNewOid) {
       reject("Candidate HEAD drifted.");
@@ -502,10 +536,7 @@ function requireHead(gitPath, request, env) {
   const ancestry = runGit(
     gitPath,
     [
-      // A candidate commit-graph file stores parent edges Git would trust
-      // in this walk, so the walk reads commit objects only.
-      "-c",
-      "core.commitGraph=false",
+      ...OBJECT_READ_OPTIONS,
       "merge-base",
       "--is-ancestor",
       request.expectedOldOid,

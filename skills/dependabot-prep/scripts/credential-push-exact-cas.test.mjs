@@ -81,6 +81,7 @@ function createFixture(
     raceAfterWrite = false,
     configExtraRecord = null,
     configHooksPath = null,
+    fsckFails = false,
   } = {},
 ) {
   const root = createSealedFixtureRoot(t);
@@ -138,7 +139,8 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") { process.stdout.write("git version 99.0.0-test\\n"); process.exit(0); }
 if (args.length === 1 && args[0] === "--exec-path") { process.stdout.write(${JSON.stringify(`${reportedExecPath}\n`)}); process.exit(0); }
-if (args[0] === "rev-parse") { process.stdout.write(${JSON.stringify(`${NEW_OID}\n`)}); process.exit(0); }
+if (args.includes("fsck")) { writeFileSync(${JSON.stringify(path.join(root, "fsck-args"))}, JSON.stringify(args), "utf8"); process.exit(${fsckFails ? 2 : 0}); }
+if (args.includes("rev-parse")) { process.stdout.write(${JSON.stringify(`${NEW_OID}\n`)}); process.exit(0); }
 if (args.includes("merge-base")) { writeFileSync(${JSON.stringify(path.join(root, "merge-base-args"))}, JSON.stringify(args), "utf8"); process.exit(${ancestry ? 0 : 1}); }
 if (args[0] === "config") {
   process.stdout.write(Buffer.from(${JSON.stringify(
