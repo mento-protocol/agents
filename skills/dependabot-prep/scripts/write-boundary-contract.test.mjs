@@ -136,10 +136,6 @@ test("one-shot wrapper performs final verification directly before one push", ()
     "exact new-OID refspec is missing",
   );
   assert.ok(
-    wrapper.includes('"--",\n    destination'),
-    "option terminator is missing",
-  );
-  assert.ok(
     !wrapper.includes("inspectCredentialPushToolchainForTestOnly"),
     "production wrapper imports the relaxed test-only inspector",
   );

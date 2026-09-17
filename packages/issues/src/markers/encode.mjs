@@ -1,9 +1,10 @@
 // Byte-level encoders for the portable procedural-marker contract.
 //
-// This module is the executable form of the v1 byte contract documented at
-// `~/.agents/skills/dependabot-prep/references/feedback.md` ("Portable
-// procedural-marker bytes") and validated by the checked-in vectors at
-// `~/.agents/skills/dependabot-prep/fixtures/comment-marker-vectors.json`.
+// This module is the executable form of the byte contract documented in
+// this repository at `skills/dependabot-prep/references/procedural-markers.md`
+// and validated by the checked-in vectors at
+// `skills/dependabot-prep/fixtures/comment-marker-vectors.json` (a verbatim
+// copy of this package's `fixtures/comment-marker-vectors.json`).
 // Every function here is pure, synchronous and performs no I/O.
 
 import { createHash } from "node:crypto";
