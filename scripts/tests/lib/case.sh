@@ -6,18 +6,23 @@
 # run ends under, and case_cleanup, which removes the temporary root.
 #
 # Reads: BASH_BIN (case_run_script, case_run_script_in, case_tap_header),
-# CASE_FAILS (case_fail, _case_body), CASE_NUM (case_run, _case_tap,
-# case_tap_summary), CURRENT (case_fail), FAIL (_case_tap, case_tap_summary),
-# HARNESS_PATH (case_setup), LS (case_run_script, case_run_script_in), PASS
-# (_case_tap, case_tap_summary), ROOT (case_cleanup, case_setup, case_run),
-# SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE (case_skip, _case_tap),
-# SOURCE_SCRIPT (case_setup).
+# CASE_FAILS (case_fail, _case_body), CASE_FAIL_MAX (_case_body, _case_tap),
+# CASE_NUM (case_run, _case_tap, case_tap_summary), CASE_SKIP_STATUS
+# (case_skip, _case_tap), CURRENT (case_fail), FAIL (_case_tap,
+# case_tap_summary), HARNESS_PATH (case_setup), LS (case_run_script,
+# case_run_script_in), PASS (_case_tap, case_tap_summary), ROOT (case_cleanup,
+# case_setup, case_run), SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE
+# (case_skip, _case_tap), SOURCE_SCRIPT (case_setup).
 # Writes: CASE_DIR, CASE_FAILS, CASE_NUM, CURRENT, FAIL, HOME, LS, LS_OUT,
 # LS_RC, PASS, PATH, SAVED_PATH, SKIPPED, SKIP_NOTE, and the
 # GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM,
 # GIT_TERMINAL_PROMPT and SKILL_SOURCES_FETCH_INTERVAL_HOURS variables the run
 # under test inherits; case_setup also unsets SKILL_SOURCES_FILE and
 # SKILLS_ASSEMBLY_DIR.
+# Writes at load, and never again: CASE_FAIL_MAX, the largest count of failed
+# assertions a case body can report through its exit status, and
+# CASE_SKIP_STATUS, the exit status a case that case_skip stopped ends with.
+# Both are constants this module owns and every reader of them is named above.
 #
 # The runner owns the initialisation of PASS, FAIL, SKIPPED, CASE_NUM,
 # CURRENT, CASE_FAILS, ROOT, CASE_DIR, HARNESS_PATH, SKIP_NOTE, LS, LS_OUT and
