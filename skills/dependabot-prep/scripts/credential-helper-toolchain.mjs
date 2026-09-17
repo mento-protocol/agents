@@ -373,6 +373,9 @@ function inspectToolchain(
     reject("Git exec-path is unavailable.");
   }
   if (!execPathIsDirectory) reject("Git exec-path is not a directory.");
+  // The exec directory joins the push PATH, so the directory itself must be
+  // sealed even when every program in it resolves elsewhere.
+  if (requireSealed) inspectPathComponents(resolvedExecPath);
   const reportedExecPathComponents =
     requireSealed && reportedExecPath !== resolvedExecPath
       ? inspectAliasComponents(reportedExecPath)
