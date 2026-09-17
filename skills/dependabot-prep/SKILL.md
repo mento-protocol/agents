@@ -259,7 +259,11 @@ another author's comment. Keep inline replies on their original threads.
 When repository policy prescribes claims, check the claim before posting a summary
 comment or an inline reply: `claims verify --gate summary-comment` or
 `claims verify --gate inline-reply` while this run holds the claim, `claims read`
-otherwise. These two gates are advisory in one direction only. An unknown
+otherwise. These two gates are advisory only while the policy's `advisoryBefore`
+lists them, the default. A policy that moves either into `requiredBefore` makes
+that gate mandatory: an exit 20 that bounded retries cannot resolve then stops
+that publication, because the run cannot prove it still holds the fence. For an
+advisory gate the direction is one way. An unknown
 verdict does not block the comment: exit 20 `transport` is retried, and a claim
 this run still believes it holds but could not read is posted against anyway,
 because the procedural-marker contract reconciles a duplicate. A verdict that

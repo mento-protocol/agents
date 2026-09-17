@@ -17,6 +17,9 @@ import {
 } from "./credential-helper-toolchain.mjs";
 
 const OID_PATTERN = /^[0-9a-f]{40}$/;
+// `--force-with-lease=<ref>:<zero oid>` lets Git create a missing ref, so the
+// zero oid must never reach the lease: the wrapper only updates existing refs.
+const ZERO_OID = "0".repeat(40);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REF_NAME_PATTERN =
   /^(?!-)(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)|\/\/|[~^:?*\\\[]))[A-Za-z0-9][A-Za-z0-9._\/-]*[A-Za-z0-9]$/;
@@ -284,6 +287,11 @@ function validateRequest(request) {
   }
   if (request.expectedOldOid === request.expectedNewOid)
     reject("The push is empty.");
+  if (
+    request.expectedOldOid === ZERO_OID ||
+    request.expectedNewOid === ZERO_OID
+  )
+    reject("Commit OID must name an existing commit.");
   if (
     typeof request.headRefName !== "string" ||
     request.headRefName.length > 240 ||

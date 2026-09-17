@@ -195,6 +195,11 @@ function inspectToolchain(
   },
   requireSealed,
 ) {
+  // credential-helper.mjs starts through its `#!/usr/bin/env node` shebang, so
+  // the only env binary worth pinning is that one; another path would be
+  // inspected here and never executed.
+  if (envPath !== "/usr/bin/env")
+    reject("The env path must be /usr/bin/env, which the helper shebang runs.");
   const git = inspectExecutable(gitPath, true, requireSealed);
   const gh = inspectExecutable(ghPath, true, requireSealed);
   const node = inspectExecutable(nodePath, true, requireSealed);

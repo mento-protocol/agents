@@ -67,8 +67,10 @@ change to this contract.
   reply surface. Do not post status chatter or a duplicate response. Read the
   head and root first. Apply the portable procedural-marker byte contract above
   to the original issue comment's positive safe-integer REST database ID and
-  exact current API body. Follow the visible body with one blank line and this
-  marker grammar:
+  exact current API body. Follow the visible body with one blank line and the
+  marker grammar of the revision that contract selects from repository policy:
+  v1 without claims or with `markerRevision: v1`, otherwise v2, which appends
+  `claim=<40hex>` after `decision`. The v1 form is:
 
   `<!-- dependabot-prep-comment:v1 root-id-sha256=<64 lowercase hex> root-body-sha256=<64 lowercase hex> head=<40 lowercase hex> visible-body-sha256=<64 lowercase hex> operator-sha256=<64 lowercase hex> decision=<fixed|wont-fix> -->`
 
@@ -86,7 +88,8 @@ change to this contract.
 - Bind each reply to a transaction record. Read the head and root comment before
   the POST. Define the intended visible body as exact UTF-8 with LF line endings
   and no trailing spaces. Hash those bytes before adding the marker. Use exactly
-  one blank line, then this marker grammar:
+  one blank line, then the marker grammar of the policy-selected revision (v1
+  shown; v2 appends `claim=<40hex>` after `decision`):
 
   `<!-- dependabot-prep-reply:v1 root-id-sha256=<64 lowercase hex> root-body-sha256=<64 lowercase hex> head=<40 lowercase hex> visible-body-sha256=<64 lowercase hex> operator-sha256=<64 lowercase hex> decision=<fixed|wont-fix> -->`
 

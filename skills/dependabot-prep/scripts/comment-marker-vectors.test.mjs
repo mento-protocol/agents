@@ -21,6 +21,8 @@ const SUMMARY_SCHEMA_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*:v2$/u;
 const DECISIONS = new Set(["fixed", "wont-fix"]);
 const HEX_40 = /^[0-9a-f]{40}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
+// The owner run id grammar `@mento-protocol/issues` enforces as a claim id.
+const OWNER_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 const LOGIN_PATTERN =
   /^(?=.{1,39}$)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*$/u;
 const CLAIM_TOKEN = "9c1f4e2a7b0d3856ef91a24c6d70b8f5e3a1c0d9"; // gitleaks:allow — fixed test vector, not a credential
@@ -244,6 +246,11 @@ function summaryRunDigest(vector) {
     "summary vector must carry an owner run id",
   );
   assert.ok(vector.ownerRunId.length > 0, "owner run id must not be empty");
+  assert.match(
+    vector.ownerRunId,
+    OWNER_RUN_ID_PATTERN,
+    "owner run id must satisfy the claim id grammar",
+  );
   assert.match(vector.runSha256, HEX_64, "summary run digest is invalid");
   const digest = sha256(encodeApiString(vector.ownerRunId, "owner run id"));
   assert.equal(digest, vector.runSha256, "summary run digest drifted");

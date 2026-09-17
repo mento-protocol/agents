@@ -318,6 +318,22 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
     () => pushExactCas(unsafeRef, fixture.trusted),
     /Head ref name is invalid/,
   );
+  const zeroOld = { ...fixture.request, expectedOldOid: "0".repeat(40) };
+  assert.throws(
+    () => pushExactCas(zeroOld, fixture.trusted),
+    /must name an existing commit/,
+  );
+  const otherEnv = {
+    ...fixture.trusted,
+    toolchainOptions: {
+      ...fixture.trusted.toolchainOptions,
+      envPath: "/bin/env",
+    },
+  };
+  assert.throws(
+    () => pushExactCas(fixture.request, otherEnv),
+    /env path must be \/usr\/bin\/env/,
+  );
   assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
 });
 
