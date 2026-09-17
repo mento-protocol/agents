@@ -12,6 +12,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Every run step uses bash, which GitHub starts with pipefail, so a command
+# that fails inside a pipe fails the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     name: Test and lint
@@ -37,6 +43,9 @@ jobs:
 
       - name: Test
         run: pnpm --filter @mento-protocol/issues test
+
+      - name: Test scripts
+        run: pnpm test:scripts
 
       - name: Fetch the base branch for the shell size ratchet
         if: github.base_ref
@@ -83,6 +92,10 @@ jobs:
 
       - name: Validate skills
         run: node scripts/validate-skills.mjs
+
+      # This job has node but no pnpm install; the tests need no dependencies.
+      - name: Test the validator
+        run: node --test scripts/tests/validate-skills/*.test.mjs
 
       - name: Test link-skills.sh
         run: bash scripts/test-link-skills.sh
