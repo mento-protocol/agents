@@ -97,6 +97,15 @@ jobs:
       - name: Test the validator
         run: node --test scripts/tests/validate-skills/*.test.mjs
 
+      # The push wrapper suite needs a scratch root whose path components are
+      # not group- or other-writable; the runner's shared /tmp is 1777.
+      - name: Test the skill scripts
+        env:
+          DEPENDABOT_PREP_TEST_SEALED_ROOT: ${{ runner.temp }}/sealed
+        run: |
+          mkdir -p -m 0700 "$DEPENDABOT_PREP_TEST_SEALED_ROOT"
+          node --test skills/*/scripts/*.test.mjs
+
       - name: Test link-skills.sh
         run: bash scripts/test-link-skills.sh
 

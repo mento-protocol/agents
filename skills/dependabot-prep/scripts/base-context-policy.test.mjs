@@ -1,3 +1,7 @@
+// A self-check of fixtures/base-context-sentinel.json: the transition rules
+// below are the specification the fixture's expected verdicts were recorded
+// against, so this suite catches a fixture edit. It imports no shipped script
+// and reads no reference, so it does not prove what the skill text says.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";

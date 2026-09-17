@@ -95,6 +95,12 @@ For example, with the Mento schema:
 
 `<!-- mento-dependabot-preparation:v2 pr=872 claim=<40hex> run-sha256=<64hex> operator-sha256=<64hex> -->`
 
+`markers summary` prints two lines: `<!-- mento-dependabot-preparation:v1 -->`,
+the Mento discovery marker, and then the v2 claim line. It does not read
+`reporting.prCommentMarker`. When the configured discovery marker is a different
+line, keep the configured marker first and take only the second line from the
+command output.
+
 A `markerRevision` of `v1`, and a repository that prescribes no claims, keep the
 discovery marker alone.
 

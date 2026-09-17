@@ -793,6 +793,22 @@ test("local compare-and-swap push traces the bound Git process set", (t) => {
   }
 });
 
+test("get ignores the wwwauth[] and capability[] lines Git adds", (t) => {
+  const token = "ghp_testCredential123";
+  const fixture = createFixture(t, { output: `${token}\n` });
+  const record = exactRecord.replace(
+    "host=github.com\n",
+    'capability[]=authtype\ncapability[]=state\nhost=github.com\nwwwauth[]=Basic realm="GitHub"\nwwwauth[]=Bearer\n',
+  );
+  const result = run(fixture, "get", record);
+  assert.equal(result.status, 0);
+  assert.equal(
+    result.stdout.toString("utf8"),
+    `username=operator-bot\npassword=${token}\n\n`,
+  );
+  assert.equal(providerEntries(fixture).length, 1);
+});
+
 test("get accepts an exact prefilled username", (t) => {
   const fixture = createFixture(t);
   const record = exactRecord.replace("\n\n", "\nusername=operator-bot\n\n");

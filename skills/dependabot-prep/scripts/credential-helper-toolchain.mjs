@@ -203,6 +203,17 @@ function inspectToolchain(
   const git = inspectExecutable(gitPath, true, requireSealed);
   const gh = inspectExecutable(ghPath, true, requireSealed);
   const node = inspectExecutable(nodePath, true, requireSealed);
+  // The helper shebang asks env for the bare name `node`, and the wrapper puts
+  // this executable's directory on PATH, so `node` there must be this file or
+  // the pinned digest describes an interpreter that never runs.
+  let sibling;
+  try {
+    sibling = realpathSync(path.join(path.dirname(node.resolvedPath), "node"));
+  } catch {
+    reject("The pinned Node executable must be the node in its directory.");
+  }
+  if (sibling !== node.resolvedPath)
+    reject("The pinned Node executable must be the node in its directory.");
   const shell = inspectExecutable(shellPath, false, requireSealed);
   const env = inspectExecutable(envPath, false, requireSealed);
 

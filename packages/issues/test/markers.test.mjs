@@ -689,3 +689,24 @@ test("a summary marker whose pr is not a safe integer does not parse as v2", () 
   assert.equal(safe.pr, Number.MAX_SAFE_INTEGER);
   assert.equal(safe.claim, claim);
 });
+
+// The skill that consumes these vectors carries a verbatim copy of the fixture
+// as its byte authority; the two files must not drift apart.
+test("the dependabot-prep skill carries the fixture byte for byte", () => {
+  const packageCopy = readFileSync(
+    new URL("../fixtures/comment-marker-vectors.json", import.meta.url),
+    "utf8",
+  );
+  const skillCopy = readFileSync(
+    new URL(
+      "../../../skills/dependabot-prep/fixtures/comment-marker-vectors.json",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.equal(
+    skillCopy,
+    packageCopy,
+    "skill fixture drifted from the package",
+  );
+});

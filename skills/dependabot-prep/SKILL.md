@@ -122,9 +122,6 @@ Continue other authorized preparation work and report the remaining thread gate.
 Leave unaddressed or declined findings open. Confidence alone is not proof of a
 fix. Do not resolve threads during audit or read-only work.
 
-**Source:** Operator correction on 2026-09-14 during monitoring-monorepo Dependabot
-preparation: agents may resolve threads they have sufficiently addressed.
-
 ## Inventory and host setup
 
 Inventory selected PRs with complete paginated issue comments, inline comments,

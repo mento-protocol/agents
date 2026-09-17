@@ -150,8 +150,8 @@
       "markerSchema": "mento-dependabot-preparation:v2",
       "pr": 872,
       "claim": "fedcba9876543210fedcba9876543210fedcba98",
-      "ownerRunId": "openclaw-giskard-20260909T104403Z-3ad10ff591be",
-      "runSha256": "478a8fb3d04a99c580568a78c03aa11679f5bb8875a2ed285eb23dd08c94cf2e",
+      "ownerRunId": "openclaw-linux-20260909T104403Z-3ad10ff591be",
+      "runSha256": "f16ce96191efb55716aac3f6f9c1dace59359def5fe4bfad8cb59ede8288419c",
       "operator": {
         "id": 99,
         "login": "openclaw-bot",
@@ -162,7 +162,7 @@
       },
       "supersedes": "0123456789abcdef0123456789abcdef01234567",
       "v1Line": "<!-- mento-dependabot-preparation:v1 -->",
-      "v2Line": "<!-- mento-dependabot-preparation:v2 pr=872 claim=fedcba9876543210fedcba9876543210fedcba98 run-sha256=478a8fb3d04a99c580568a78c03aa11679f5bb8875a2ed285eb23dd08c94cf2e operator-sha256=eebde67d78d25352c8961db34cf1f57483f13a537c99cfbb6cd883bf5fb8f299 supersedes=0123456789abcdef0123456789abcdef01234567 -->"
+      "v2Line": "<!-- mento-dependabot-preparation:v2 pr=872 claim=fedcba9876543210fedcba9876543210fedcba98 run-sha256=f16ce96191efb55716aac3f6f9c1dace59359def5fe4bfad8cb59ede8288419c operator-sha256=eebde67d78d25352c8961db34cf1f57483f13a537c99cfbb6cd883bf5fb8f299 supersedes=0123456789abcdef0123456789abcdef01234567 -->"
     }
   ]
 }

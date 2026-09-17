@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  cpSync,
   copyFileSync,
   mkdtempSync,
   mkdirSync,
@@ -322,6 +323,20 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
   assert.throws(
     () => pushExactCas(zeroOld, fixture.trusted),
     /must name an existing commit/,
+  );
+  const nodeCopy = path.join(fixture.root, "nodex");
+  cpSync(process.execPath, nodeCopy);
+  chmodSync(nodeCopy, 0o700);
+  const otherNode = {
+    ...fixture.trusted,
+    toolchainOptions: {
+      ...fixture.trusted.toolchainOptions,
+      nodePath: nodeCopy,
+    },
+  };
+  assert.throws(
+    () => pushExactCas(fixture.request, otherNode),
+    /must be the node in its directory/,
   );
   const otherEnv = {
     ...fixture.trusted,

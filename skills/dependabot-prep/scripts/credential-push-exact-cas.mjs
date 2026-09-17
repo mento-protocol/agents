@@ -22,7 +22,7 @@ const OID_PATTERN = /^[0-9a-f]{40}$/;
 const ZERO_OID = "0".repeat(40);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REF_NAME_PATTERN =
-  /^(?!-)(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)|\/\/|[~^:?*\\\[]))[A-Za-z0-9][A-Za-z0-9._\/-]*[A-Za-z0-9]$/;
+  /^(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)|\/\/|[~^:?*\\\[]))[A-Za-z0-9][A-Za-z0-9._\/-]*[A-Za-z0-9]$/;
 const SAFE_CONFIG_KEYS = new Set([
   "commit.gpgsign",
   "core.bare",
@@ -295,8 +295,7 @@ function validateRequest(request) {
   if (
     typeof request.headRefName !== "string" ||
     request.headRefName.length > 240 ||
-    !REF_NAME_PATTERN.test(request.headRefName) ||
-    request.headRefName.endsWith(".")
+    !REF_NAME_PATTERN.test(request.headRefName)
   ) {
     reject("Head ref name is invalid.");
   }

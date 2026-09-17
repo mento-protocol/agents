@@ -9,10 +9,9 @@ runtime permissions during preparation.
 Use a documented repository state path where applicable to this host. Otherwise
 use a writable root outside checkouts: Linux
 `${XDG_STATE_HOME:-$HOME/.local/state}/dependabot-prep`; macOS
-`$HOME/Library/Application Support/dependabot-prep`. The Claude Code sandbox
-write allowlist denies that Library path (observed 2026-09-10, mento-sdk), so
-a sandboxed macOS session uses the XDG path above and records the deviation in
-the owner file. Keep per-repository state under a canonical
+`$HOME/Library/Application Support/dependabot-prep`. A sandboxed macOS session
+may be unable to write that Library path; it then uses the XDG path above and
+records the deviation in the owner file. Keep per-repository state under a canonical
 `<state root>/<host>__<owner>__<repo>` directory built from validated
 path-safe components; reject separators, traversal and malformed identities,
 and quote paths with spaces.

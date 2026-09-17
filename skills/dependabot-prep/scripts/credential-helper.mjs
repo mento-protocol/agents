@@ -32,6 +32,10 @@ const ENV = Object.freeze({
 });
 
 const GET_FIELDS = new Set(["protocol", "host", "path", "username"]);
+// Git adds these to a `get` record on its own: every `WWW-Authenticate` value of
+// a 401 as `wwwauth[]`, and its protocol capabilities as `capability[]`. They
+// are multi-valued, carry nothing this helper binds, and are dropped unread.
+const IGNORED_GET_FIELDS = new Set(["wwwauth[]", "capability[]"]);
 const WRITEBACK_FIELDS = new Set([
   "protocol",
   "host",
@@ -264,6 +268,14 @@ function parseCredentialRecord(input, length, operation, context) {
     if (separator <= cursor) reject();
 
     const key = input.toString("ascii", cursor, separator);
+    if (operation === "get" && IGNORED_GET_FIELDS.has(key)) {
+      cursor = newline + 1;
+      if (cursor === length) {
+        ended = true;
+        break;
+      }
+      continue;
+    }
     if (!allowed.has(key) || seen.has(key)) reject();
     seen.add(key);
 

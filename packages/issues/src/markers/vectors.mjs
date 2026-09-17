@@ -96,7 +96,7 @@ export const SUMMARY_VECTOR_INPUTS = Object.freeze([
     name: "summary-takeover",
     pr: 872,
     claim: "fedcba9876543210fedcba9876543210fedcba98",
-    ownerRunId: "openclaw-giskard-20260909T104403Z-3ad10ff591be",
+    ownerRunId: "openclaw-linux-20260909T104403Z-3ad10ff591be",
     operator: Object.freeze({ id: 99, login: "openclaw-bot", type: "User" }),
     supersedes: "0123456789abcdef0123456789abcdef01234567",
   }),

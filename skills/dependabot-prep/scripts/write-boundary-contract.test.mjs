@@ -14,7 +14,7 @@ const referenceNames = [
   "feedback.md",
   "handoff.md",
 ];
-const skill = [
+const legacyBundle = [
   entry,
   ...referenceNames.map((name) =>
     readFileSync(new URL(`../references/${name}`, import.meta.url), "utf8"),
@@ -63,12 +63,15 @@ test("instruction bundle binds the production GitHub CLI pin and one-shot wrappe
     "prevent concurrent model commands",
     "does not prove model-write isolation",
   ]) {
-    assert.ok(skill.includes(required), `SKILL.md omitted ${required}`);
+    assert.ok(
+      legacyBundle.includes(required),
+      `SEALED-LEGACY.md bundle omitted ${required}`,
+    );
   }
-  assert.ok(!/^\| `resolve`/mu.test(skill), "resolve grant returned");
+  assert.ok(!/^\| `resolve`/mu.test(legacyBundle), "resolve grant returned");
   assert.ok(
-    skill.includes("Never resolve or unresolve a review thread."),
-    "thread-resolution hard limit drifted",
+    legacyBundle.includes("Never resolve or unresolve a review thread."),
+    "archived thread-resolution hard limit drifted",
   );
 });
 
