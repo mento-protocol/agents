@@ -17,7 +17,6 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { inspectSealedExecutable } from "./credential-helper-toolchain.mjs";
 import {
   pushExactCas,
   requirePushPorcelain,
