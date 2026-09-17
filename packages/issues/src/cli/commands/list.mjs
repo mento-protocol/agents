@@ -1,15 +1,18 @@
 /**
- * `claims list [--stale] [--prs …]` — every claim in the namespace.
+ * `claims list [--stale] [--prs|--issues …]` — every claim in the namespace.
  *
  * AMENDMENTS §J: `--stale` selects LOCKs whose lease has expired, and each
- * entry reports its pull request's open/closed state, because an abandoned
- * LOCK on a closed or merged pull request is the case that motivates the
- * listing. Recovery stays the ordinary path — `claim` takes over after expiry,
- * then `release --outcome skipped` — and this command still deletes nothing.
+ * entry reports the claimed item's state, because an abandoned LOCK on a
+ * closed or merged item is the case that motivates the listing. The profile
+ * decides which item that is: a pull request's `state`, `draft` and `merged`
+ * under `pr`, an issue's `state`, `stateReason` and a `pullRequest` boolean
+ * under `issue`. Recovery stays the ordinary path — `claim` takes over after
+ * expiry, then `release --outcome skipped` — and this command still deletes
+ * nothing.
  */
 
 import { listClaims, mapWithConcurrency } from "../../claims/ref.mjs";
-import { readPullRequestState } from "../github.mjs";
+import { readIssueState, readPullRequestState } from "../github.mjs";
 import { markFailureContext } from "./common.mjs";
 
 function summaryLine(entry, ctx) {
@@ -52,7 +55,7 @@ export async function runList(runtime) {
   const concurrency = flags.concurrency ?? 4;
   const entries = await listClaims(ctx, {
     concurrency,
-    numbers: flags.prs ?? null,
+    numbers: runtime.numbers,
   });
   // A ref whose suffix names no usable number is skipped rather than allowed
   // to abort the listing, and it is reported: an unreadable name inside the
@@ -69,32 +72,51 @@ export async function runList(runtime) {
       ? entries.filter((entry) => entry.stale === true)
       : entries;
 
+  // Which endpoint names the claimed item is the profile's answer, not this
+  // command's: `repos/{o}/{r}/pulls/{n}` under the pr profile and
+  // `repos/{o}/{r}/issues/{n}` under the issue profile. The pr line is
+  // unchanged, key for key.
+  const issues = ctx.profile.itemKind === "issue";
+  const readState = issues
+    ? (runtime.operations.gh?.readIssueState ?? readIssueState)
+    : (runtime.operations.gh?.readPullRequestState ?? readPullRequestState);
+  const stage = issues ? "read-issue" : "read-pull-request";
+
   // `--concurrency` governs both halves of the listing. The claim reads already
-  // ran under it and the pull-request reads ran one at a time, which is the
-  // slower half on a namespace of any size. `mapWithConcurrency` stores results
-  // by input position, so the printed order and the warnings stay the input's
-  // however the reads interleave.
-  const readState =
-    runtime.operations.gh?.readPullRequestState ?? readPullRequestState;
+  // ran under it and the item reads ran one at a time, which is the slower half
+  // on a namespace of any size. `mapWithConcurrency` stores results by input
+  // position, so the printed order and the warnings stay the input's however
+  // the reads interleave.
   const read = await mapWithConcurrency(
     selected,
     concurrency,
     async (entry) => {
       const line = summaryLine(entry, ctx);
-      const pullRequest = await readState(ctx.options, entry.number);
-      line.pullRequest = {
-        state: pullRequest.state,
-        draft: pullRequest.draft,
-        merged: pullRequest.merged,
-      };
-      return { line, error: pullRequest.error ?? null };
+      const item = await readState(ctx.options, entry.number);
+      if (issues) {
+        // `pullRequest` is a boolean here, and it is the field worth reading:
+        // GitHub serves both kinds from this endpoint, so an issue claim
+        // standing on a pull-request number shows up as `true`.
+        line.issue = {
+          state: item.state,
+          stateReason: item.stateReason,
+          pullRequest: item.pullRequest,
+        };
+      } else {
+        line.pullRequest = {
+          state: item.state,
+          draft: item.draft,
+          merged: item.merged,
+        };
+      }
+      return { line, error: item.error ?? null };
     },
   );
   const lines = [];
   for (const entry of read) {
     if (entry.error) {
       warnings.push({
-        stage: "read-pull-request",
+        stage,
         number: entry.line.number,
         message: entry.error,
       });

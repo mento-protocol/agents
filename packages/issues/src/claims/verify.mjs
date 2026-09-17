@@ -529,16 +529,19 @@ function defaultScheduleRenews(intervalMs, tick) {
  * later guard of that run id could get past.
  *
  * @param {object|object[]} claims one `{number, token}` pair, or many.
+ * @param {string} [numberFlag] the number flag in force, for the refusal; the
+ *   loaded config's profile decides whether that is `pr` or `issue`.
  * @returns {Array<{number: number, token: string}>} the validated pairs.
  * @throws {ClaimUsageError} for an empty list, a number that is not a positive
  *   integer, a missing token, or one number named twice.
  */
-export function normalizeGuardClaims(claims) {
+export function normalizeGuardClaims(claims, numberFlag = "pr") {
   const list = Array.isArray(claims) ? claims : [claims];
   if (list.length === 0) {
-    throw new ClaimUsageError("guard needs at least one --pr/--token pair", {
-      details: { claims: [] },
-    });
+    throw new ClaimUsageError(
+      `guard needs at least one --${numberFlag}/--token pair`,
+      { details: { claims: [] } },
+    );
   }
   const seen = new Set();
   return list.map((entry) => {
@@ -895,7 +898,7 @@ export async function guardChild(ctx, claims, options = {}) {
         details: { runId: runId ?? null },
       });
     }
-    members = normalizeGuardClaims(claims);
+    members = normalizeGuardClaims(claims, ctx.profile.numberKey);
   } catch (error) {
     if (error instanceof ClaimUsageError) return refuseUsage(error);
     throw error;

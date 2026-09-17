@@ -424,6 +424,17 @@ test("metadata keys reject a non-hex head and a non-github summary comment url",
     () => parse({ summaryCommentUrl: `https://github.com/${"x".repeat(300)}` }),
     /has an invalid summaryCommentUrl/,
   );
+  // The pr profile shares the issue profile's URL validator, so it refuses the
+  // same thing: a github.com URL whose query carries a credential passes both
+  // the host prefix and the length cap, and only the credential check stops it
+  // reaching the claim commit.
+  assert.throws(
+    () =>
+      parse({
+        summaryCommentUrl: `${SUMMARY_URL}?token=ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+      }),
+    /has an invalid summaryCommentUrl/,
+  );
 
   const accepted = parse({
     lastPushedHead: HEAD,

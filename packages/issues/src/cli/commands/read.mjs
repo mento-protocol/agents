@@ -14,7 +14,7 @@ import { markFailureContext } from "./common.mjs";
  * @returns {Promise<object>} a command result.
  */
 export async function runRead(runtime) {
-  const number = runtime.flags.pr;
+  const number = runtime.number;
   const { ctx } = runtime;
   const { scope, ref } = markFailureContext(runtime, number);
   const state = await readClaim(ctx, number);

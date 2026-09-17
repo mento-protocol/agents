@@ -29,7 +29,7 @@ import { clearStateWarnings, markFailureContext } from "./common.mjs";
  */
 export async function runRelease(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const token = flags.token;
   const runId = flags["run-id"];
   const outcome = assertOutcome(flags.outcome);

@@ -31,7 +31,7 @@ import { markFailureContext } from "./common.mjs";
  */
 export async function runSlotClear(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const runId = flags["run-id"];
   const { scope, ref } = markFailureContext(runtime, number);
   const store = runtime.stateStore;

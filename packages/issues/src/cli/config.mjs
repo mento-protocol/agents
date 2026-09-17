@@ -67,6 +67,14 @@ export const CLAIMS_DEFAULTS = Object.freeze({
   ]),
   allowOverrides: false,
   allowCloudWriters: false,
+  // GitHub serves issues and pull requests from one number space, so
+  // `claims claim --issue 872` takes a real claim on a number another skill may
+  // hold as `refs/mento-claims/v1/pr/872` — two mutexes over one item, neither
+  // aware of the other. With this on, `claim` and `takeover` read
+  // `repos/{o}/{r}/issues/{n}` after the login and refuse when the number is
+  // really a pull request. Off by default, because it costs a round trip on
+  // the hot path; recommended on in an issue policy, where the hazard is real.
+  verifySubjectKind: false,
   command: null,
 });
 
@@ -124,12 +132,13 @@ export const SUMMARY_MARKER_SCHEMA = "mento-dependabot-preparation:v2";
 /**
  * Profiles a configuration document may select.
  *
- * `issue-board` is deliberately absent. It exists as the executable proof that
- * this package is a byte-for-byte drop-in for monitoring's mutex, and its
- * canonical scope needs a Project owner and number that only a library caller
- * can supply.
+ * `issue-board` is the one deliberately absent, for a reason no document can
+ * fix: it exists as the executable proof that this package is a byte-for-byte
+ * drop-in for monitoring's mutex, and its canonical scope needs a Project
+ * owner and number that only a library caller can supply. `pr` and `issue`
+ * take their whole scope from the command line and this document.
  */
-export const CONFIGURABLE_PROFILES = Object.freeze(["pr"]);
+export const CONFIGURABLE_PROFILES = Object.freeze(["pr", "issue"]);
 
 function configError(message, options = {}) {
   return new ClaimConfigError(message, {
@@ -330,8 +339,67 @@ function buildFencePurposes(requiredBefore, advisoryBefore) {
   return Object.freeze(table);
 }
 
-function assertScopeTemplate(claims) {
+/**
+ * The default namespace of every configurable profile, by profile id.
+ *
+ * Built once from the factories rather than written out, so a profile whose
+ * default namespace moves cannot leave the overlap rule below checking a
+ * prefix nothing uses any more.
+ *
+ * @returns {Array<{id: string, namespace: string, token: string}>}
+ */
+function configurableProfileNamespaces() {
+  return CONFIGURABLE_PROFILES.map((id) => {
+    const profile = claimProfile(id);
+    return { id, namespace: profile.namespace, token: profile.numberToken };
+  });
+}
+
+/**
+ * Refuse a namespace that overlaps another configurable profile's.
+ *
+ * `profile: "issue"` with `namespace: "refs/mento-claims/v1/pr"` and
+ * `scopeTemplate: "refs/mento-claims/v1/pr/{issue}"` passes every other rule
+ * here — the placeholder appears once, the namespace is its prefix, the
+ * rendered name is a valid ref. It also puts two skills on one set of
+ * references without either of them knowing, and the payloads then fail closed
+ * one at a time as `CLAIM_REF_INVALID`, which reads as a corrupt reference and
+ * not as the configuration that caused it.
+ *
+ * Prefix in both directions, because `refs/mento-claims/v1/pr` and
+ * `refs/mento-claims/v1/pr/v2` are the same problem.
+ *
+ * @param {string} profileId the selected profile.
+ * @param {string} namespace the configured namespace.
+ * @returns {void}
+ * @throws {ClaimConfigError} exit 3, before any network call.
+ */
+function assertNamespaceNotShared(profileId, namespace) {
+  for (const other of configurableProfileNamespaces()) {
+    if (other.id === profileId) continue;
+    const overlaps =
+      namespace === other.namespace ||
+      namespace.startsWith(`${other.namespace}/`) ||
+      other.namespace.startsWith(`${namespace}/`);
+    if (!overlaps) continue;
+    throw configError(
+      `claims.namespace ${namespace} overlaps the ${other.id} profile's namespace ${other.namespace}; two claim profiles must not share references`,
+      {
+        code: "CLAIM_CONFIG_NAMESPACE_OVERLAP",
+        details: {
+          profile: profileId,
+          namespace,
+          conflictsWith: other.id,
+          conflictingNamespace: other.namespace,
+        },
+      },
+    );
+  }
+}
+
+function assertScopeTemplate(claims, profile) {
   const { namespace, scopeTemplate } = claims;
+  const token = profile.numberToken;
   if (typeof namespace !== "string" || !namespace.startsWith("refs/")) {
     throw configError("claims.namespace must start with refs/", {
       details: { namespace: namespace ?? null },
@@ -342,21 +410,42 @@ function assertScopeTemplate(claims) {
       details: { scopeTemplate: scopeTemplate ?? null },
     });
   }
-  const occurrences = scopeTemplate.split("{pr}").length - 1;
+  // The other profile's placeholder, named as such. This is the mistake an
+  // operator makes copying a policy into a new repository and changing only
+  // `profile`, and the generic count below would answer "must contain {issue}
+  // exactly once, found 0" — the symptom, never the cause.
+  for (const other of configurableProfileNamespaces()) {
+    if (other.id === profile.id) continue;
+    if (!scopeTemplate.includes(other.token)) continue;
+    throw configError(
+      `claims.profile ${profile.id} renders ${token}, but claims.scopeTemplate names ${other.token}`,
+      {
+        code: "CLAIM_CONFIG_SCOPE_TEMPLATE_TOKEN",
+        details: {
+          profile: profile.id,
+          expected: token,
+          found: other.token,
+          scopeTemplate,
+        },
+      },
+    );
+  }
+  const occurrences = scopeTemplate.split(token).length - 1;
   if (occurrences !== 1) {
     throw configError(
-      `claims.scopeTemplate must contain {pr} exactly once, found ${occurrences}`,
+      `claims.scopeTemplate must contain ${token} exactly once, found ${occurrences}`,
       { details: { scopeTemplate } },
     );
   }
-  const prefix = scopeTemplate.slice(0, scopeTemplate.indexOf("{pr}"));
+  const prefix = scopeTemplate.slice(0, scopeTemplate.indexOf(token));
   if (prefix !== `${namespace}/`) {
     throw configError(
       `claims.namespace ${namespace} is not the prefix of claims.scopeTemplate ${scopeTemplate}`,
       { details: { namespace, scopeTemplate } },
     );
   }
-  const rendered = scopeTemplate.replaceAll("{pr}", "1");
+  assertNamespaceNotShared(profile.id, namespace);
+  const rendered = scopeTemplate.replaceAll(token, "1");
   try {
     assertValidRefName(rendered);
   } catch (error) {
@@ -475,7 +564,7 @@ function normalizeClaimsBlock(rawClaims) {
 
   const claims = { ...CLAIMS_DEFAULTS, ...rawClaims };
   claims.namespace = rawClaims.namespace;
-  assertScopeTemplate(claims);
+  assertScopeTemplate(claims, profile);
   claims.label = assertLabel(rawClaims.label);
   claims.package = assertPackageBlock(rawClaims.package);
   claims.requiredBefore = assertFencePurposes(claims, "requiredBefore");
@@ -534,7 +623,11 @@ function normalizeClaimsBlock(rawClaims) {
       );
     }
   }
-  for (const key of ["allowOverrides", "allowCloudWriters"]) {
+  for (const key of [
+    "allowOverrides",
+    "allowCloudWriters",
+    "verifySubjectKind",
+  ]) {
     if (typeof claims[key] !== "boolean") {
       throw configError(`claims.${key} must be a boolean`, {
         details: { key, value: claims[key] ?? null },

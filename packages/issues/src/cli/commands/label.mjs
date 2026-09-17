@@ -58,7 +58,7 @@ export async function runLabelEnsure(runtime) {
  */
 export async function runLabelReconcile(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const { scope, ref } = markFailureContext(runtime, number);
   // Only `--apply` makes this a write, and `ensureLogin` is a no-op for the
   // read-only form: the report costs no round trip it does not need.

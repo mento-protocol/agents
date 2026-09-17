@@ -16,6 +16,7 @@ import {
 } from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { claimBlock } from "../output.mjs";
 import {
@@ -30,7 +31,7 @@ import {
  */
 export async function runClaim(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const { scope, ref } = markFailureContext(runtime, number);
   const takeover = flags["no-takeover"] === true ? false : undefined;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
@@ -41,6 +42,18 @@ export async function runClaim(runtime) {
     metadata,
     runIdPrefix: flags["run-id-prefix"] ?? null,
   });
+
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number. It sits above
+  // the dry-run branch for the reason the comment above gives: a plan that
+  // skipped it answered `ok` and "would acquire" for a pull-request number the
+  // run refuses with exit 10 `not-eligible`. It reads and never writes, so a
+  // dry run may make it, and it needs no login of its own — the login this
+  // command records belongs to the write path below. Under the pr profile it
+  // returns at once and costs nothing either way. A failed read is recorded on
+  // the runtime rather than returned, so it reaches the document whether this
+  // command returns or something below it throws.
+  await assertSubjectKind(runtime, number);
 
   if (ctx.options.dryRun === true) {
     return {
