@@ -26,7 +26,10 @@ directory name. A skill directory may also contain:
   `SEALED-LEGACY.md`, when a superseded procedure must stay readable.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
-and layout. CI runs it on every pull request.
+and layout, and `node --test skills/*/scripts/*.test.mjs` to run every
+skill's own suite; on a host whose temp directory is world-writable, set
+`DEPENDABOT_PREP_TEST_SEALED_ROOT` to a directory only you can write. CI runs
+both on every pull request.
 
 ## Public readership
 

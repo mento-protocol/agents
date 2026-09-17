@@ -167,12 +167,12 @@ function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
     .toString("utf8")
     .trim();
   const [interpreterPath, ...operands] = line.split(/\s+/u);
+  if (depth > 0) reject("Toolchain script interpreter is itself a script.");
   if (interpreterPath === "/usr/bin/env") {
     if (operands.length !== 1 || operands[0] !== "node")
       reject("Toolchain script uses an unbound env interpreter.");
     return Object.freeze({ env: "node" });
   }
-  if (depth > 0) reject("Toolchain script interpreter is itself a script.");
   if (!path.isAbsolute(interpreterPath))
     reject("Toolchain script interpreter is not absolute.");
   const interpreter = inspectExecutable(

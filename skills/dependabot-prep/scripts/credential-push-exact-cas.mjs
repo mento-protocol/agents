@@ -542,6 +542,15 @@ export function pushExactCas(requestInput, trustedInput) {
   );
   if (initialManifest.gh.sha256 !== trusted.ghSha256)
     reject("GitHub CLI pin mismatched.");
+  // Git's exec path joins the push PATH, so it gets the same containment rule
+  // as the configured paths although it comes from `git --exec-path`.
+  for (const execPath of [
+    initialManifest.gitExecPath.reportedPath,
+    initialManifest.gitExecPath.resolvedPath,
+  ]) {
+    if (isAtOrBelow(request.candidateRoot, execPath))
+      reject("Trusted path is inside the candidate root.");
+  }
 
   const helper = inspectSealedExecutable(trusted.helperPath);
   requireDigest(helper.sha256, trusted.helperSha256, "credential helper");

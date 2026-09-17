@@ -6,7 +6,9 @@ Only the `claim` field is conditional. The executable form of this contract is
 the claim command's `markers` group: the policy's `coordination.claims.command`
 followed by `markers summary --input <job.json>`, by
 `markers build --input <job.json> [--out <body.txt>]`, or by
-`markers verify --input <check.json>`. With the Mento command, that first form
+`markers verify --input <check.json>`; `verify` exits 0 when the comment is what
+the inputs produce and 2 when it is not, so exit 2 there is a mismatch, not a
+usage error. With the Mento command, that first form
 reads `pnpm dependabot:claim -- markers summary --input <job.json>`. The
 `@mento-protocol/issues/markers` subpath is the same contract and applies only
 where the package is an installed dependency.
