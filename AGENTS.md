@@ -65,8 +65,11 @@ into this repository:
 3. Verify the skill from a fresh clone: run `scripts/link-skills.sh`, then
    `scripts/link-skills.sh check`, and confirm the skill links with no
    drift.
-4. Delete the source copy in the personal library in the same change, so
-   the skill has only one home.
+4. Delete the source copy in the personal library, so the skill has only one
+   home. Merge the company-side addition and pull it on every consumer first;
+   the personal-side removal merges after. `link-skills.sh` prunes a dangling
+   link on its next run, so any gap uninstalls the skill everywhere
+   (dependabot-prep, 2026-09-17).
 5. For a third-party skill, record its upstream source and license in the
    skill's `SKILL.md` frontmatter.
 6. Keep `SKILL.md` under 500 lines and keep `references/` one level deep.
