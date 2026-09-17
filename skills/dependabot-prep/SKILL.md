@@ -240,8 +240,9 @@ CI/review waits, work on independent PRs without a second heavy tree.
    checks, stale reviews or ambiguous duplicate contexts are not green. Use events
    or bounded backoff polling. When repository policy prescribes claims, run the
    wait under `claims guard --gate wait`, which renews the claim for the wait's
-   lifetime; this gate is advisory and prints its verdict without stopping the
-   command. While this run holds a family, pass every member to that guard as a
+   lifetime; by default this gate is advisory and prints its verdict without
+   stopping the command, and a policy that lists `long-wait` in `requiredBefore`
+   makes guard stop the wait when the claim is lost. While this run holds a family, pass every member to that guard as a
    repeated `--pr <n> --token <t>` pair under one `--run-id`, so a wait longer
    than `renewMinutes` does not expire the siblings. Code failures return to
    repair; head/base changes invalidate affected evidence. Continue to readiness,
@@ -265,9 +266,12 @@ comment or an inline reply: `claims verify --gate summary-comment` or
 `claims verify --gate inline-reply` while this run holds the claim, `claims read`
 otherwise. These two gates are advisory only while the policy's `advisoryBefore`
 lists them, the default. A policy that moves either into `requiredBefore` makes
-that gate mandatory: an exit 20 that bounded retries cannot resolve then stops
-that publication, because the run cannot prove it still holds the fence. For an
-advisory gate the direction is one way. An unknown
+that gate mandatory: run the publishing command itself under
+`claims guard --gate summary-comment` or `claims guard --gate inline-reply`,
+which refuses to start it without a held claim and stops it when the claim is
+lost, so a point-in-time `verify` never stands in for the fence; an exit 20 that
+bounded retries cannot resolve stops that publication, because the run cannot
+prove it still holds the fence. For an advisory gate the direction is one way. An unknown
 verdict does not block the comment: exit 20 `transport` is retried, and a claim
 this run still believes it holds but could not read is posted against anyway,
 because the procedural-marker contract reconciles a duplicate. A verdict that

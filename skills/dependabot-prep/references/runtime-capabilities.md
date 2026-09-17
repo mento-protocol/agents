@@ -80,12 +80,12 @@ The command forms, their flags and what each one writes:
   renew interval has elapsed. Each renewal rotates the token and prints the new
   one in `claim.token`, which its `next` lines carry.
 - `claims guard --pr <n> --token <t> --run-id <r> --gate <gate> -- <argv>` runs
-  one command under the claim; the gates are `push`, `review-request` and
-  `wait`. `push` and `review-request` are mandatory while the policy lists them
-  in `requiredBefore`, which SKILL.md requires before any write: guard refuses to
-  start the command without a held claim, and stops the command when the claim
-  is lost.
-  `wait` is advisory: guard prints the verdict and runs the command anyway.
+  one command under the claim; it accepts every gate `verify` accepts. A gate
+  the policy lists in `requiredBefore` is mandatory: guard refuses to start the
+  command without a held claim, and stops the command when the claim is lost.
+  SKILL.md requires `push` and `review-request` there before any write. A gate
+  in `advisoryBefore` (by default `wait`, `summary-comment` and `inline-reply`)
+  only prints the verdict and runs the command anyway.
   Repeat `--pr <n> --token <t>` for a family; one `--run-id` covers every pair,
   and guard verifies and renews all of them, so a family survives a wait longer
   than `renewMinutes`. The child keeps stdout; guard's own JSON report goes to

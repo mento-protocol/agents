@@ -2,9 +2,12 @@ import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   accessSync,
+  closeSync,
   constants,
   lstatSync,
+  openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   realpathSync,
   statSync,
@@ -136,10 +139,62 @@ function inspectAliasComponents(aliasPath) {
   return Object.freeze(components);
 }
 
+// A script executable runs under the interpreter its shebang names, so the
+// digest of the script alone does not identify the process that runs. An
+// absolute interpreter is inspected like any other toolchain executable and
+// its identity joins the manifest; `/usr/bin/env node` is the one indirect
+// form accepted, because the env path and the `node` beside the pinned Node
+// are bound elsewhere in the manifest. An interpreter that is itself a script
+// is refused.
+function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
+  let head;
+  try {
+    const descriptor = openSync(resolvedPath, "r");
+    try {
+      head = Buffer.alloc(256);
+      const count = readSync(descriptor, head, 0, head.length, 0);
+      head = head.subarray(0, count);
+    } finally {
+      closeSync(descriptor);
+    }
+  } catch {
+    reject("Unavailable toolchain executable.");
+  }
+  if (head.length < 2 || head[0] !== 0x23 || head[1] !== 0x21) return null;
+  const newline = head.indexOf(0x0a);
+  const line = head
+    .subarray(2, newline < 0 ? head.length : newline)
+    .toString("utf8")
+    .trim();
+  const [interpreterPath, ...operands] = line.split(/\s+/u);
+  if (interpreterPath === "/usr/bin/env") {
+    if (operands.length !== 1 || operands[0] !== "node")
+      reject("Toolchain script uses an unbound env interpreter.");
+    return Object.freeze({ env: "node" });
+  }
+  if (depth > 0) reject("Toolchain script interpreter is itself a script.");
+  if (!path.isAbsolute(interpreterPath))
+    reject("Toolchain script interpreter is not absolute.");
+  const interpreter = inspectExecutable(
+    interpreterPath,
+    false,
+    requireSealed,
+    depth + 1,
+  );
+  return Object.freeze({
+    dev: interpreter.dev,
+    ino: interpreter.ino,
+    invocationPath: interpreter.invocationPath,
+    resolvedPath: interpreter.resolvedPath,
+    sha256: interpreter.sha256,
+  });
+}
+
 function inspectExecutable(
   invocationPath,
   requireCanonical,
   requireSealed = true,
+  depth = 0,
 ) {
   if (
     typeof invocationPath !== "string" ||
@@ -175,6 +230,7 @@ function inspectExecutable(
     dev: String(metadata.dev),
     gid: metadata.gid,
     ino: String(metadata.ino),
+    interpreter: inspectInterpreter(resolvedPath, requireSealed, depth),
     invocationPath,
     linkTarget: linkMetadata.isSymbolicLink()
       ? readlinkSync(invocationPath)

@@ -345,6 +345,27 @@ test("the porcelain proof rejects forced, duplicate and foreign updates", () => 
   );
 });
 
+test("a script executable binds its interpreter and refuses an unsealed one", (t) => {
+  const fixture = createFixture(t);
+  assert.equal(fixture.manifest.gh.interpreter.resolvedPath, process.execPath);
+  assert.match(fixture.manifest.gh.interpreter.sha256, /^[0-9a-f]{64}$/u);
+
+  const open = path.join(fixture.root, "open-interp");
+  mkdirSync(open, { mode: 0o777 });
+  chmodSync(open, 0o777);
+  const looseNode = path.join(open, "node");
+  cpSync(process.execPath, looseNode);
+  chmodSync(looseNode, 0o700);
+  writeFileSync(fixture.ghPath, `#!${looseNode}\nprocess.exit(0);\n`, {
+    mode: 0o700,
+  });
+  assert.throws(
+    () => pushExactCas(fixture.request, fixture.trusted),
+    /Unsealed toolchain path component|pin mismatched/,
+  );
+  assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
+});
+
 test("toolchain or helper drift after the push reports ambiguity", (t) => {
   for (const mutateOnPush of ["gh", "helper"]) {
     const fixture = createFixture(t, { mutateOnPush });
