@@ -474,7 +474,7 @@ function requireHead(gitPath, request, env) {
   ancestry.stderr.fill(0);
 }
 
-function requirePushPorcelain(stdout, expectedNewOid, headRefName) {
+export function requirePushPorcelain(stdout, expectedNewOid, headRefName) {
   const records = stdout.toString("utf8").split("\n").filter(Boolean);
   const updates = records.filter((line) =>
     line.includes(`\t${expectedNewOid}:refs/heads/`),

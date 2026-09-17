@@ -27,6 +27,7 @@ import {
   REQUIRED_GIT_PROGRAMS,
   verifyCredentialPushToolchain,
 } from "./credential-helper-toolchain.mjs";
+import { requirePushPorcelain } from "./credential-push-exact-cas.mjs";
 
 const helperPath = realpathSync(
   fileURLToPath(new URL("./credential-helper.mjs", import.meta.url)),
@@ -732,6 +733,9 @@ test("local compare-and-swap push traces the bound Git process set", (t) => {
   );
   const trace = parseTrace2(push.output[3]);
   assert.equal(push.output[3].includes("ghp_"), false);
+  // The wrapper's porcelain parser must accept what this Git really prints,
+  // not only the fake Git's output in the wrapper suite.
+  requirePushPorcelain(push.stdout, newHead, "dependabot/test");
   const starts = trace.filter((event) => event.event === "start");
   const rootStart = starts.find((event) => event.argv[0] === trustedGit.path);
   assert.ok(rootStart);

@@ -45,7 +45,7 @@ runtime serializer. A host identity that cannot satisfy this grammar cannot post
 a portable procedural response.
 
 Visible body. Use valid Unicode scalar values, UTF-8, LF line endings and no
-trailing spaces. Do not normalize it. Hash those exact bytes for
+trailing spaces or tabs. Do not normalize it. Hash those exact bytes for
 `visible-body-sha256`.
 
 Claim token. 40 lowercase hex characters: the claim ref's current LOCK oid, as
@@ -95,11 +95,12 @@ For example, with the Mento schema:
 
 `<!-- mento-dependabot-preparation:v2 pr=872 claim=<40hex> run-sha256=<64hex> operator-sha256=<64hex> -->`
 
-`markers summary` prints two lines: `<!-- mento-dependabot-preparation:v1 -->`,
-the Mento discovery marker, and then the v2 claim line. It does not read
+`markers summary` prints one JSON document on stdout with `v1Line`
+(`<!-- mento-dependabot-preparation:v1 -->`, the Mento discovery marker),
+`v2Line` (the claim line) and `block` (both, joined by one LF); with
+`--out <path>` it also writes `block` to that file. It does not read
 `reporting.prCommentMarker`. When the configured discovery marker is a different
-line, keep the configured marker first and take only the second line from the
-command output.
+line, keep the configured marker first and use `v2Line` alone.
 
 A marker revision of `v1`, and a repository that prescribes no claims, keep the
 discovery marker alone.

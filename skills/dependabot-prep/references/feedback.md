@@ -41,7 +41,7 @@ escape. A host identity that cannot satisfy this grammar cannot post a portable
 procedural response.
 
 The visible body uses valid Unicode scalar values, UTF-8, LF line endings, and
-no trailing spaces. Do not normalize it. Hash those exact bytes for
+no trailing spaces or tabs. Do not normalize it. Hash those exact bytes for
 `visible-body-sha256`. Build the marker as one ASCII line with the shown field
 order and one ASCII space between tokens. Build the submitted body as the exact
 visible-body bytes, two LF bytes, and the marker bytes. Do not append a final
@@ -88,7 +88,7 @@ change to this contract.
   Reply on the original thread or review surface.
 - Bind each reply to a transaction record. Read the head and root comment before
   the POST. Define the intended visible body as exact UTF-8 with LF line endings
-  and no trailing spaces. Hash those bytes before adding the marker. Use exactly
+  and no trailing spaces or tabs. Hash those bytes before adding the marker. Use exactly
   one blank line, then the marker grammar of the policy-selected revision (v1
   shown; v2 appends `claim=<40hex>` after `decision`):
 
