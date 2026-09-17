@@ -5,33 +5,20 @@
  * This one asserts what a caller sees: the exit code, the summary line and the
  * problem message for one rule family. Keep it to one message-level case per
  * family, so a rule's own behaviour stays in its parser suite and this file
- * stays a check on the command line itself.
+ * stays a check on the command line itself. The rules about the shape of the
+ * tree rather than the text of one SKILL.md live in layout.test.mjs.
  *
  * Every case builds its own tree under the system temporary directory and
  * removes it again, so no case reads or writes the repository's skills/.
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { runValidator, VALIDATOR } from "./helpers/run-validator.mjs";
 import { makeSkillsDir, writeSkill } from "./helpers/skill-fixture.mjs";
-
-const VALIDATOR = fileURLToPath(
-  new URL("../../validate-skills.mjs", import.meta.url),
-);
-
-/** Run the validator over `root` and return its exit code and merged output. */
-function runValidator(script, root) {
-  const result = spawnSync(process.execPath, [script, root], {
-    encoding: "utf8",
-  });
-  assert.equal(result.error, undefined);
-  return { status: result.status, output: result.stdout + result.stderr };
-}
 
 const VALID_SKILL = `---
 name: tidy
