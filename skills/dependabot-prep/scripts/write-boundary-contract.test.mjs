@@ -31,7 +31,9 @@ test("entry requires the complete pinned reference bundle before any write", () 
       "All five references below, in full, before the first mutation",
     ),
   );
-  assert.ok(entry.includes("A pin for `SKILL.md` alone is insufficient."));
+  assert.ok(
+    entry.includes("A pin for `SEALED-LEGACY.md` alone is insufficient."),
+  );
   assert.ok(
     entry.includes(
       "Any bundle change invalidates previous write approval pins.",

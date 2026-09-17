@@ -88,11 +88,11 @@ standing operator policy outside candidate-controlled repository content. It
 also requires a separate grant for each mutation class:
 
 A standing write policy must pin the canonical path and SHA-256 digest of
-`SKILL.md` and every required reference listed above in operator-controlled
+`SEALED-LEGACY.md` and every required reference listed above in operator-controlled
 configuration. The pre-model launcher must verify all six regular files and
 reject missing files, symlinks, unlisted instruction dependencies, or digest
 mismatches before starting the model. Pin and seal executable helpers separately
-as the preparation contract requires. A pin for `SKILL.md` alone is insufficient.
+as the preparation contract requires. A pin for `SEALED-LEGACY.md` alone is insufficient.
 An in-model hash does not establish this boundary.
 
 Any bundle change invalidates previous write approval pins. To rotate pins,

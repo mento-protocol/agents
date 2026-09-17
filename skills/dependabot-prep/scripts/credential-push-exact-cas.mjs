@@ -619,6 +619,10 @@ export function pushExactCas(requestInput, trustedInput) {
   for (const execPath of [
     initialManifest.gitExecPath.reportedPath,
     initialManifest.gitExecPath.resolvedPath,
+    ...initialManifest.gitPrograms.flatMap((program) => [
+      program.reportedInvocationPath,
+      program.resolvedPath,
+    ]),
   ]) {
     if (isAtOrBelow(request.candidateRoot, execPath))
       reject("Trusted path is inside the candidate root.");

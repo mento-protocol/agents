@@ -60,7 +60,8 @@ into this repository:
 1. Scrub the skill for the public-readership rule above: internal
    hostnames, private repository names, personal machine paths, incident
    notes, and personal model-routing rules.
-2. Run `node scripts/validate-skills.mjs` and fix every reported problem.
+2. Run `node scripts/validate-skills.mjs` and
+   `node --test skills/*/scripts/*.test.mjs`, and fix every reported problem.
 3. Verify the skill from a fresh clone: run `scripts/link-skills.sh`, then
    `scripts/link-skills.sh check`, and confirm the skill links with no
    drift.

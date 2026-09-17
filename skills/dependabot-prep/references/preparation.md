@@ -2,7 +2,10 @@
 
 Paths such as `scripts/` and `fixtures/` are relative to the skill root,
 not this reference directory or the candidate repository. Resolve them from
-the loaded skill location. Numbered sections refer to the shared workflow.
+the loaded skill location. Numbered sections refer to `SEALED-LEGACY.md`.
+
+Archived sealed-launcher procedure; see `SEALED-LEGACY.md`. It is not part of
+the active workflow in `SKILL.md`, which needs no launcher.
 
 ## 5. Use a sanitized no-exec preparation clone
 
