@@ -256,7 +256,10 @@ function runGit(gitPath, args, options) {
 // GIT_NO_REPLACE_OBJECTS covers replace refs only; the walk itself runs with
 // core.commitGraph=false.
 function requireNoAncestryOverrides(gitDirectory) {
+  // `commondir` redirects the common object store, config and shallow state
+  // to another directory, so the three files above would be read from there.
   for (const relative of [
+    "commondir",
     "info/grafts",
     "shallow",
     "objects/info/alternates",
@@ -265,7 +268,9 @@ function requireNoAncestryOverrides(gitDirectory) {
     let present = true;
     try {
       lstatSync(target);
-    } catch {
+    } catch (error) {
+      if (error?.code !== "ENOENT")
+        reject("Candidate ancestry state could not be inspected.");
       present = false;
     }
     if (present) reject("Candidate declares ancestry overrides.");
