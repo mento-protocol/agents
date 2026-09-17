@@ -223,3 +223,254 @@ test("a flow collection that closes with the other delimiter is reported by its 
     "skills/noted: frontmatter line 4 is not valid YAML",
   );
 });
+
+// validator_rejects_typed_scalars, validator_rejects_non_string_description:
+// an unquoted boolean reaches a runtime as a boolean, so the field is refused
+// by name and the message asks for a plain string. typed-scalars.test.mjs
+// covers every form that decision is made on.
+test("an unquoted boolean description is reported as a non-string", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: true\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" must be a plain string',
+  );
+});
+
+// validator_rejects_non_string_name: a directory called "true" takes a quoted
+// name, or the skill reaches a runtime with no name at all.
+test("an unquoted boolean name is reported as a non-string", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "true",
+    "---\nname: true\ndescription: a skill whose directory is called true\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(output.trim(), 'skills/true: "name" must be a plain string');
+
+  writeSkill(
+    root,
+    "true",
+    "---\nname: 'true'\ndescription: a skill whose directory is called true\n---\n\nBody.\n",
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// validator_rejects_duplicate_top_level_key: the repeat is reported instead of
+// measured, because the value the file spells is not the value the runtime
+// gets. The body is not the mapping, so the same key after the closing "---"
+// is prose.
+test("a key set twice in the frontmatter is reported as a repeated mapping key", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: first description\ndescription: second description\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" is set more than once; a mapping key must be unique',
+  );
+
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: a description\n---\n\ndescription: this line is prose.\n",
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// validator_accepts_top_level_comment_before_value: a comment carries no value
+// of its own, so a key with nothing but a comment under it is empty, and an
+// empty description is under the lower bound of the length rule. The same file
+// with a value under the comment reads that value and validates.
+test("a description whose only line under it is a comment is reported as too short", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\ndescription:\n# explanation\nname: noted\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" must be 1-1024 chars after trimming',
+  );
+
+  writeSkill(
+    root,
+    "noted",
+    "---\ndescription:\n# explanation\n  a description under the comment\nname: noted\n---\n\nBody.\n",
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// validator_rejects_control_character: the scan runs before the parse, so the
+// character is named and nothing else is reported about the document.
+test("a control character is reported by its line and its code point", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: ab\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    "skills/noted: frontmatter line 3 holds a control character U+0001",
+  );
+});
+
+// validator_rejects_raw_nel: a raw U+0085 is refused wherever it sits, and the
+// escaped "\N" carries the character instead.
+test("a raw NEL character is reported by its line", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: adescription\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    "skills/noted: frontmatter line 3 holds a NEL character (U+0085), which loaders read differently",
+  );
+
+  writeSkill(
+    root,
+    "noted",
+    '---\nname: noted\ndescription: "a\\Nb"\n---\n\nBody.\n',
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// validator_counts_code_points: the limit counts code points, so 600 emoji fit
+// and 1030 do not. Counting UTF-16 code units would refuse both.
+test("a description over the code point limit is reported as too long", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const emoji = "\u{1F600}";
+  writeSkill(
+    root,
+    "noted",
+    `---\nname: noted\ndescription: ${emoji.repeat(600)}\n---\n\nBody.\n`,
+  );
+
+  const fits = runValidator(VALIDATOR, root);
+  assert.equal(fits.status, 0);
+  assert.equal(fits.output.trim(), "validated 1 skills");
+
+  writeSkill(
+    root,
+    "noted",
+    `---\nname: noted\ndescription: ${emoji.repeat(1030)}\n---\n\nBody.\n`,
+  );
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" must be 1-1024 chars after trimming',
+  );
+});
+
+// validator_rejects_invalid_utf8: reading the file leniently would replace the
+// byte with U+FFFD and validate characters the file does not hold, while every
+// YAML loader refuses the bytes themselves. A valid multibyte character still
+// reads as the one character it spells.
+test("an invalid UTF-8 byte is reported before the frontmatter is read", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    Buffer.concat([
+      Buffer.from("---\nname: noted\ndescription: a"),
+      Buffer.from([0xff]),
+      Buffer.from("b description\n---\n\nBody.\n"),
+    ]),
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(output.trim(), "skills/noted: SKILL.md is not valid UTF-8");
+
+  writeSkill(
+    root,
+    "noted",
+    "---\nname: noted\ndescription: aéb description\n---\n\nBody.\n",
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
+// A leading U+FEFF is valid UTF-8 but it is not a delimiter. Node and PyYAML
+// both keep it in the text, so no loader finds the frontmatter; the strict
+// decoder must keep it too instead of stripping it and reporting the file
+// clean.
+test("a byte order mark before the frontmatter hides it", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "﻿---\nname: noted\ndescription: a plain description\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: frontmatter must start with "---" on the first line',
+  );
+});
+
+// validator_accepts_crlf_frontmatter: a checkout with CRLF line endings holds
+// a carriage return at the end of every line, and the closing delimiter of
+// this fixture carries a trailing space as well.
+test("a whole file with CRLF line endings validates", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "winskill",
+    "---\r\nname: winskill\r\ndescription: a skill checked out with CRLF line endings\r\n--- \r\n\r\nBody.\r\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.equal(status, 0);
+  assert.equal(output.trim(), "validated 1 skills");
+});
