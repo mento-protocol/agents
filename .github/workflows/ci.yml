@@ -107,6 +107,7 @@ jobs:
           DEPENDABOT_PREP_TEST_SEALED_ROOT: ${{ runner.temp }}/sealed
         run: |
           mkdir -p -m 0700 "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin"
+          chmod 0700 "$DEPENDABOT_PREP_TEST_SEALED_ROOT"
           install -m 0700 "$(command -v node)" "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin/node"
           "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin/node" --test skills/*/scripts/*.test.mjs
 

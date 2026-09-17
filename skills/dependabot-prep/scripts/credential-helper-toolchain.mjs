@@ -214,6 +214,9 @@ function inspectToolchain(
   }
   if (sibling !== node.resolvedPath)
     reject("The pinned Node executable must be the node in its directory.");
+  // Git runs the `!exec` credential helper under its compile-time SHELL_PATH,
+  // which is not exposed at run time, so this digest records the operator's
+  // expected shell and cannot prove it is the one Git spawns. Residual.
   const shell = inspectExecutable(shellPath, false, requireSealed);
   const env = inspectExecutable(envPath, false, requireSealed);
 

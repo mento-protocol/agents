@@ -111,7 +111,12 @@ function requireSealedComponents(canonicalPath) {
     .split("/")
     .filter(Boolean)) {
     current = path.join(current, part);
-    const metadata = lstatSync(current);
+    let metadata;
+    try {
+      metadata = lstatSync(current);
+    } catch {
+      reject("Trusted path component is not sealed.");
+    }
     if (
       metadata.isSymbolicLink() ||
       (metadata.mode & 0o7777 & 0o022) !== 0 ||
@@ -153,10 +158,16 @@ function validateHost(value) {
   } catch {
     reject("Host is invalid.");
   }
+  // Keep in step with validateHost in credential-helper.mjs.
   if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
     parsed.host !== value ||
     parsed.hostname === "" ||
-    parsed.pathname !== "/"
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
   ) {
     reject("Host is invalid.");
   }
@@ -210,7 +221,15 @@ function runGit(gitPath, args, options) {
   if (result.error || result.signal || result.status !== options.status) {
     if (Buffer.isBuffer(result.stdout)) result.stdout.fill(0);
     if (Buffer.isBuffer(result.stderr)) result.stderr.fill(0);
-    reject(options.errorMessage);
+    // Output is discarded because it can carry credential material; the exit
+    // status, signal or spawn error code is what separates a rejected lease
+    // (git exits 1) from a transport or spawn failure for the operator.
+    const cause = result.error
+      ? `spawn ${result.error.code ?? "error"}`
+      : result.signal
+        ? `signal ${result.signal}`
+        : `git exit ${result.status}`;
+    reject(`${options.errorMessage} (${cause})`);
   }
   return result;
 }

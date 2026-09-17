@@ -341,7 +341,8 @@ run still recognises it, and makes the command exit 1.
 pnpm install
 pnpm test                        # pnpm -r test — every package's test suite
 pnpm validate:skills             # node scripts/validate-skills.mjs
-node --test skills/*/scripts/*.test.mjs  # every skill's own suite
+node --test skills/*/scripts/*.test.mjs  # every skill's own suite; on a host whose
+                                          # tmp is world-writable set DEPENDABOT_PREP_TEST_SEALED_ROOT
 bash scripts/test-link-skills.sh # the link-skills.sh harness
 trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
