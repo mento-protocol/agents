@@ -175,9 +175,11 @@ function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
   }
   if (!path.isAbsolute(interpreterPath))
     reject("Toolchain script interpreter is not absolute.");
+  // The kernel follows the shebang path at every start, so the interpreter
+  // must be canonical: an alias could be repointed after inspection.
   const interpreter = inspectExecutable(
     interpreterPath,
-    false,
+    true,
     requireSealed,
     depth + 1,
   );

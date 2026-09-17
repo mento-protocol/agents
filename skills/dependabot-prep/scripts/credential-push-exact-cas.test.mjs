@@ -364,6 +364,19 @@ test("a script executable binds its interpreter and refuses an unsealed one", (t
     /Unsealed toolchain path component|pin mismatched/,
   );
   assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
+
+  // An alias to the trusted interpreter inside a writable directory could be
+  // repointed after inspection; the shebang must name the canonical path.
+  const aliasNode = path.join(open, "node-alias");
+  symlinkSync(process.execPath, aliasNode);
+  writeFileSync(fixture.ghPath, `#!${aliasNode}\nprocess.exit(0);\n`, {
+    mode: 0o700,
+  });
+  assert.throws(
+    () => pushExactCas(fixture.request, fixture.trusted),
+    /Untrusted toolchain executable|pin mismatched/,
+  );
+  assert.equal(readFileSync(fixture.pushCount, "utf8"), "0");
 });
 
 test("toolchain or helper drift after the push reports ambiguity", (t) => {
