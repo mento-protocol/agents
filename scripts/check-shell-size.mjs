@@ -126,8 +126,9 @@ function readBaseline(tracked) {
   return limits;
 }
 
-// Returns a map of function name to {start, length} for every function the
-// parser finds, or null after reporting a parse failure.
+// Returns a map of function name to every declaration of it, each as
+// {start, length}, or null after reporting a parse failure. Every
+// declaration is kept: a second one under a known name is its own function.
 function parseFunctions(file, text) {
   const { syntax } = sh;
   let tree;
@@ -148,8 +149,8 @@ function parseFunctions(file, text) {
       const start = node.Pos().Line();
       const length = node.End().Line() - start + 1;
       const name = node.Name.Value;
-      const seen = functions.get(name);
-      if (!seen || length > seen.length) functions.set(name, { start, length });
+      if (!functions.has(name)) functions.set(name, []);
+      functions.get(name).push({ start, length });
     }
     return true;
   });
@@ -160,17 +161,21 @@ function parseFunctions(file, text) {
 function checkFunctions(file, text) {
   const functions = parseFunctions(file, text);
   if (!functions) return;
-  for (const [name, { start, length }] of functions) {
-    if (length > MAX_FUNCTION_LINES) {
-      problem(
-        `${file}:${start}: function ${name} is ${length} lines, the limit is ${MAX_FUNCTION_LINES}`,
-      );
+  for (const [name, declarations] of functions) {
+    for (const { start, length } of declarations) {
+      if (length > MAX_FUNCTION_LINES) {
+        problem(
+          `${file}:${start}: function ${name} is ${length} lines, the limit is ${MAX_FUNCTION_LINES}`,
+        );
+      }
     }
   }
 }
 
-// In a legacy file, a function over the limit passes only when the base
-// already has a function of that name at that length or longer.
+// In a legacy file, each declaration over the limit passes only when the
+// base has a declaration of that name at that length or longer to pair it
+// with. Declarations are paired longest to longest, so a second declaration
+// under a known name needs its own counterpart in the base.
 function checkLegacyFunctions(file, text) {
   if (BASE_REF === "") return;
   const baseText = atBase(file);
@@ -181,18 +186,23 @@ function checkLegacyFunctions(file, text) {
   const current = parseFunctions(file, text);
   const base = parseFunctions(`${BASE_REF}:${file}`, baseText);
   if (!current || !base) return;
-  for (const [name, { start, length }] of current) {
-    if (length <= MAX_FUNCTION_LINES) continue;
-    const before = base.get(name);
-    if (!before) {
-      problem(
-        `${file}:${start}: function ${name} is ${length} lines and is not in ${BASE_REF}; a new function may not exceed ${MAX_FUNCTION_LINES}`,
-      );
-    } else if (length > before.length) {
-      problem(
-        `${file}:${start}: function ${name} grew from ${before.length} to ${length} lines; a function over ${MAX_FUNCTION_LINES} may only shrink`,
-      );
-    }
+  const byLength = (a, b) => b.length - a.length;
+  for (const [name, declarations] of current) {
+    const long = declarations
+      .filter(({ length }) => length > MAX_FUNCTION_LINES)
+      .sort(byLength);
+    const before = (base.get(name) ?? []).slice().sort(byLength);
+    long.forEach(({ start, length }, i) => {
+      if (!before[i]) {
+        problem(
+          `${file}:${start}: function ${name} is ${length} lines and has no counterpart in ${BASE_REF}; a new function may not exceed ${MAX_FUNCTION_LINES}`,
+        );
+      } else if (length > before[i].length) {
+        problem(
+          `${file}:${start}: function ${name} grew from ${before[i].length} to ${length} lines; a function over ${MAX_FUNCTION_LINES} may only shrink`,
+        );
+      }
+    });
   }
 }
 
