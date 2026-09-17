@@ -14,10 +14,6 @@
 # LS_TEST_LOCK_MARKER, LS_TEST_LOCK_DIR and
 # LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS knobs the run under test reads. Nothing
 # outside the case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # A mkdir shim that loses one race for the lock path: the first time the script
 # under test tries to make the lock directory, the shim removes the lock that
@@ -173,7 +169,9 @@ lock_vanish_is_retried() {
 	pid=$!
 	lock_vanish_wait_for_new_owner "$lock" "$LOCK_VANISH_HELD" "$pid"
 	wait "$pid"
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_OUT=$(cat "$out")
 	shims_drop
 	unset LS_TEST_LOCK_MARKER LS_TEST_LOCK_DIR LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS

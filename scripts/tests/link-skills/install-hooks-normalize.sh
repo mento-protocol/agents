@@ -15,10 +15,6 @@
 # Reads: CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
 # case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # One field of the first SessionStart hook entry of a settings file, or
 # '<missing>' when the entry does not carry that field at all.

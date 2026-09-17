@@ -14,10 +14,6 @@
 # Reads: BASH_BIN, CASE_DIR, COMPANY, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
 # case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 fresh_install_auto_init() {
 	fixtures_company
@@ -195,7 +191,9 @@ empty_home_refused() {
 	LS_RC=$?
 	assert_rc 2 "link with an empty HOME"
 	assert_out_has "HOME is not set to an absolute path" "error message"
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_OUT=$(HOME="relative/home" "$BASH_BIN" "$LS" link 2>&1)
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
 	assert_rc 2 "link with a relative HOME"
 	assert_out_has "HOME is not set to an absolute path" "error message"

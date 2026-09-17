@@ -14,10 +14,6 @@
 # Writes: LS_TEST_CP_SETTINGS and LS_TEST_CP_STATE, which the cp shim reads,
 # LS_OUT and LS_RC, which assert.sh reads, and nothing outside the case's own
 # throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # A settings file managed from a dotfiles repository is a symlink: edit the
 # file it points at, and leave the symlink in place.

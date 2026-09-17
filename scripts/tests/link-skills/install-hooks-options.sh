@@ -16,10 +16,6 @@
 # Reads: CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
 # case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # An entry carrying the type and the timeout this script installs, so that the
 # command alone decides what the merge makes of it.

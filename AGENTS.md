@@ -80,7 +80,8 @@ into this repository:
 into `~/.agents/skills`. It must stay compatible with bash 3.2 (the default
 `/bin/bash` on macOS) and pass `shellcheck` clean.
 
-After changing it, run its harness, which CI runs on Ubuntu and macOS:
+After changing it, or after changing any file of its harness, run the harness,
+which CI runs on Ubuntu and macOS:
 
 ```bash
 git ls-files -z '*.sh' | xargs -0 shellcheck
@@ -88,12 +89,20 @@ bash scripts/test-link-skills.sh
 BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 ```
 
-The harness reports in TAP 13: one `ok` or `not ok` line per case, the
-detail of a failure as `#` comment lines, a `1..N` plan, and a last comment
-line with the passed, failed and skipped counts. A case whose capability is
-missing on this machine, such as `python3`, calls `case_skip` and is reported
-as `ok N - name # SKIP reason`, which is a verdict of its own and never a
-pass.
+The harness is `scripts/test-link-skills.sh`, which holds no case of its own.
+It sources six modules from `scripts/tests/lib/` (`case.sh`, `assert.sh`,
+`fs.sh`, `fixtures.sh`, `shims.sh`, `probe.sh`) and then one file per topic
+from `scripts/tests/link-skills/`, each by absolute path from an explicit
+ordered list. `BASH_BIN` sets the interpreter the script under test runs
+under; it defaults to `bash`.
+
+The harness reports in TAP 13: a `TAP version 13` line, a `# interpreter:`
+comment naming the interpreter and its version, one `ok` or `not ok` line per
+case, the detail of a failure as `#` comment lines, a `1..N` plan, and a last
+comment line with the passed, failed and skipped counts and the interpreter. A
+case whose capability is missing on this machine, such as `python3`, calls
+`case_skip` and is reported as `ok N - name # SKIP reason`, which is a verdict
+of its own and never a pass.
 
 The harness runs four cases at a time. Every case has a subshell, a `HOME` and
 a case directory of its own, so the cases do not reach each other, and the TAP
@@ -178,11 +187,19 @@ Rules for a module file:
 - `.shellcheckrc` sets `source-path`, so
   `git ls-files -z '*.sh' | xargs -0 shellcheck` follows the `source` lines.
   Do not add `# shellcheck disable=SC1091`.
+- A `shellcheck disable` directive sits on the line it excuses, not at the
+  top of the file, and carries a comment saying who needs it. A global one
+  module writes and another reads takes
+  `# shellcheck disable=SC2034 # read by <module>` on that assignment. A
+  file-level directive silences the rest of the file as well, including code
+  written later.
 
-Two files predate these limits: `scripts/link-skills.sh`, which is listed in
-`scripts/shell-size-baseline.txt` with its current line count, and
-`scripts/test-link-skills.sh`, which now fits the limits and is checked like
-any other file. The check refuses any other path in that file. A change may
+`scripts/link-skills.sh` predates these limits and is listed in
+`scripts/shell-size-baseline.txt` with its current line count. It is the only
+entry left: `scripts/test-link-skills.sh` was listed too, and its entry went
+once the runner held no case and fit both limits, so the runner is checked like
+any other file now. Those two paths are the only ones the baseline may name;
+the check refuses any other. A change may
 not grow a listed file. Add a case or a function by first splitting the topic
 it belongs to out of the monolith, then lower the baseline entry to the new
 count: the check fails while the entry is above the file's real length, and

@@ -15,10 +15,6 @@
 # Reads: CASE_DIR, COMPANY, HOME.
 # Writes: LS (the command under test), and nothing outside the case's own
 # throwaway HOME and CASE_DIR.
-#
-# LS is written here and read by case.sh, so shellcheck sees no reader while
-# it lints this file on its own.
-# shellcheck disable=SC2034
 
 # The runtime skills paths become links into the assembly, so an assembly that
 # is one of them, or holds one of them, would be a link into itself: every
@@ -276,6 +272,7 @@ script_reached_through_a_symlink() {
 	fixtures_company
 	mkdir -p "$HOME/bin" "$HOME/.claude"
 	ln -s "$COMPANY/scripts/link-skills.sh" "$HOME/bin/link-skills"
+	# shellcheck disable=SC2034 # read by case.sh
 	LS="$HOME/bin/link-skills"
 	case_run_script
 	assert_rc 0 "link"

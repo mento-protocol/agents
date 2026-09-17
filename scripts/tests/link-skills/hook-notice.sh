@@ -14,10 +14,6 @@
 # Writes: LS_OUT and LS_RC, which assert.sh reads, SKILLS_ASSEMBLY_DIR and
 # SKILL_SOURCES_FETCH_INTERVAL_HOURS, which the runs under test read, and
 # nothing outside the case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # The manifest is what 'link' rewrites, and 'link' refuses a path that is not a
 # regular file. Reading that path as an empty list would have the hook call
@@ -255,6 +251,7 @@ unset_home_hook_exits_zero() {
 	assert_rc 0 "hook without HOME"
 	assert_out_has "[link-skills] HOME is not set" "hook notice"
 	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" link 2>&1)
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
 	assert_rc 2 "link without HOME"
 }
