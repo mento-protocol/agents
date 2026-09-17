@@ -379,6 +379,7 @@ function validateTrustedConfig(trusted) {
   requireExactKeys(
     trusted,
     [
+      "authorizedPush",
       "expectedToolchainSha256",
       "ghConfigDir",
       "ghSha256",
@@ -400,6 +401,11 @@ function validateTrustedConfig(trusted) {
     trusted.toolchainOptions,
     ["envPath", "ghPath", "gitPath", "nodePath", "shellPath"],
     "toolchain options",
+  );
+  requireExactKeys(
+    trusted.authorizedPush,
+    ["headRefName", "host", "owner", "repository"],
+    "authorized push",
   );
   if (!SHA256_PATTERN.test(trusted.expectedToolchainSha256))
     reject("Toolchain pin is absent.");
@@ -587,6 +593,15 @@ function isAtOrBelow(root, target) {
 export function pushExactCas(requestInput, trustedInput) {
   const request = validateRequest(requestInput);
   const trusted = validateTrustedConfig(trustedInput);
+  // The request is model-reachable, so a well-formed ref is not an authorized
+  // one. The launcher binds the API-authenticated repository and Dependabot
+  // head ref in trusted data, and the push may move only that ref.
+  for (const field of ["headRefName", "host", "owner", "repository"]) {
+    if (request[field] !== trusted.authorizedPush[field])
+      reject("Push target is not the authorized Dependabot head.");
+  }
+  if (!request.headRefName.startsWith("dependabot/"))
+    reject("Push target is not a Dependabot branch.");
   // The candidate tree is model-writable, so nothing the push trusts may live
   // inside it (references/preparation.md). Keep in step with loadContext in
   // credential-helper.mjs, which applies the same rule to its own inputs.

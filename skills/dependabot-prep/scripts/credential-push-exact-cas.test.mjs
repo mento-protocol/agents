@@ -241,6 +241,12 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
     repository: "frontend-monorepo",
   };
   const trusted = {
+    authorizedPush: {
+      headRefName: REF_NAME,
+      host: request.host,
+      owner: request.owner,
+      repository: request.repository,
+    },
     expectedToolchainSha256: manifest.manifestSha256,
     ghConfigDir: ghConfig,
     ghSha256: manifest.gh.sha256,
@@ -656,6 +662,22 @@ test("every missing production pin and an option-like ref fail closed", (t) => {
   assert.throws(
     () => pushExactCas(fixture.request, insideToolchain),
     /inside the candidate root/,
+  );
+  assert.throws(
+    () =>
+      pushExactCas(
+        { ...fixture.request, headRefName: "main" },
+        fixture.trusted,
+      ),
+    /not the authorized Dependabot head/,
+  );
+  const baseBranch = {
+    ...fixture.trusted,
+    authorizedPush: { ...fixture.trusted.authorizedPush, headRefName: "main" },
+  };
+  assert.throws(
+    () => pushExactCas({ ...fixture.request, headRefName: "main" }, baseBranch),
+    /not a Dependabot branch/,
   );
   const zeroOld = { ...fixture.request, expectedOldOid: "0".repeat(40) };
   assert.throws(

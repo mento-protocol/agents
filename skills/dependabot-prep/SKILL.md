@@ -297,8 +297,11 @@ Maintain one summary comment
 per author login per PR: when a comment carrying the repository summary marker
 exists and you authored it, edit it in place and mark superseded choices. Post a
 new summary comment only when the existing one was authored by a different login;
-then cite that comment's URL in the visible body, carry the prior claim token in
-the marker's `supersedes` field and leave the prior comment as history. A v2
+then cite that comment's URL in the visible body and leave the prior comment as
+history. Set the marker's `supersedes` field only when this run took the claim
+over from that owner: use the `priorLockOid` the takeover recorded, never a token
+copied from the old comment. After a normal release and a fresh acquisition
+there is no takeover, so omit the field. A v2
 summary comment keeps the repository's v1 marker line first and adds the v2 claim
 line immediately after it; see
 [procedural markers](references/procedural-markers.md). When policy prescribes

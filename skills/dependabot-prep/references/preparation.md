@@ -317,7 +317,10 @@ Repeat this section independently for each admitted PR.
     to the exact canonical `https://<host>/<owner>/<repository>.git`
     destination with the explicit
     `<expectedNewOid>:refs/heads/<headRefName>` refspec and an exact expected-OID lease for
-    `refs/heads/<headRefName>:<authenticatedOldHeadOid>`. Both OIDs are 40-hex
+    `refs/heads/<headRefName>:<authenticatedOldHeadOid>`. The launcher's trusted
+    configuration names the one authorized target (`authorizedPush`: host, owner,
+    repository and the API-authenticated `dependabot/` head ref); the wrapper
+    refuses any other ref, including the base branch. Both OIDs are 40-hex
     SHA-1 object names; the wrapper refuses a repository whose
     `extensions.objectFormat` is `sha256`. This is a
     compare-and-swap only. The independent fast-forward proof in step 11 must
