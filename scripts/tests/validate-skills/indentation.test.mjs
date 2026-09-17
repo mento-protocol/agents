@@ -25,6 +25,7 @@ import test from "node:test";
 
 import {
   codePointLength,
+  isValidDescriptionLength,
   parseFrontmatter,
   trimYamlSpace,
 } from "../../validate-skills.mjs";
@@ -41,14 +42,16 @@ function parse(fields) {
 /**
  * "accept" or "reject", by the two rules these rows exercise: a frontmatter
  * line the parser could not read fails the skill, and a description has to
- * hold 1 to 1024 characters once the YAML whitespace is trimmed off it.
+ * hold a length `isValidDescriptionLength` accepts once the YAML whitespace is
+ * trimmed off it. The length rule is imported, not restated, so a row that
+ * states an accept at the limit pins the number the validator compares.
  */
 function verdict({ fields, invalid }) {
   if (invalid.length > 0) return "reject";
   const length = codePointLength(
     trimYamlSpace(fields.get("description").value),
   );
-  return length >= 1 && length <= 1024 ? "accept" : "reject";
+  return isValidDescriptionLength(length) ? "accept" : "reject";
 }
 
 const cases = [
