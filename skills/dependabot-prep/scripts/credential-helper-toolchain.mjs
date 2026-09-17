@@ -146,7 +146,12 @@ function inspectAliasComponents(aliasPath) {
 // form accepted, because the env path and the `node` beside the pinned Node
 // are bound elsewhere in the manifest. An interpreter that is itself a script
 // is refused.
-function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
+function inspectInterpreter(
+  resolvedPath,
+  requireSealed,
+  depth = 0,
+  allowEnvNode = false,
+) {
   let head;
   try {
     const descriptor = openSync(resolvedPath, "r");
@@ -169,7 +174,10 @@ function inspectInterpreter(resolvedPath, requireSealed, depth = 0) {
   const [interpreterPath, ...operands] = line.split(/\s+/u);
   if (depth > 0) reject("Toolchain script interpreter is itself a script.");
   if (interpreterPath === "/usr/bin/env") {
-    if (operands.length !== 1 || operands[0] !== "node")
+    // Only the credential helper runs under an environment whose PATH holds
+    // the pinned Node; probes and provider spawns carry no PATH, so an env
+    // shebang there would resolve the system's node or nothing.
+    if (!allowEnvNode || operands.length !== 1 || operands[0] !== "node")
       reject("Toolchain script uses an unbound env interpreter.");
     return Object.freeze({ env: "node" });
   }
@@ -201,6 +209,7 @@ function inspectExecutable(
   requireCanonical,
   requireSealed = true,
   depth = 0,
+  allowEnvNode = false,
 ) {
   if (
     typeof invocationPath !== "string" ||
@@ -236,7 +245,12 @@ function inspectExecutable(
     dev: String(metadata.dev),
     gid: metadata.gid,
     ino: String(metadata.ino),
-    interpreter: inspectInterpreter(resolvedPath, requireSealed, depth),
+    interpreter: inspectInterpreter(
+      resolvedPath,
+      requireSealed,
+      depth,
+      allowEnvNode,
+    ),
     invocationPath,
     linkTarget: linkMetadata.isSymbolicLink()
       ? readlinkSync(invocationPath)
@@ -249,8 +263,11 @@ function inspectExecutable(
   });
 }
 
+// The credential helper is the one script whose `#!/usr/bin/env node` is
+// bound: the wrapper's push environment puts the pinned Node's directory on
+// PATH and the manifest pins env and that node.
 export function inspectSealedExecutable(executablePath) {
-  return inspectExecutable(executablePath, true, true);
+  return inspectExecutable(executablePath, true, true, 0, true);
 }
 
 function runVersion(executable, args, pattern) {

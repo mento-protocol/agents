@@ -251,10 +251,16 @@ function runGit(gitPath, args, options) {
 }
 
 // `.git/info/grafts` and `.git/shallow` declare parents Git believes without
-// proof, so `merge-base --is-ancestor` would accept a candidate that is not
-// a descendant. GIT_NO_REPLACE_OBJECTS covers replace refs only.
+// proof, and `.git/objects/info/alternates` adds an object source the candidate
+// chose, so `merge-base --is-ancestor` could accept a non-descendant.
+// GIT_NO_REPLACE_OBJECTS covers replace refs only; the walk itself runs with
+// core.commitGraph=false.
 function requireNoAncestryOverrides(gitDirectory) {
-  for (const relative of ["info/grafts", "shallow"]) {
+  for (const relative of [
+    "info/grafts",
+    "shallow",
+    "objects/info/alternates",
+  ]) {
     const target = path.join(gitDirectory, relative);
     let present = true;
     try {
@@ -491,6 +497,10 @@ function requireHead(gitPath, request, env) {
   const ancestry = runGit(
     gitPath,
     [
+      // A candidate commit-graph file stores parent edges Git would trust
+      // in this walk, so the walk reads commit objects only.
+      "-c",
+      "core.commitGraph=false",
       "merge-base",
       "--is-ancestor",
       request.expectedOldOid,

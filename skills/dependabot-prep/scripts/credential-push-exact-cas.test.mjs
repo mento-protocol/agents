@@ -139,7 +139,7 @@ const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") { process.stdout.write("git version 99.0.0-test\\n"); process.exit(0); }
 if (args.length === 1 && args[0] === "--exec-path") { process.stdout.write(${JSON.stringify(`${reportedExecPath}\n`)}); process.exit(0); }
 if (args[0] === "rev-parse") { process.stdout.write(${JSON.stringify(`${NEW_OID}\n`)}); process.exit(0); }
-if (args[0] === "merge-base") { process.exit(${ancestry ? 0 : 1}); }
+if (args.includes("merge-base")) { writeFileSync(${JSON.stringify(path.join(root, "merge-base-args"))}, JSON.stringify(args), "utf8"); process.exit(${ancestry ? 0 : 1}); }
 if (args[0] === "config") {
   process.stdout.write(Buffer.from(${JSON.stringify(
     [
@@ -278,8 +278,36 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
   };
 }
 
-test("a grafted or shallow candidate is refused before any Git call", (t) => {
-  for (const relative of ["info/grafts", "shallow"]) {
+test("the ancestry walk ignores the candidate commit-graph", (t) => {
+  const fixture = createFixture(t);
+  pushExactCas(fixture.request, fixture.trusted);
+  const args = JSON.parse(
+    readFileSync(path.join(fixture.root, "merge-base-args"), "utf8"),
+  );
+  assert.deepEqual(args.slice(0, 3), [
+    "-c",
+    "core.commitGraph=false",
+    "merge-base",
+  ]);
+});
+
+test("an env-node shebang is refused for toolchain programs", (t) => {
+  const fixture = createFixture(t);
+  writeFileSync(fixture.ghPath, "#!/usr/bin/env node\nprocess.exit(0);\n", {
+    mode: 0o700,
+  });
+  assert.throws(
+    () => inspectCredentialPushToolchain(fixture.trusted.toolchainOptions),
+    /unbound env interpreter/,
+  );
+});
+
+test("a grafted, shallow or alternates candidate is refused before any Git call", (t) => {
+  for (const relative of [
+    "info/grafts",
+    "shallow",
+    "objects/info/alternates",
+  ]) {
     const fixture = createFixture(t);
     const target = path.join(fixture.request.candidateRoot, ".git", relative);
     mkdirSync(path.dirname(target), { recursive: true });
