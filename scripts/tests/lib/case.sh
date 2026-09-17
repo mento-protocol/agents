@@ -2,8 +2,8 @@
 #
 # case.sh - case lifecycle for the link-skills harness: per-case setup, the
 # wrapper that runs one case in a subshell and reports it in TAP, the skip
-# marker, the two run helpers that invoke the script under test, and
-# case_cleanup, which removes the temporary root.
+# marker, the two run helpers that invoke the script under test, the traps the
+# run ends under, and case_cleanup, which removes the temporary root.
 #
 # Reads: BASH_BIN (case_run_script, case_run_script_in, case_tap_header),
 # CASE_FAILS (case_fail, _case_body), CASE_NUM (case_run, _case_tap,
@@ -21,8 +21,9 @@
 #
 # The runner owns the initialisation of PASS, FAIL, SKIPPED, CASE_NUM,
 # CURRENT, CASE_FAILS, ROOT, CASE_DIR, HARNESS_PATH, SKIP_NOTE, LS, LS_OUT and
-# LS_RC, and registers case_cleanup as its EXIT trap. case_run points
-# SKIP_NOTE into ROOT, which exists only once the run has a temporary root.
+# LS_RC, and calls case_arm_traps once ROOT is a directory of its own.
+# case_run points SKIP_NOTE into ROOT, which exists only once the run has a
+# temporary root.
 # BASH_BIN, CURRENT and LS stay globals rather than arguments: the cases call
 # case_fail and the two run helpers several hundred times between them, so
 # passing each value would touch every call site, not one line.
@@ -45,9 +46,35 @@ case_cleanup() {
 		rm -rf "$ROOT"
 	fi
 }
-# The trap is registered in main(), only once ROOT is verified to be a fresh
+# The traps are armed by main(), only once ROOT is verified to be a fresh
 # directory this run created: a failed mktemp must not arm a case_cleanup that
 # could rm -rf an empty ROOT variable's worth of nothing, or worse.
+
+# EXIT removes the temporary root. INT and TERM go to case_signal instead of
+# case_cleanup: a handler that only cleans up returns into the run with ROOT
+# already deleted, and every case after it fails on a missing directory
+# without being run.
+case_arm_traps() {
+	trap case_cleanup EXIT
+	trap 'case_signal INT 2' INT
+	trap 'case_signal TERM 15' TERM
+}
+
+# End the run on a signal. The handler clears the traps, then sends TERM to
+# its own process group, so the case subshell and the helpers a case started,
+# such as a sleeping lock owner, stop with the harness instead of outliving
+# it. That signal reaches this process too, so TERM is ignored here first and
+# stays ignored: the harness must survive it long enough to remove ROOT. The
+# status is 128 plus the signal number, what a shell reports for a command a
+# signal killed: 130 for INT, 143 for TERM.
+case_signal() {
+	trap - EXIT INT TERM
+	trap '' TERM
+	kill -TERM 0 2>/dev/null || true
+	case_cleanup
+	printf '# run interrupted by SIG%s\n' "$1"
+	exit $((128 + $2))
+}
 
 case_fail() {
 	CASE_FAILS=$((CASE_FAILS + 1))

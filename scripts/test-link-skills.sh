@@ -4989,9 +4989,9 @@ main() {
 		exit 1
 	fi
 	# Only now is ROOT known to be a fresh directory this run created: arm the
-	# case_cleanup trap so a failed mktemp above never runs case_cleanup against an empty
+	# traps, so a failed mktemp above never runs case_cleanup against an empty
 	# or unverified ROOT.
-	trap case_cleanup EXIT INT TERM
+	case_arm_traps
 
 	case_tap_header
 
