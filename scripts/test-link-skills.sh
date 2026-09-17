@@ -60,8 +60,16 @@ SAVED_PATH=""
 # The cases of a topic that has moved out of this file live in
 # tests/link-skills/, one file per topic, and are sourced from their own
 # ordered list, by absolute path, the same way.
+# shellcheck source=tests/link-skills/harness.sh
+. "$HERE/tests/link-skills/harness.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/harness.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/hook-deadline.sh
 . "$HERE/tests/link-skills/hook-deadline.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/hook-deadline.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/names-and-casing.sh
+. "$HERE/tests/link-skills/names-and-casing.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/names-and-casing.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/output.sh
+. "$HERE/tests/link-skills/output.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/output.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/unlink.sh
+. "$HERE/tests/link-skills/unlink.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/unlink.sh >&2 && exit 2; }
 
 # ------------------------------------------------------------------ cases ---
 
@@ -1098,27 +1106,6 @@ sources_symlink_to_manifest_refused() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link still kept"
 }
 
-unlink_leaves_foreign_entries() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	mkdir -p "$CASE_DIR/other/kept"
-	printf 'kept\n' >"$CASE_DIR/other/kept/SKILL.md"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$HOME/.claude"
-	case_run_script link
-	assert_rc 0 "link"
-	mkdir -p "$HOME/.agents/skills/mine"
-	printf 'mine\n' >"$HOME/.agents/skills/mine/SKILL.md"
-	ln -s "$CASE_DIR/other/kept" "$HOME/.agents/skills/kept"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "recorded link removed"
-	fs_assert_absent "$HOME/.agents/skills/.skill-links" "manifest removed"
-	assert_file_has "$HOME/.agents/skills/mine/SKILL.md" "mine" "foreign directory kept"
-	fs_assert_link "$HOME/.agents/skills/kept" "$CASE_DIR/other/kept" "foreign symlink kept"
-	fs_assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "runtime link kept"
-}
-
 personal_skill_untouched() {
 	fixtures_company
 	mkdir -p "$HOME/.agents/skills/personal"
@@ -1262,22 +1249,6 @@ foreign_dangling_not_pruned() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
-foreign_dangling_not_unlinked() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/one" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "link"
-	rm -f "$HOME/.agents/skills/beta"
-	ln -s "$CASE_DIR/wip/beta-under-construction" "$HOME/.agents/skills/beta"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_out_has "foreign dangling link" "foreign message"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "recorded link removed"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/wip/beta-under-construction" "foreign dangling link kept"
-}
-
 # A manifest name is one plain entry name. A line naming a path must never be
 # followed out of the assembly directory.
 manifest_traversal_line_ignored() {
@@ -1376,24 +1347,6 @@ fetch_stamp_symlink_refused() {
 	fi
 }
 
-# unlink removes the stamp directory it owns, and nothing else in the assembly
-# root that merely looks like a stamp.
-unlink_leaves_foreign_fetch_file() {
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	case_run_script check
-	assert_rc 0 "check"
-	fs_assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
-	printf 'not mine\n' >"$HOME/.agents/skills/.skill-links.fetch-foreign"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_file_has "$HOME/.agents/skills/.skill-links.fetch-foreign" "not mine" "unrelated file left alone"
-	fs_assert_absent "$HOME/.agents/skills/.skill-links.d" "stamp directory removed"
-}
-
 # Two spellings of one directory are one source, however they are written.
 source_listed_twice_by_symlink_alias() {
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -1472,48 +1425,6 @@ assembly_dir_refused_as_source() {
 	case_run_script hook
 	assert_rc 0 "hook with the assembly listed as a source"
 	assert_out_lacks "[link-skills]" "the hook says nothing about it"
-}
-
-# A case-only rename of a skill directory must relink in one run, not report a
-# collision and drop the skill.
-case_only_rename_relinks() {
-	if ! fs_case_insensitive "$CASE_DIR"; then
-		case_skip "case-sensitive filesystem"
-	fi
-	fixtures_skill "$CASE_DIR/one" foo
-	fixtures_skill "$CASE_DIR/one" keep
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	mv "$CASE_DIR/one/foo" "$CASE_DIR/one/tmpname"
-	mv "$CASE_DIR/one/tmpname" "$CASE_DIR/one/Foo"
-	case_run_script link
-	assert_rc 0 "second link"
-	assert_out_lacks "collision" "no false collision"
-	assert_out_has "relinked Foo" "relink message"
-	assert_out_has "pruned 0" "nothing pruned"
-	fs_assert_exists "$HOME/.agents/skills/Foo/SKILL.md" "the skill is reachable after one run"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "Foo" "manifest holds the new spelling"
-}
-
-# Two names the filesystem cannot tell apart are a duplicate, reported as one.
-case_variant_names_are_duplicates() {
-	if ! fs_case_insensitive "$CASE_DIR"; then
-		case_skip "case-sensitive filesystem"
-	fi
-	fixtures_skill "$CASE_DIR/one" Bar
-	fixtures_skill "$CASE_DIR/one" keep
-	fixtures_skill "$CASE_DIR/two" bar
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 1 "link"
-	assert_out_has "duplicate skill name 'Bar'" "duplicate message"
-	assert_out_has "$CASE_DIR/two/bar" "both paths named"
-	fs_assert_absent "$HOME/.agents/skills/Bar" "neither copy linked"
-	fs_assert_link "$HOME/.agents/skills/keep" "$CASE_DIR/one/keep" "the other skill still links"
 }
 
 # A sources file that names no source is not permission to empty the assembly.
@@ -1633,18 +1544,6 @@ recorded_target_mismatch_not_replaced() {
 	assert_out_has "collision" "collision message"
 	assert_out_lacks "relinked alpha" "no silent relink"
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/precious/alpha" "user link kept"
-}
-
-link_names_its_sources() {
-	fixtures_company
-	fixtures_skill "$CASE_DIR/personal" mine
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/personal"
-	case_run_script link
-	assert_rc 0 "link"
-	assert_out_has "sources: $CASE_DIR/personal" "sources line"
-	assert_out_has "$COMPANY/skills is not listed" "clone not a source warning"
-	fs_assert_link "$HOME/.agents/skills/mine" "$CASE_DIR/personal/mine" "personal skill linked"
 }
 
 # A ~/.claude/skills holding only Finder noise counts as empty.
@@ -2720,25 +2619,6 @@ fifo_at_sources_path_refused() {
 	fs_assert_absent "$HOME/.agents/skills" "nothing was created"
 }
 
-# A removal that fails is reported, keeps its manifest entry, and fails the run.
-unlink_reports_deletion_failure() {
-	if [ "$(id -u)" = "0" ]; then
-		case_skip "running as root"
-	fi
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "link"
-	chmod 500 "$HOME/.agents/skills"
-	case_run_script unlink
-	chmod 700 "$HOME/.agents/skills"
-	assert_rc 1 "unlink"
-	assert_out_has "could not remove" "failure reported"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link is still there"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "the manifest entry is kept"
-}
-
 # A throttle written as '08' is eight hours, never an octal literal.
 interval_with_leading_zero_accepted() {
 	fixtures_company
@@ -2757,51 +2637,6 @@ interval_with_leading_zero_accepted() {
 	assert_rc 0 "second hook"
 	assert_out_lacks "value too great for base" "the interval parses as decimal"
 	assert_out_empty "the stamp is fresh, so the throttle holds"
-}
-
-# This harness must refuse to run when mktemp -d cannot create the temporary
-# root, and it must register no case_cleanup trap before that check. The failing
-# run starts from a throwaway working directory that holds a sentinel file and
-# a nested file: a case_cleanup trap armed against an unverified ROOT would put
-# those at risk, so their survival is the assertion.
-mktemp_failure_arms_no_cleanup() {
-	local work out rc
-	work="$CASE_DIR/work"
-	mkdir -p "$work/subdir"
-	printf 'sentinel-contents\n' >"$work/sentinel.txt"
-	printf 'nested\n' >"$work/subdir/nested.txt"
-	out=$(cd "$work" && HARNESS_JOBS=1 TMPDIR="$CASE_DIR/no-such-tmpdir" "$BASH_BIN" "$HERE/test-link-skills.sh" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 1 ]; then
-		case_fail "harness exit code $rc, expected 1"
-		printf '      output: %s\n' "$out"
-	fi
-	case "$out" in
-	*"mktemp -d failed to create a directory"*) ;;
-	*)
-		case_fail "the harness does not report the mktemp failure"
-		printf '      output: %s\n' "$out"
-		;;
-	esac
-	case "$out" in
-	*"interpreter:"*)
-		case_fail "the harness kept running after the mktemp failure"
-		printf '      output: %s\n' "$out"
-		;;
-	*) ;;
-	esac
-	if [ ! -d "$work" ]; then
-		case_fail "the working directory was removed"
-		return
-	fi
-	if [ ! -f "$work/sentinel.txt" ]; then
-		case_fail "the sentinel file was removed"
-	elif [ "$(cat "$work/sentinel.txt")" != "sentinel-contents" ]; then
-		case_fail "the sentinel file content changed"
-	fi
-	if [ ! -f "$work/subdir/nested.txt" ]; then
-		case_fail "the nested file was removed"
-	fi
 }
 
 # A '..' segment must be normalized by text, before the filesystem is asked
@@ -2926,42 +2761,6 @@ manifest_write_failure_keeps_old_manifest() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link recorded before this run survives"
 }
 
-# A manifest that is a symlink is someone else's list of links. Following it
-# would let a foreign file name the entries unlink removes, so every command
-# that reads the manifest refuses the path instead.
-unlink_refuses_symlinked_manifest() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$HOME/.agents/skills"
-	ln -s "$CASE_DIR/one/alpha" "$HOME/.agents/skills/foreign"
-	printf 'foreign\t%s\n' "$CASE_DIR/one/alpha" >"$CASE_DIR/planted"
-	ln -s "$CASE_DIR/planted" "$HOME/.agents/skills/.skill-links"
-
-	case_run_script unlink
-	assert_rc 1 "unlink with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "refusal message"
-	assert_out_lacks "removed foreign" "nothing claims the foreign link was removed"
-	fs_assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link survives"
-	fs_assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is left alone"
-	assert_file_has "$CASE_DIR/planted" "foreign" "the file the symlink names is left alone"
-
-	case_run_script link
-	assert_rc 1 "link with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "link refusal message"
-
-	case_run_script check
-	assert_rc 1 "check with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "check refusal message"
-
-	# The hook never fails a session, and it changes nothing either.
-	case_run_script hook
-	assert_rc 0 "hook with a symlinked manifest"
-	fs_assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link still survives"
-	fs_assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is still there"
-	assert_file_has "$CASE_DIR/planted" "foreign" "the planted file is still there"
-}
-
 # A '..' after a symlinked directory belongs to the directory that link really
 # points at. Collapsing the text first would answer the directory that holds
 # the symlink, and every link would land there.
@@ -2979,32 +2778,6 @@ symlink_then_parent_resolves_physically() {
 	fs_assert_absent "$CASE_DIR/path/alpha" "nothing is linked where the symlink sits"
 	fs_assert_absent "$CASE_DIR/path/.skill-links" "no manifest where the symlink sits"
 	fs_assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
-}
-
-# unlink removes only the fetch-<digits> stamps it writes. Any other name in
-# the stamp directory belongs to someone else, and keeps the directory too.
-unlink_leaves_foreign_file_in_stamp_dir() {
-	local left
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	case_run_script check
-	assert_rc 0 "check"
-	fs_assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
-	printf 'notes\n' >"$HOME/.agents/skills/.skill-links.d/notes.txt"
-	printf 'not a stamp\n' >"$HOME/.agents/skills/.skill-links.d/fetch-abc"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_out_has "kept $HOME/.agents/skills/.skill-links.d" "the directory is kept"
-	fs_assert_is_dir_not_link "$HOME/.agents/skills/.skill-links.d" "the stamp directory survives"
-	assert_file_has "$HOME/.agents/skills/.skill-links.d/notes.txt" "notes" "the foreign file survives"
-	assert_file_has "$HOME/.agents/skills/.skill-links.d/fetch-abc" "not a stamp" "a non-numeric fetch name survives"
-	left=$(find "$HOME/.agents/skills/.skill-links.d" -maxdepth 1 -type f -name 'fetch-*' 2>/dev/null | wc -l | tr -d ' ')
-	if [ "$left" != "1" ]; then
-		case_fail "expected only fetch-abc to remain, found $left fetch entries"
-	fi
 }
 
 # A prune that the filesystem refuses must keep the link's manifest entry, so
@@ -4989,7 +4762,7 @@ main() {
 	case_run hook_bounded_without_tmpdir
 	case_run install_hooks_normalizes_exact_command_entry
 	case_run relink_creation_failure_restores_old_link
-	case_run unlink_leaves_foreign_entries
+	cases_unlink
 	case_run personal_skill_untouched
 	case_run source_listed_twice
 	case_run duplicate_keeps_existing_link
@@ -5000,15 +4773,12 @@ main() {
 	case_run emptied_source_prunes_links
 	case_run foreign_matching_link_not_adopted
 	case_run foreign_dangling_not_pruned
-	case_run foreign_dangling_not_unlinked
 	case_run manifest_traversal_line_ignored
 	case_run manifest_temp_name_not_guessable
 	case_run fetch_stamp_symlink_refused
-	case_run unlink_leaves_foreign_fetch_file
 	case_run source_listed_twice_by_symlink_alias
 	case_run assembly_dir_refused_as_source
-	case_run case_only_rename_relinks
-	case_run case_variant_names_are_duplicates
+	cases_names_and_casing
 	case_run empty_sources_file_does_not_prune
 	case_run empty_home_refused
 	case_run unset_home_hook_exits_zero
@@ -5021,8 +4791,6 @@ main() {
 	case_run manifest_write_failure_keeps_old_manifest
 	case_run manifest_write_failure_restores_repointed_link
 	case_run manifest_write_failure_restores_pruned_links
-	case_run unlink_refuses_symlinked_manifest
-	case_run unlink_leaves_foreign_file_in_stamp_dir
 	case_run prune_failure_keeps_manifest_entry
 	case_run directory_at_manifest_path_refused
 	case_run link_refuses_while_locked
@@ -5043,12 +4811,11 @@ main() {
 	case_run parent_traversal_through_file_refused
 	case_run unreadable_manifest_aborts
 	case_run fifo_at_sources_path_refused
-	case_run unlink_reports_deletion_failure
 	case_run interval_with_leading_zero_accepted
 	case_run missing_runtime_home_reported
 	case_run nameonly_manifest_line_ignored
 	case_run recorded_target_mismatch_not_replaced
-	case_run link_names_its_sources
+	cases_output
 	case_run ds_store_only_claude_skills_replaced
 	case_run unwritable_assembly_reports_failure
 	case_run script_reached_through_a_symlink
@@ -5075,7 +4842,7 @@ main() {
 	case_run source_dotdot_after_symlink_resolves_physically
 	case_run source_dotdot_alias_missing_keeps_links
 	case_run manifest_two_column_lines_still_parse
-	case_run mktemp_failure_arms_no_cleanup
+	cases_harness
 
 	case_tap_summary
 }

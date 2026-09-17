@@ -147,7 +147,10 @@ The tests for `scripts/validate-skills.mjs` live under
 `helpers/` directory with the shared fixtures and builders. Run them with
 `pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` that have
 moved out of the runner live under `scripts/tests/link-skills/`, one file per
-topic, sourced from an explicit ordered list the way the modules are.
+topic, sourced from an explicit ordered list the way the modules are. Each
+topic file ends with a `cases_<topic>` function that calls `case_run` for its
+cases in order, and the runner's `main` calls that function in place of the
+lines it replaced.
 
 Rules for a module file:
 
