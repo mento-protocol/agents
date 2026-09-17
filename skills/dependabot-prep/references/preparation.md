@@ -259,7 +259,12 @@ Repeat this section independently for each admitted PR.
    digest the sealed input bundle. Do not include a remote URL or credential.
 3. Create a unique standalone clone with `--no-checkout`. Confirm its separate
    Git common directory, allowlisted environment, sanitized configuration,
-   absent remotes, and `HEAD == headRefOid`. Inspect all tree modes and paths.
+   absent remotes, and `HEAD == headRefOid`. The push wrapper allowlists exactly
+   these local config keys: `commit.gpgsign`, `core.bare`, `core.filemode`,
+   `core.hookspath`, `core.ignorecase`, `core.logallrefupdates`,
+   `core.precomposeunicode`, `core.repositoryformatversion`, `tag.gpgsign`,
+   `user.email`, `user.name`; remove the `remote.*` and `branch.*` entries
+   `git clone` writes. Inspect all tree modes and paths.
    Only then check out the admitted ordinary files and confirm a clean state.
 4. If the base is not an ancestor, prepare one merge of the exact `baseRefOid`
    with no-commit and no-fast-forward behavior through the trusted sanitized
