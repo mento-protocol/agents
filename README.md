@@ -363,10 +363,11 @@ bash 3.2 that `link-skills.sh` must keep working with. `HARNESS_JOBS` sets how
 many cases the harness runs at a time, four by default;
 `HARNESS_JOBS=1 bash scripts/test-link-skills.sh` runs them one after another.
 
-The harness prints TAP 13 and ends with a `# N passed, N failed, N skipped`
-line. It is `scripts/test-link-skills.sh`, a runner that holds no case: it
-sources six modules from `scripts/tests/lib/` and one file per topic from
-`scripts/tests/link-skills/`. The cases for `scripts/validate-skills.mjs` are
+The harness prints TAP 13 and ends with a
+`# N passed, N failed, N skipped (interpreter <name>)` line. It is
+`scripts/test-link-skills.sh`, a runner that holds no case: it sources six
+modules from `scripts/tests/lib/` and one file per topic from
+`scripts/tests/link-skills/`, with the shared `install-hooks-common.sh` first. The cases for `scripts/validate-skills.mjs` are
 `node:test` files under `scripts/tests/validate-skills/`.
 
 Each package's own README documents its usage; run its suite directly with

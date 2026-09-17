@@ -191,6 +191,7 @@ hook_pull_advice_uses_refspec_for_dash_branch() {
 	fs_assert_link "$HOME/.agents/skills/beta" "$clone/skills/beta" \
 		"the command links what the pull brought in"
 }
+
 # refs/remotes/origin/HEAD is optional in a clone. Reading a missing one as
 # "main" measures a "master" remote against a branch that is not there, so the
 # refs in the clone decide instead; when they cannot, check says how to record

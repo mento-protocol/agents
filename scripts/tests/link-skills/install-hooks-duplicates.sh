@@ -8,8 +8,8 @@
 # another tool's, a bad entry beside a valid one, and two bad entries with no
 # valid one between them.
 #
-# write_two_hook_groups is defined here; write_installed_hook_settings comes
-# from install-hooks-options.sh.
+# _write_two_hook_groups is private to this file; write_installed_hook_settings
+# comes from install-hooks-common.sh.
 #
 # Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
@@ -18,7 +18,7 @@
 
 # Two SessionStart groups, the first holding $2 and the second $3, both with
 # the type and the timeout this script installs.
-write_two_hook_groups() {
+_write_two_hook_groups() {
 	printf '%s\n' \
 		'{' \
 		'  "hooks": {' \
@@ -155,7 +155,7 @@ install_hooks_removes_bad_duplicate_beside_valid_entry() {
 # finds a file that is installed. Takes the settings file path.
 _install_hooks_malformed_duplicate_is_removed() {
 	local n groups
-	write_two_hook_groups "$1" "bash $LS hook" "bash $LS --sources hook"
+	_write_two_hook_groups "$1" "bash $LS hook" "bash $LS --sources hook"
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over a malformed duplicate"
 	assert_out_has "removed 1 duplicate hook entry in $1" "the removal is reported"
@@ -186,7 +186,7 @@ _install_hooks_malformed_duplicate_is_removed() {
 _install_hooks_stale_duplicate_is_removed() {
 	local n
 	rm -f "$1" "$1".bak-*
-	write_two_hook_groups "$1" "bash $LS hook" \
+	_write_two_hook_groups "$1" "bash $LS hook" \
 		"bash $CASE_DIR/gone/link-skills.sh hook"
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over a stale duplicate"
@@ -225,7 +225,7 @@ install_hooks_repairs_one_and_removes_other_bad_entries() {
 # finds a file that is installed. Takes the settings file path.
 _install_hooks_two_malformed_entries() {
 	local n groups
-	write_two_hook_groups "$1" "bash $LS --sources hook" "bash $LS --sources hook"
+	_write_two_hook_groups "$1" "bash $LS --sources hook" "bash $LS --sources hook"
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over two malformed entries"
 	assert_out_has "replaced a malformed hook command in $1" "the repair is reported"
@@ -257,7 +257,7 @@ _install_hooks_two_malformed_entries() {
 _install_hooks_stale_and_malformed_entries() {
 	local n
 	rm -f "$1" "$1".bak-*
-	write_two_hook_groups "$1" "bash $CASE_DIR/gone/link-skills.sh hook" \
+	_write_two_hook_groups "$1" "bash $CASE_DIR/gone/link-skills.sh hook" \
 		"bash $LS --sources hook"
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over a stale entry and a malformed one"

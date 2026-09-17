@@ -12,8 +12,8 @@
 // the limits. It may not grow past the line count recorded there. The
 // recorded count must match the file: a file that shrinks fails the check
 // until its entry is lowered, so the allowance only ever ratchets down. An
-// entry at or below the file limit is refused, and only the two named legacy
-// files may be listed.
+// entry at or below the file limit is refused, and only the named legacy file
+// may be listed.
 //
 // When SHELL_SIZE_BASE names a git ref (CI sets it to the pull request's
 // base branch), the change is also compared with that ref:
@@ -34,9 +34,11 @@ import sh from "mvdan-sh";
 const MAX_FILE_LINES = Number(process.env.MAX_FILE_LINES ?? 500);
 const MAX_FUNCTION_LINES = Number(process.env.MAX_FUNCTION_LINES ?? 50);
 
-// The only files the baseline may name. A new script never joins this list:
-// it is written within the limits from the start.
-const LEGACY_FILES = ["scripts/link-skills.sh", "scripts/test-link-skills.sh"];
+// The only file the baseline may name. A new script never joins this list:
+// it is written within the limits from the start. scripts/test-link-skills.sh
+// was listed too, and left once the runner held no case and fit both limits;
+// the ratchet refuses a removed entry that returns, so it cannot come back.
+const LEGACY_FILES = ["scripts/link-skills.sh"];
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");

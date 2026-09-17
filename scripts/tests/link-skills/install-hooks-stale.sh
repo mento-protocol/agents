@@ -9,34 +9,13 @@
 # direct entry on a file without the executable bit, and an entry installed for
 # another sources file and assembly directory.
 #
-# write_session_hook_settings is defined here and is used by
-# install-hooks-normalize.sh as well; write_installed_hook_settings comes from
-# install-hooks-options.sh.
+# write_session_hook_settings and write_installed_hook_settings come from
+# install-hooks-common.sh.
 #
 # Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
 # assert.sh reads, and nothing outside the case's own throwaway HOME and
 # CASE_DIR.
-
-# A settings file whose only SessionStart entry runs the command given.
-write_session_hook_settings() {
-	printf '%s\n' \
-		'{' \
-		'  "hooks": {' \
-		'    "SessionStart": [' \
-		'      {' \
-		'        "hooks": [' \
-		'          {' \
-		'            "type": "command",' \
-		"            \"command\": \"$2\"," \
-		'            "timeout": 20' \
-		'          }' \
-		'        ]' \
-		'      }' \
-		'    ]' \
-		'  }' \
-		'}' >"$1"
-}
 
 # A hook command that matches only by its trailing "link-skills.sh hook", and
 # whose script path is gone, is dead. Point it at this script instead of

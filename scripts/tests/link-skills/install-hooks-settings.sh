@@ -213,7 +213,7 @@ install_hooks_backup_name_is_reserved() {
 # the window this case is about. The single-quoted lines are shim source, not
 # expansions.
 # shellcheck disable=SC2016
-make_meddling_cp() {
+_make_meddling_cp() {
 	local dir real
 	dir=$1
 	real=$(command -v cp)
@@ -253,7 +253,7 @@ install_hooks_refuses_when_settings_changed_underneath() {
 	printf '%s\n' '{ "hooks": {} }' >"$file"
 
 	shims="$CASE_DIR/shims"
-	make_meddling_cp "$shims"
+	_make_meddling_cp "$shims"
 	LS_TEST_CP_SETTINGS="$file"
 	LS_TEST_CP_STATE="$CASE_DIR/meddled-once"
 	export LS_TEST_CP_SETTINGS LS_TEST_CP_STATE

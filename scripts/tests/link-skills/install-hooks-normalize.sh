@@ -9,8 +9,8 @@
 # an entry the run replaces, and an entry that already carries this exact
 # command under another type and another timeout.
 #
-# hook_entry_field is defined here; write_session_hook_settings comes from
-# install-hooks-stale.sh.
+# _hook_entry_field is private to this file; write_session_hook_settings comes
+# from install-hooks-common.sh.
 #
 # Reads: CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
@@ -18,7 +18,7 @@
 
 # One field of the first SessionStart hook entry of a settings file, or
 # '<missing>' when the entry does not carry that field at all.
-hook_entry_field() {
+_hook_entry_field() {
 	python3 -c 'import json, sys
 data = json.load(open(sys.argv[1]))
 entry = data["hooks"]["SessionStart"][0]["hooks"][0]
@@ -84,11 +84,11 @@ install_hooks_leaves_unrelated_command_alone() {
 	assert_file_has "$file" "bash $LS hook" "this hook is there"
 	# The merge appends its group, so the unrelated entry is still the first
 	# one. A take-over would have rewritten both of its fields.
-	got=$(hook_entry_field "$file" command)
+	got=$(_hook_entry_field "$file" command)
 	if [ "$got" != "echo $LS hook" ]; then
 		case_fail "the unrelated command was changed: $got"
 	fi
-	got=$(hook_entry_field "$file" timeout)
+	got=$(_hook_entry_field "$file" timeout)
 	if [ "$got" != "20" ]; then
 		case_fail "the unrelated entry lost its own timeout: $got"
 	fi
@@ -165,15 +165,15 @@ _install_hooks_stale_replacement_fields() {
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over a stale entry"
 	assert_out_has "replaced a stale hook" "the stale entry is replaced"
-	got=$(hook_entry_field "$1" timeout)
+	got=$(_hook_entry_field "$1" timeout)
 	if [ "$got" != "60" ]; then
 		case_fail "the replaced entry carries timeout $got, expected 60"
 	fi
-	got=$(hook_entry_field "$1" type)
+	got=$(_hook_entry_field "$1" type)
 	if [ "$got" != "command" ]; then
 		case_fail "the replaced entry carries type $got, expected command"
 	fi
-	got=$(hook_entry_field "$1" command)
+	got=$(_hook_entry_field "$1" command)
 	case "$got" in
 	*"$LS hook") ;;
 	*) case_fail "the replaced entry carries command $got, expected one ending in '$LS hook'" ;;
@@ -208,11 +208,11 @@ _install_hooks_other_installation_fields() {
 	case_run_script install-hooks
 	assert_rc 0 "install-hooks over another installation"
 	assert_out_has "replaced a hook for another installation" "the other installation is replaced"
-	got=$(hook_entry_field "$1" timeout)
+	got=$(_hook_entry_field "$1" timeout)
 	if [ "$got" != "60" ]; then
 		case_fail "the rewritten entry carries timeout $got, expected 60"
 	fi
-	got=$(hook_entry_field "$1" type)
+	got=$(_hook_entry_field "$1" type)
 	if [ "$got" != "command" ]; then
 		case_fail "the rewritten entry carries type $got, expected command"
 	fi
@@ -275,11 +275,11 @@ _install_hooks_entry_is_normalized() {
 	assert_rc 0 "install-hooks over an entry with the exact command"
 	assert_out_has "normalized the hook entry" "the normalization is reported"
 	assert_out_lacks "already runs the hook" "the entry was not counted as installed"
-	got=$(hook_entry_field "$1" type)
+	got=$(_hook_entry_field "$1" type)
 	if [ "$got" != "command" ]; then
 		case_fail "the normalized entry carries type $got, expected command"
 	fi
-	got=$(hook_entry_field "$1" timeout)
+	got=$(_hook_entry_field "$1" timeout)
 	if [ "$got" != "60" ]; then
 		case_fail "the normalized entry carries timeout $got, expected 60"
 	fi

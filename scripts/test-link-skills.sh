@@ -59,7 +59,9 @@ SAVED_PATH=""
 
 # Every case lives in tests/link-skills/, one file per topic, and is sourced
 # from this second ordered list, by absolute path, the same way. This file
-# holds no case of its own.
+# holds no case of its own. install-hooks-common.sh holds no case either: it
+# carries the builders more than one install-hooks topic calls, so it is
+# sourced before them.
 # shellcheck source=tests/link-skills/check.sh
 . "$HERE/tests/link-skills/check.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/check.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/harness.sh
@@ -70,6 +72,8 @@ SAVED_PATH=""
 . "$HERE/tests/link-skills/hook-notice.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/hook-notice.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/hook-remote.sh
 . "$HERE/tests/link-skills/hook-remote.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/hook-remote.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/install-hooks-common.sh
+. "$HERE/tests/link-skills/install-hooks-common.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/install-hooks-common.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/install-hooks-duplicates.sh
 . "$HERE/tests/link-skills/install-hooks-duplicates.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/install-hooks-duplicates.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/install-hooks-fresh.sh

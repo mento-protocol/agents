@@ -93,8 +93,11 @@ The harness is `scripts/test-link-skills.sh`, which holds no case of its own.
 It sources six modules from `scripts/tests/lib/` (`case.sh`, `assert.sh`,
 `fs.sh`, `fixtures.sh`, `shims.sh`, `probe.sh`) and then one file per topic
 from `scripts/tests/link-skills/`, each by absolute path from an explicit
-ordered list. `BASH_BIN` sets the interpreter the script under test runs
-under; it defaults to `bash`.
+ordered list. That second list opens with
+`scripts/tests/link-skills/install-hooks-common.sh`, which holds no case: it
+carries the settings-file builders more than one install-hooks topic calls, so
+it is sourced before them. `BASH_BIN` sets the interpreter the script under
+test runs under; it defaults to `bash`.
 
 The harness reports in TAP 13: a `TAP version 13` line, a `# interpreter:`
 comment naming the interpreter and its version, one `ok` or `not ok` line per
@@ -169,7 +172,11 @@ The tests for `scripts/validate-skills.mjs` live under
 `scripts/tests/link-skills/`, one file per topic, sourced from an explicit
 ordered list the way the modules are; the runner itself holds no case. Each
 topic file ends with a `cases_<topic>` function that calls `case_run` for its
-cases in order, and the runner's `main` calls those functions in order.
+cases in order, and the runner's `main` calls those functions in order. A
+helper file shared by several topics, such as `install-hooks-common.sh`, holds
+no case and so has no `cases_<topic>` function; it is sourced before the topics
+that call it. A helper used by one topic file alone stays in that file and
+starts with `_`.
 
 Rules for a module file:
 
@@ -196,11 +203,11 @@ Rules for a module file:
 
 `scripts/link-skills.sh` predates these limits and is listed in
 `scripts/shell-size-baseline.txt` with its current line count. It is the only
-entry left: `scripts/test-link-skills.sh` was listed too, and its entry went
-once the runner held no case and fit both limits, so the runner is checked like
-any other file now. Those two paths are the only ones the baseline may name;
-the check refuses any other. A change may
-not grow a listed file. Add a case or a function by first splitting the topic
+entry left, and the only path the baseline may name:
+`scripts/test-link-skills.sh` was listed too, and its entry went once the
+runner held no case and fit both limits, so the runner is checked like any
+other file now. The check refuses any other path, and the ratchet refuses the
+runner's entry if it returns. A change may not grow a listed file. Add a case or a function by first splitting the topic
 it belongs to out of the monolith, then lower the baseline entry to the new
 count: the check fails while the entry is above the file's real length, and
 on a pull request CI also compares the change with the base branch, so

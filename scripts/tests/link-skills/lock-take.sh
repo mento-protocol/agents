@@ -8,39 +8,15 @@
 # back while a run is waiting for it, a symlink at the lock path and a regular
 # file at the lock path.
 #
+# The mkdir shim that loses one race for the lock path comes from
+# tests/lib/shims.sh as shims_vanishing_lock_mkdir.
+#
 # Reads: BASH_BIN, CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, LOCK_VANISH_HELD, the pid of
 # the sleeping lock owner lock_vanish_is_retried starts, and the
 # LS_TEST_LOCK_MARKER, LS_TEST_LOCK_DIR and
 # LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS knobs the run under test reads. Nothing
 # outside the case's own throwaway HOME and CASE_DIR.
-
-# A mkdir shim that loses one race for the lock path: the first time the script
-# under test tries to make the lock directory, the shim removes the lock that
-# is already there and reports failure, so the run finds an empty lock path
-# right after its own mkdir failed. Every later call is the real mkdir. The
-# single-quoted lines are shim source, not expansions.
-# shellcheck disable=SC2016
-make_vanishing_lock_mkdir() {
-	local dir real
-	dir=$1
-	real=$(command -v mkdir)
-	mkdir -p "$dir"
-	printf '%s\n' \
-		'#!/bin/sh' \
-		'case "$*" in' \
-		'*.skill-links.lock)' \
-		'	if [ -n "${LS_TEST_LOCK_MARKER:-}" ] && [ ! -f "$LS_TEST_LOCK_MARKER" ]; then' \
-		'		: >"$LS_TEST_LOCK_MARKER"' \
-		'		rm -f "$LS_TEST_LOCK_DIR/pid" 2>/dev/null' \
-		'		rmdir "$LS_TEST_LOCK_DIR" 2>/dev/null' \
-		'		exit 1' \
-		'	fi' \
-		'	;;' \
-		'esac' \
-		"exec \"$real\" \"\$@\"" >"$dir/mkdir"
-	chmod +x "$dir/mkdir"
-}
 
 # One run at a time writes the assembly. A held lock stops link and unlink with
 # a message, and the session hook steps aside in silence.
@@ -87,16 +63,16 @@ link_refuses_while_locked() {
 lock_taken_on_first_run() {
 	local lock
 	lock="$HOME/.agents/skills/.skill-links.lock"
-	lock_first_run_creates_the_assembly "$lock"
-	lock_first_run_honours_a_later_lock "$lock"
-	lock_first_run_unlink_and_hook_create_the_assembly "$lock"
+	_lock_first_run_creates_the_assembly "$lock"
+	_lock_first_run_honours_a_later_lock "$lock"
+	_lock_first_run_unlink_and_hook_create_the_assembly "$lock"
 }
 
 # The first run links into the assembly it created and leaves no lock behind.
 # The hook body runs as a background job of its own, and the lock it takes
 # there is given back at the end of that job, not left for the next run to
 # clear as stale.
-lock_first_run_creates_the_assembly() {
+_lock_first_run_creates_the_assembly() {
 	local lock
 	lock=$1
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -116,7 +92,7 @@ lock_first_run_creates_the_assembly() {
 }
 
 # The directory the first run created is where every later lock is taken.
-lock_first_run_honours_a_later_lock() {
+_lock_first_run_honours_a_later_lock() {
 	local lock pid
 	lock=$1
 	mkdir "$lock"
@@ -133,7 +109,7 @@ lock_first_run_honours_a_later_lock() {
 }
 
 # unlink and the hook create the assembly the same way, and leave no lock.
-lock_first_run_unlink_and_hook_create_the_assembly() {
+_lock_first_run_unlink_and_hook_create_the_assembly() {
 	local lock
 	lock=$1
 	case_run_script unlink
@@ -155,19 +131,19 @@ lock_first_run_unlink_and_hook_create_the_assembly() {
 
 # A lock the run that held it gives back while another run is waiting must be
 # taken by that waiting run, not read as permission to work with no lock at
-# all. The shim above makes the moment that matters happen every time: the
-# waiting run's mkdir fails and the lock path is empty immediately after.
+# all. shims_vanishing_lock_mkdir makes the moment that matters happen every
+# time: the waiting run's mkdir fails and the lock path is empty right after.
 lock_vanish_is_retried() {
 	local lock shims pid out
 	lock="$HOME/.agents/skills/.skill-links.lock"
 	shims="$CASE_DIR/shims"
 	out="$CASE_DIR/link.out"
-	lock_vanish_fixture "$lock" "$shims"
+	_lock_vanish_fixture "$lock" "$shims"
 
 	shims_use "$shims"
 	"$BASH_BIN" "$LS" link >"$out" 2>&1 &
 	pid=$!
-	lock_vanish_wait_for_new_owner "$lock" "$LOCK_VANISH_HELD" "$pid"
+	_lock_vanish_wait_for_new_owner "$lock" "$LOCK_VANISH_HELD" "$pid"
 	wait "$pid"
 	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
@@ -188,7 +164,7 @@ lock_vanish_is_retried() {
 # A sleeping owner holds the lock, the shim is on PATH, and the run under test
 # is told to hold its own lock long enough to be read. LOCK_VANISH_HELD carries
 # the sleeping owner's pid back to the case.
-lock_vanish_fixture() {
+_lock_vanish_fixture() {
 	local lock shims
 	lock=$1
 	shims=$2
@@ -201,7 +177,7 @@ lock_vanish_fixture() {
 	LOCK_VANISH_HELD=$!
 	printf '%s\n' "$LOCK_VANISH_HELD" >"$lock/pid"
 
-	make_vanishing_lock_mkdir "$shims"
+	shims_vanishing_lock_mkdir "$shims"
 	LS_TEST_LOCK_MARKER="$CASE_DIR/lock-race-lost"
 	LS_TEST_LOCK_DIR="$lock"
 	export LS_TEST_LOCK_MARKER LS_TEST_LOCK_DIR
@@ -216,7 +192,7 @@ lock_vanish_fixture() {
 # its pid would blame the lock for the host. The file still holds the
 # sleeping owner until the shim takes the first race, so the poll goes on
 # until another pid is there or four seconds are gone.
-lock_vanish_wait_for_new_owner() {
+_lock_vanish_wait_for_new_owner() {
 	local lock held pid got waited
 	lock=$1
 	held=$2

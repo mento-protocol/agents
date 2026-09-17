@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 #
 # shims.sh - builders for the command shims a case puts in front of the real
-# git, date, ln, mktemp and ls, plus the PATH switch that turns them on.
+# git, date, ln, mktemp, ls and mkdir, plus the PATH switch that turns them on.
 #
 # Reads: PATH and SAVED_PATH. Each builder takes the shim directory as an
 # argument and finds the real command through PATH with command -v.
@@ -138,6 +138,33 @@ shims_unlistable_ls() {
 		'fi' \
 		"exec \"$real\" \"\$@\"" >"$dir/ls"
 	chmod +x "$dir/ls"
+}
+
+# A mkdir shim that loses one race for the lock path: the first time the script
+# under test tries to make the lock directory, the shim removes the lock that
+# is already there and reports failure, so the run finds an empty lock path
+# right after its own mkdir failed. Every later call is the real mkdir. The
+# single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+shims_vanishing_lock_mkdir() {
+	local dir real
+	dir=$1
+	real=$(command -v mkdir)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'case "$*" in' \
+		'*.skill-links.lock)' \
+		'	if [ -n "${LS_TEST_LOCK_MARKER:-}" ] && [ ! -f "$LS_TEST_LOCK_MARKER" ]; then' \
+		'		: >"$LS_TEST_LOCK_MARKER"' \
+		'		rm -f "$LS_TEST_LOCK_DIR/pid" 2>/dev/null' \
+		'		rmdir "$LS_TEST_LOCK_DIR" 2>/dev/null' \
+		'		exit 1' \
+		'	fi' \
+		'	;;' \
+		'esac' \
+		"exec \"$real\" \"\$@\"" >"$dir/mkdir"
+	chmod +x "$dir/mkdir"
 }
 
 shims_use() {
