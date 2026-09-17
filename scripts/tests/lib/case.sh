@@ -1,0 +1,82 @@
+# shellcheck shell=bash
+#
+# case.sh - case lifecycle for the link-skills harness: per-case setup, the
+# run wrapper that counts results, the two run helpers that invoke the script
+# under test, and the temporary root cleanup.
+#
+# Reads: ROOT, CASE_DIR, BASH_BIN, SOURCE_SCRIPT, HOME.
+# Writes: PASS, FAIL, CURRENT, CASE_FAILS, CASE_DIR, HOME, LS, LS_OUT, LS_RC,
+# and the git and skill-sources environment variables a case runs under.
+#
+# The runner owns the initialisation of PASS, FAIL, CURRENT, CASE_FAILS, ROOT,
+# CASE_DIR, LS, LS_OUT and LS_RC, and registers cleanup as its EXIT trap.
+#
+# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
+# no reader while it lints this file on its own.
+# shellcheck disable=SC2034
+
+cleanup() {
+	if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
+		chmod -R u+rwX "$ROOT" 2>/dev/null || true
+		rm -rf "$ROOT"
+	fi
+}
+# The trap is registered in main(), only once ROOT is verified to be a fresh
+# directory this run created: a failed mktemp must not arm a cleanup that
+# could rm -rf an empty ROOT variable's worth of nothing, or worse.
+
+fail() {
+	CASE_FAILS=$((CASE_FAILS + 1))
+	printf '    ! %s: %s\n' "$CURRENT" "$*"
+}
+
+ls_run() {
+	LS_OUT=$("$BASH_BIN" "$LS" "$@" 2>&1)
+	LS_RC=$?
+}
+
+# The same run, started from another working directory. A SessionStart hook
+# runs from the directory of whatever project opens, so a case about relative
+# paths has to choose where the command starts. The subshell keeps the change
+# of directory out of the harness itself.
+ls_run_in() {
+	local dir
+	dir=$1
+	shift
+	LS_OUT=$(cd "$dir" && "$BASH_BIN" "$LS" "$@" 2>&1)
+	LS_RC=$?
+}
+
+setup_case() {
+	CASE_DIR="$ROOT/$1"
+	rm -rf "$CASE_DIR"
+	mkdir -p "$CASE_DIR/home"
+	HOME="$CASE_DIR/home"
+	export HOME
+	GIT_CONFIG_GLOBAL=/dev/null
+	GIT_CONFIG_SYSTEM=/dev/null
+	GIT_CONFIG_NOSYSTEM=1
+	GIT_TERMINAL_PROMPT=0
+	export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT
+	SKILL_SOURCES_FETCH_INTERVAL_HOURS=0
+	export SKILL_SOURCES_FETCH_INTERVAL_HOURS
+	unset SKILL_SOURCES_FILE || true
+	unset SKILLS_ASSEMBLY_DIR || true
+	LS="$SOURCE_SCRIPT"
+	LS_OUT=""
+	LS_RC=0
+}
+
+run_case() {
+	CURRENT=$1
+	CASE_FAILS=0
+	setup_case "$1"
+	"$1"
+	if [ "$CASE_FAILS" -eq 0 ]; then
+		PASS=$((PASS + 1))
+		printf 'PASS %s\n' "$1"
+	else
+		FAIL=$((FAIL + 1))
+		printf 'FAIL %s (%d assertion(s))\n' "$1" "$CASE_FAILS"
+	fi
+}
