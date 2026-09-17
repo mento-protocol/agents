@@ -1,0 +1,5 @@
+# Resolve `source` targets relative to the sourcing script and follow them,
+# so shellcheck lints a modular script together with its lib/ files.
+external-sources=true
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/lib

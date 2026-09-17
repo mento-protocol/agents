@@ -38,6 +38,19 @@ jobs:
       - name: Test
         run: pnpm --filter @mento-protocol/issues test
 
+      - name: Fetch the base branch for the shell size ratchet
+        if: github.base_ref
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_REF"
+
+      - name: Check shell file and function sizes
+        env:
+          # On a pull request, compare the baseline with the base branch's
+          # copy so an entry can only go down. On a push there is no base.
+          SHELL_SIZE_BASE: ${{ github.base_ref && format('origin/{0}', github.base_ref) || '' }}
+        run: pnpm check:shell
+
       - name: Trunk Code Quality
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
 
