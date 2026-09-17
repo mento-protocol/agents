@@ -3,9 +3,15 @@
 # shims.sh - builders for the command shims a case puts in front of the real
 # git, date, ln, mktemp and ls, plus the PATH switch that turns them on.
 #
-# Reads: PATH.
+# Reads: PATH and SAVED_PATH. Each builder takes the shim directory as an
+# argument and finds the real command through PATH with command -v.
 # Writes: PATH, SAVED_PATH, and the shim files under the directory each
 # builder is given.
+#
+# SAVED_PATH is mutable harness state, so the runner owns it and initialises
+# it with the rest of that state; this module defines nothing at load. A
+# second shims_use before a shims_drop keeps the first saved value, so the
+# path shims_drop restores cannot be lost.
 
 # The shims below sit in one directory that is prepended to PATH for the run
 # under test only. The single-quoted lines are shim source, not expansions.
@@ -17,7 +23,7 @@
 # 25 second deadline. The sleep records its pid in the file named by
 # LS_TEST_SLEEP_PID, so a case can see whether anything survived the deadline.
 # shellcheck disable=SC2016
-make_hanging_git() {
+shims_hanging_git() {
 	local dir real
 	dir=$1
 	real=$(command -v git)
@@ -41,7 +47,7 @@ make_hanging_git() {
 # A date shim with one fixed timestamp, so that two installs collide on the
 # backup name whatever the clock does.
 # shellcheck disable=SC2016
-make_fixed_date() {
+shims_fixed_date() {
 	local dir real
 	dir=$1
 	real=$(command -v date)
@@ -64,7 +70,7 @@ make_fixed_date() {
 # before it and the restore after it both work. The single-quoted lines are
 # shim source, not expansions.
 # shellcheck disable=SC2016
-make_failing_ln() {
+shims_failing_ln() {
 	local dir real
 	dir=$1
 	real=$(command -v ln)
@@ -90,7 +96,7 @@ make_failing_ln() {
 # Only the manifest temporary file is touched, and only while the marker
 # variable is set. The single-quoted lines are shim source, not expansions.
 # shellcheck disable=SC2016
-make_breaking_mktemp() {
+shims_breaking_mktemp() {
 	local dir real
 	dir=$1
 	real=$(command -v mktemp)
@@ -116,7 +122,7 @@ make_breaking_mktemp() {
 # It gives a directory whose permission bits pass a listing that fails, the way
 # an ACL does. The single-quoted lines are shim source, not expansions.
 # shellcheck disable=SC2016
-make_unlistable_ls() {
+shims_unlistable_ls() {
 	local dir real
 	dir=$1
 	real=$(command -v ls)
@@ -134,15 +140,15 @@ make_unlistable_ls() {
 	chmod +x "$dir/ls"
 }
 
-SAVED_PATH=""
-
-use_shims() {
-	SAVED_PATH=$PATH
+shims_use() {
+	if [ -z "$SAVED_PATH" ]; then
+		SAVED_PATH=$PATH
+	fi
 	PATH="$1:$PATH"
 	export PATH
 }
 
-drop_shims() {
+shims_drop() {
 	if [ -n "$SAVED_PATH" ]; then
 		PATH=$SAVED_PATH
 		export PATH

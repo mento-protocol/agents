@@ -1,39 +1,41 @@
 # shellcheck shell=bash
 #
 # fs.sh - assertions and probes about the filesystem: what exists, what is a
-# real directory, what a symlink points at, permission bits, and whether the
-# case directory sits on a case-insensitive filesystem.
+# real directory, what a symlink points at, permission bits, and whether a
+# directory sits on a case-insensitive filesystem.
 #
-# Reads: CASE_DIR.
-# Writes: nothing directly; each failing assertion calls fail(), which raises
-# CASE_FAILS.
+# Reads: no global. Every function takes the paths it works on as arguments.
+# fs_case_insensitive read CASE_DIR, which case.sh owns; it now takes that
+# directory as its argument instead.
+# Writes: no global directly. Each failing assertion calls case_fail, which
+# raises CASE_FAILS.
 
-assert_exists() {
+fs_assert_exists() {
 	if [ ! -e "$1" ]; then
-		fail "$2: $1 does not exist"
+		case_fail "$2: $1 does not exist"
 	fi
 }
 
-assert_absent() {
+fs_assert_absent() {
 	if [ -e "$1" ] || [ -L "$1" ]; then
-		fail "$2: $1 still exists"
+		case_fail "$2: $1 still exists"
 	fi
 }
 
-assert_is_dir_not_link() {
+fs_assert_is_dir_not_link() {
 	if [ -L "$1" ]; then
-		fail "$2: $1 is a symlink, expected a real directory"
+		case_fail "$2: $1 is a symlink, expected a real directory"
 		return
 	fi
 	if [ ! -d "$1" ]; then
-		fail "$2: $1 is not a directory"
+		case_fail "$2: $1 is not a directory"
 	fi
 }
 
-assert_link() {
+fs_assert_link() {
 	local got a b
 	if [ ! -L "$1" ]; then
-		fail "$3: $1 is not a symlink"
+		case_fail "$3: $1 is not a symlink"
 		return
 	fi
 	got=$(readlink "$1")
@@ -45,11 +47,11 @@ assert_link() {
 	if [ -n "$a" ] && [ "$a" = "$b" ]; then
 		return
 	fi
-	fail "$3: $1 -> $got, expected $2"
+	case_fail "$3: $1 -> $got, expected $2"
 }
 
 # Permission bits of a file as an octal string, on macOS and on Linux.
-file_mode() {
+fs_file_mode() {
 	local m
 	m=$(stat -f '%Lp' "$1" 2>/dev/null) || m=""
 	if [ -z "$m" ]; then
@@ -58,11 +60,12 @@ file_mode() {
 	printf '%s\n' "$m"
 }
 
-# macOS formats APFS and HFS+ case-insensitive by default; Linux ext4 does not.
-# The cases that depend on it print a skip note and still pass elsewhere.
+# True when the directory given sits on a case-insensitive filesystem. macOS
+# formats APFS and HFS+ case-insensitive by default; Linux ext4 does not. The
+# cases that depend on it print a skip note and still pass elsewhere.
 fs_case_insensitive() {
 	local probe rc
-	probe="$CASE_DIR/.case-probe"
+	probe="$1/.case-probe"
 	rm -rf "$probe"
 	mkdir -p "$probe"
 	: >"$probe/probe"

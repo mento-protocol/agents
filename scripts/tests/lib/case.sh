@@ -2,18 +2,30 @@
 #
 # case.sh - case lifecycle for the link-skills harness: per-case setup, the
 # wrapper that runs one case in a subshell and reports it in TAP, the skip
-# marker, the two run helpers that invoke the script under test, and the
-# temporary root cleanup.
+# marker, the two run helpers that invoke the script under test, and
+# case_cleanup, which removes the temporary root.
 #
-# Reads: ROOT, CASE_DIR, BASH_BIN, SOURCE_SCRIPT, HOME, HARNESS_PATH.
-# Writes: PASS, FAIL, SKIPPED, CASE_NUM, SKIP_NOTE, CURRENT, CASE_FAILS,
-# CASE_DIR, HOME, PATH, SAVED_PATH, LS, LS_OUT, LS_RC, and the git and
-# skill-sources environment variables a case runs under.
+# Reads: BASH_BIN (case_run_script, case_run_script_in, case_tap_header),
+# CASE_FAILS (case_fail, _case_body), CASE_NUM (case_run, _case_tap,
+# case_tap_summary), CURRENT (case_fail), FAIL (_case_tap, case_tap_summary),
+# HARNESS_PATH (case_setup), LS (case_run_script, case_run_script_in), PASS
+# (_case_tap, case_tap_summary), ROOT (case_cleanup, case_setup, case_run),
+# SKIPPED (_case_tap, case_tap_summary), SKIP_NOTE (skip, _case_tap),
+# SOURCE_SCRIPT (case_setup).
+# Writes: CASE_DIR, CASE_FAILS, CASE_NUM, CURRENT, FAIL, HOME, LS, LS_OUT,
+# LS_RC, PASS, PATH, SAVED_PATH, SKIPPED, SKIP_NOTE, and the
+# GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM,
+# GIT_TERMINAL_PROMPT and SKILL_SOURCES_FETCH_INTERVAL_HOURS variables the run
+# under test inherits; case_setup also unsets SKILL_SOURCES_FILE and
+# SKILLS_ASSEMBLY_DIR.
 #
 # The runner owns the initialisation of PASS, FAIL, SKIPPED, CASE_NUM,
 # CURRENT, CASE_FAILS, ROOT, CASE_DIR, HARNESS_PATH, SKIP_NOTE, LS, LS_OUT and
-# LS_RC, and registers cleanup as its EXIT trap. run_case points SKIP_NOTE
-# into ROOT, which exists only once the run has a temporary root.
+# LS_RC, and registers case_cleanup as its EXIT trap. case_run points
+# SKIP_NOTE into ROOT, which exists only once the run has a temporary root.
+# BASH_BIN, CURRENT and LS stay globals rather than arguments: the cases call
+# case_fail and the two run helpers several hundred times between them, so
+# passing each value would touch every call site, not one line.
 #
 # LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
 # no reader while it lints this file on its own.
@@ -27,17 +39,17 @@
 CASE_FAIL_MAX=250
 CASE_SKIP_STATUS=251
 
-cleanup() {
+case_cleanup() {
 	if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
 		chmod -R u+rwX "$ROOT" 2>/dev/null || true
 		rm -rf "$ROOT"
 	fi
 }
 # The trap is registered in main(), only once ROOT is verified to be a fresh
-# directory this run created: a failed mktemp must not arm a cleanup that
+# directory this run created: a failed mktemp must not arm a case_cleanup that
 # could rm -rf an empty ROOT variable's worth of nothing, or worse.
 
-fail() {
+case_fail() {
 	CASE_FAILS=$((CASE_FAILS + 1))
 	printf '    ! %s: %s\n' "$CURRENT" "$*"
 }
@@ -51,7 +63,7 @@ skip() {
 	exit "$CASE_SKIP_STATUS"
 }
 
-ls_run() {
+case_run_script() {
 	LS_OUT=$("$BASH_BIN" "$LS" "$@" 2>&1)
 	LS_RC=$?
 }
@@ -60,7 +72,7 @@ ls_run() {
 # runs from the directory of whatever project opens, so a case about relative
 # paths has to choose where the command starts. The subshell keeps the change
 # of directory out of the harness itself.
-ls_run_in() {
+case_run_script_in() {
 	local dir
 	dir=$1
 	shift
@@ -68,7 +80,7 @@ ls_run_in() {
 	LS_RC=$?
 }
 
-setup_case() {
+case_setup() {
 	CASE_DIR="$ROOT/$1"
 	rm -rf "$CASE_DIR"
 	mkdir -p "$CASE_DIR/home"
@@ -93,13 +105,13 @@ setup_case() {
 	LS_RC=0
 }
 
-# One case from setup to verdict. run_case calls this in a subshell, so no
+# One case from setup to verdict. case_run calls this in a subshell, so no
 # variable, working directory, PATH change or trap a case makes reaches the
 # next one.
 _case_body() {
 	CURRENT=$1
 	CASE_FAILS=0
-	setup_case "$1"
+	case_setup "$1"
 	"$1"
 	if [ "$CASE_FAILS" -gt "$CASE_FAIL_MAX" ]; then
 		exit "$CASE_FAIL_MAX"
@@ -137,7 +149,7 @@ _case_tap() {
 # The output of a case is written to a file rather than read through a pipe:
 # a case that leaves a process running would hold a pipe open and stall the
 # harness, and the file lets the TAP line be printed before its detail.
-run_case() {
+case_run() {
 	local name status log
 	name=$1
 	CASE_NUM=$((CASE_NUM + 1))
