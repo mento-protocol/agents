@@ -18,7 +18,6 @@ PASS=0
 FAIL=0
 CURRENT=""
 CASE_FAILS=0
-
 ROOT=""
 CASE_DIR=""
 BARE=""
@@ -27,23 +26,24 @@ COMPANY=""
 LS=""
 LS_OUT=""
 LS_RC=0
+SAVED_PATH=""
 
 # The shared assertions, fixtures and shims live in tests/lib/ and are sourced
-# by absolute path from this explicit list, in a fixed order. Do not source
-# them by glob: glob order depends on the locale and hides which module needs
-# which.
+# by absolute path from this explicit list, in a fixed order; a module that
+# cannot be read ends the run with exit 2. Do not source them by glob: glob
+# order depends on the locale and hides which module needs which.
 # shellcheck source=tests/lib/case.sh
-. "$HERE/tests/lib/case.sh"
+. "$HERE/tests/lib/case.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/case.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/assert.sh
-. "$HERE/tests/lib/assert.sh"
+. "$HERE/tests/lib/assert.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/assert.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/fs.sh
-. "$HERE/tests/lib/fs.sh"
+. "$HERE/tests/lib/fs.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/fs.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/fixtures.sh
-. "$HERE/tests/lib/fixtures.sh"
+. "$HERE/tests/lib/fixtures.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/fixtures.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/shims.sh
-. "$HERE/tests/lib/shims.sh"
+. "$HERE/tests/lib/shims.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/shims.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/probe.sh
-. "$HERE/tests/lib/probe.sh"
+. "$HERE/tests/lib/probe.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/probe.sh >&2 && exit 2; }
 
 # ------------------------------------------------------------------ cases ---
 
@@ -1395,7 +1395,7 @@ source_listed_twice_by_symlink_alias() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/one/beta" "beta link"
 
-	if ! fs_case_insensitive; then
+	if ! fs_case_insensitive "$CASE_DIR"; then
 		printf '    (case-variant spelling skipped: case-sensitive filesystem)\n'
 		return
 	fi
@@ -1463,7 +1463,7 @@ assembly_dir_refused_as_source() {
 # A case-only rename of a skill directory must relink in one run, not report a
 # collision and drop the skill.
 case_only_rename_relinks() {
-	if ! fs_case_insensitive; then
+	if ! fs_case_insensitive "$CASE_DIR"; then
 		printf '    (skipped: case-sensitive filesystem)\n'
 		return
 	fi
@@ -1486,7 +1486,7 @@ case_only_rename_relinks() {
 
 # Two names the filesystem cannot tell apart are a duplicate, reported as one.
 case_variant_names_are_duplicates() {
-	if ! fs_case_insensitive; then
+	if ! fs_case_insensitive "$CASE_DIR"; then
 		printf '    (skipped: case-sensitive filesystem)\n'
 		return
 	fi

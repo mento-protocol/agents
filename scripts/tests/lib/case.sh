@@ -4,12 +4,20 @@
 # run wrapper that counts results, the two run helpers that invoke the script
 # under test, and case_cleanup, which removes the temporary root.
 #
-# Reads: ROOT, CASE_DIR, BASH_BIN, SOURCE_SCRIPT, HOME.
-# Writes: PASS, FAIL, CURRENT, CASE_FAILS, CASE_DIR, HOME, LS, LS_OUT, LS_RC,
-# and the git and skill-sources environment variables a case runs under.
+# Reads: BASH_BIN (case_run_script, case_run_script_in), CASE_FAILS
+# (case_run), CURRENT (case_fail), LS (case_run_script, case_run_script_in),
+# ROOT (case_cleanup, case_setup), SOURCE_SCRIPT (case_setup).
+# Writes: CASE_DIR, CASE_FAILS, CURRENT, FAIL, HOME, LS, LS_OUT, LS_RC, PASS,
+# and the GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM,
+# GIT_TERMINAL_PROMPT and SKILL_SOURCES_FETCH_INTERVAL_HOURS variables the run
+# under test inherits; case_setup also unsets SKILL_SOURCES_FILE and
+# SKILLS_ASSEMBLY_DIR.
 #
 # The runner owns the initialisation of PASS, FAIL, CURRENT, CASE_FAILS, ROOT,
 # CASE_DIR, LS, LS_OUT and LS_RC, and registers case_cleanup as its EXIT trap.
+# BASH_BIN, CURRENT and LS stay globals rather than arguments: the cases call
+# case_fail and the two run helpers several hundred times between them, so
+# passing each value would touch every call site, not one line.
 #
 # LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
 # no reader while it lints this file on its own.

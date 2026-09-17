@@ -3,9 +3,15 @@
 # shims.sh - builders for the command shims a case puts in front of the real
 # git, date, ln, mktemp and ls, plus the PATH switch that turns them on.
 #
-# Reads: PATH.
+# Reads: PATH and SAVED_PATH. Each builder takes the shim directory as an
+# argument and finds the real command through PATH with command -v.
 # Writes: PATH, SAVED_PATH, and the shim files under the directory each
 # builder is given.
+#
+# SAVED_PATH is mutable harness state, so the runner owns it and initialises
+# it with the rest of that state; this module defines nothing at load. A
+# second shims_use before a shims_drop keeps the first saved value, so the
+# path shims_drop restores cannot be lost.
 
 # The shims below sit in one directory that is prepended to PATH for the run
 # under test only. The single-quoted lines are shim source, not expansions.
@@ -134,10 +140,10 @@ shims_unlistable_ls() {
 	chmod +x "$dir/ls"
 }
 
-SAVED_PATH=""
-
 shims_use() {
-	SAVED_PATH=$PATH
+	if [ -z "$SAVED_PATH" ]; then
+		SAVED_PATH=$PATH
+	fi
 	PATH="$1:$PATH"
 	export PATH
 }

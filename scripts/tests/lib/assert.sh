@@ -3,9 +3,11 @@
 # assert.sh - assertions over the exit code, the captured output and file
 # contents of the run under test.
 #
-# Reads: LS_RC, LS_OUT.
-# Writes: nothing directly; each failing assertion calls case_fail(), which raises
-# CASE_FAILS.
+# Reads: LS_OUT and LS_RC, which case.sh writes, in assert_rc, assert_out_has,
+# assert_out_lacks and assert_out_empty. The file assertions and
+# assert_count_in_file take every path and pattern as an argument.
+# Writes: no global directly. Each failing assertion calls case_fail, which
+# raises CASE_FAILS.
 
 assert_rc() {
 	if [ "$LS_RC" -ne "$1" ]; then

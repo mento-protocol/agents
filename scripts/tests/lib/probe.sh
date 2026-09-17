@@ -4,8 +4,9 @@
 # python3 is installed, whether a pid names a live process, and whether ps
 # reports a process start time on this host.
 #
-# Reads: nothing.
-# Writes: nothing.
+# Reads: no global. probe_pid_is_live takes the pid it asks about as an
+# argument, and probe_ps_reports_start_time asks about the harness itself.
+# Writes: no global.
 
 probe_have_python3() {
 	command -v python3 >/dev/null 2>&1

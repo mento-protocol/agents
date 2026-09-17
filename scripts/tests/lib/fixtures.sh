@@ -3,8 +3,14 @@
 # fixtures.sh - builders for the trees a case runs against: skill directories,
 # the sources file, and the bare repository with its seed and company clones.
 #
-# Reads: CASE_DIR, SOURCE_SCRIPT, HOME.
+# Reads: CASE_DIR and SOURCE_SCRIPT (fixtures_company), HOME
+# (fixtures_write_sources, fixtures_add_source), SEED (fixtures_push_beta).
 # Writes: BARE, SEED, COMPANY, LS, and files under CASE_DIR and HOME.
+#
+# CASE_DIR and HOME belong to case.sh and stay globals rather than arguments:
+# every one of the hundreds of fixture calls means the current case's HOME and
+# case directory, so passing them would touch every call site, not one line.
+# SEED is this module's own: fixtures_company sets it for fixtures_push_beta.
 #
 # LS is written here and read by case.sh, so shellcheck sees no reader while
 # it lints this file on its own.

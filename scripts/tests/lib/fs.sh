@@ -1,12 +1,14 @@
 # shellcheck shell=bash
 #
 # fs.sh - assertions and probes about the filesystem: what exists, what is a
-# real directory, what a symlink points at, permission bits, and whether the
-# case directory sits on a case-insensitive filesystem.
+# real directory, what a symlink points at, permission bits, and whether a
+# directory sits on a case-insensitive filesystem.
 #
-# Reads: CASE_DIR.
-# Writes: nothing directly; each failing assertion calls case_fail(), which raises
-# CASE_FAILS.
+# Reads: no global. Every function takes the paths it works on as arguments.
+# fs_case_insensitive read CASE_DIR, which case.sh owns; it now takes that
+# directory as its argument instead.
+# Writes: no global directly. Each failing assertion calls case_fail, which
+# raises CASE_FAILS.
 
 fs_assert_exists() {
 	if [ ! -e "$1" ]; then
@@ -58,11 +60,12 @@ fs_file_mode() {
 	printf '%s\n' "$m"
 }
 
-# macOS formats APFS and HFS+ case-insensitive by default; Linux ext4 does not.
-# The cases that depend on it print a skip note and still pass elsewhere.
+# True when the directory given sits on a case-insensitive filesystem. macOS
+# formats APFS and HFS+ case-insensitive by default; Linux ext4 does not. The
+# cases that depend on it print a skip note and still pass elsewhere.
 fs_case_insensitive() {
 	local probe rc
-	probe="$CASE_DIR/.case-probe"
+	probe="$1/.case-probe"
 	rm -rf "$probe"
 	mkdir -p "$probe"
 	: >"$probe/probe"
