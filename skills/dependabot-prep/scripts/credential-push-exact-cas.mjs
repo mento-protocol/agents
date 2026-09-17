@@ -480,14 +480,18 @@ export function requirePushPorcelain(stdout, expectedNewOid, headRefName) {
     line.includes(`\t${expectedNewOid}:refs/heads/`),
   );
   if (updates.length !== 1)
-    reject("Push result did not contain one exact ref update.");
+    reject(
+      "Push result did not contain one exact ref update; the push ran, so live readback is required.",
+    );
   const fields = updates[0].split("\t");
   if (
     fields.length !== 3 ||
     fields[0] !== " " ||
     fields[1] !== `${expectedNewOid}:refs/heads/${headRefName}`
   ) {
-    reject("Push result did not confirm the exact fast-forward ref.");
+    reject(
+      "Push result did not confirm the exact fast-forward ref; the push ran, so live readback is required.",
+    );
   }
 }
 

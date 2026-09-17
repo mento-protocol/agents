@@ -20,6 +20,10 @@ directory name. A skill directory may also contain:
 - `scripts/`: helper scripts the skill runs.
 - `references/`: supporting documents the skill reads on demand.
 - `assets/`: files the skill's output is built from or copies.
+- `fixtures/`: recorded inputs and byte vectors the skill's own test suite
+  under `scripts/` reads.
+- One archived companion document next to `SKILL.md`, such as
+  `SEALED-LEGACY.md`, when a superseded procedure must stay readable.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
 and layout. CI runs it on every pull request.

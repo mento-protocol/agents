@@ -161,8 +161,9 @@ report on stderr: the guarded PR's entry under `claims` carries the current
 `token` and its `renewCount`. Pass the current token as `--token` to every later
 command, and carry it — not the acquisition token — into the summary marker and
 the final handoff. `claims verify` and `claims guard` answer a token one or more
-renewals old with exit 14 `not-held` and print the current token in
-`claim.token`; `claims release` answers it with exit 16 `stale`.
+renewals old with exit 14 `not-held`: verify prints the current token as
+`current.oid` and in its `next` lines, guard in each guarded PR's entry under
+`claims` as `token`. `claims release` answers it with exit 16 `stale`.
 
 Default budget: one hour total, 30 active repair minutes per PR, three attempts
 per recurring issue, unless user/repository/job specifies otherwise. Persist
