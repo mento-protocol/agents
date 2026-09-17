@@ -24,7 +24,7 @@ exposure. Worktrees are not sandboxes; this skill does not enforce least privile
 Use native tools, runtime permissions and existing authentication. Never extract
 or print tokens or copy production secrets into checkouts. Do not invoke, repair
 or re-pin retired launchers. `SEALED-LEGACY.md`, its five old references and the
-bundled launcher and credential-helper `scripts/` are historical compatibility
+bundled credential-helper and push `scripts/` are historical compatibility
 artifacts, not this workflow's dependencies. `fixtures/comment-marker-vectors.json`
 and `scripts/comment-marker-vectors.test.mjs` are live: they carry the
 procedural-marker byte authority this workflow posts against.

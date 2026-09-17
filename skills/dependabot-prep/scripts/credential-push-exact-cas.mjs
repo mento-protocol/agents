@@ -551,7 +551,8 @@ export function pushExactCas(requestInput, trustedInput) {
     initialManifest,
     false,
   );
-  requireHead(initialManifest.git.resolvedPath, request, preflightEnvironment);
+  // The config gate digests the file before its own Git call, so it runs
+  // before any other Git command touches the model-writable candidate.
   validateLocalConfig(
     initialManifest.git.resolvedPath,
     request.candidateRoot,
@@ -559,6 +560,7 @@ export function pushExactCas(requestInput, trustedInput) {
     request.candidateConfigSha256,
     trusted.hooksPath,
   );
+  requireHead(initialManifest.git.resolvedPath, request, preflightEnvironment);
 
   const finalManifest = verifyCredentialPushToolchain(
     trusted.expectedToolchainSha256,

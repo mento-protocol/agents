@@ -17,7 +17,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pushExactCas } from "./credential-push-exact-cas.mjs";
+import {
+  pushExactCas,
+  requirePushPorcelain,
+} from "./credential-push-exact-cas.mjs";
 import {
   inspectCredentialPushToolchain,
   inspectSealedExecutable,
@@ -76,6 +79,8 @@ function createFixture(
     execPathAlias = null,
     mutateOnPush = null,
     raceAfterWrite = false,
+    configExtraRecord = null,
+    configHooksPath = null,
   } = {},
 ) {
   const root = createSealedFixtureRoot(t);
@@ -142,9 +147,10 @@ if (args[0] === "config") {
       "core.filemode\ntrue",
       "core.bare\nfalse",
       "core.logallrefupdates\ntrue",
-      `core.hookspath\n${hooks}`,
+      `core.hookspath\n${configHooksPath ?? hooks}`,
       "commit.gpgsign\nfalse",
       "tag.gpgsign\nfalse",
+      ...(configExtraRecord ? [configExtraRecord] : []),
       "",
     ].join("\0"),
   )}));
@@ -271,6 +277,73 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
     trusted,
   };
 }
+
+test("the candidate config gate refuses drift, extra keys and a bad pin", (t) => {
+  const extra = createFixture(t, {
+    configExtraRecord: "extensions.objectformat\nsha256",
+  });
+  assert.throws(
+    () => pushExactCas(extra.request, extra.trusted),
+    /not allowlisted/,
+  );
+  assert.equal(readFileSync(extra.pushCount, "utf8"), "0");
+
+  const drifted = createFixture(t, { configHooksPath: "/nonexistent/hooks" });
+  assert.throws(
+    () => pushExactCas(drifted.request, drifted.trusted),
+    /hooks path drifted/,
+  );
+  assert.equal(readFileSync(drifted.pushCount, "utf8"), "0");
+
+  const pinned = createFixture(t);
+  const digest = pinned.request.candidateConfigSha256;
+  const flipped = (digest[0] === "0" ? "1" : "0") + digest.slice(1);
+  assert.throws(
+    () =>
+      pushExactCas(
+        { ...pinned.request, candidateConfigSha256: flipped },
+        pinned.trusted,
+      ),
+    /candidate config pin mismatched/,
+  );
+  assert.equal(readFileSync(pinned.pushCount, "utf8"), "0");
+});
+
+test("the porcelain proof rejects forced, duplicate and foreign updates", () => {
+  const line = (flag, oid, ref, summary) =>
+    `To https://example.invalid/o/r.git\n${flag}\t${oid}:refs/heads/${ref}\t${summary}\nDone\n`;
+  assert.throws(
+    () =>
+      requirePushPorcelain(
+        Buffer.from(
+          line("+", NEW_OID, REF_NAME, "1111111...2222222 (forced update)"),
+        ),
+        NEW_OID,
+        REF_NAME,
+      ),
+    /did not confirm the exact fast-forward ref/,
+  );
+  assert.throws(
+    () =>
+      requirePushPorcelain(
+        Buffer.from(
+          `To https://example.invalid/o/r.git\n \t${NEW_OID}:refs/heads/${REF_NAME}\t1..2\n \t${NEW_OID}:refs/heads/${REF_NAME}\t1..2\nDone\n`,
+        ),
+        NEW_OID,
+        REF_NAME,
+      ),
+    /did not contain one exact ref update/,
+  );
+  assert.throws(
+    () =>
+      requirePushPorcelain(
+        Buffer.from(line(" ", NEW_OID, `${REF_NAME}-other`, "1..2")),
+        NEW_OID,
+        REF_NAME,
+      ),
+    /did not confirm the exact fast-forward ref/,
+  );
+});
 
 test("toolchain or helper drift after the push reports ambiguity", (t) => {
   for (const mutateOnPush of ["gh", "helper"]) {
