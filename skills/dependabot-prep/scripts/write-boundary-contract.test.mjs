@@ -107,7 +107,7 @@ test("one-shot wrapper performs final verification directly before one push", ()
   );
   const push = wrapper.indexOf("const push = runGit(", finalVerify);
   const postVerify = wrapper.indexOf(
-    "const postManifest = verifyCredentialPushToolchain(",
+    "after the push ran; live readback is required.",
     push,
   );
   assert.ok(finalVerify >= 0, "final toolchain verification is missing");

@@ -81,6 +81,61 @@ function inspectPathComponents(canonicalPath) {
   return Object.freeze(components);
 }
 
+// Git spawns its plumbing through the exec path it reports, which may be an
+// alias of the sealed directory (Homebrew reports `opt/git/...`, a symlink into
+// the Cellar). Every component of that alias must be owned by root or this
+// user; a symlink component must resolve to a sealed path and its target is
+// recorded, so the manifest digest binds the alias identity and a repointed
+// link is drift.
+function inspectAliasComponents(aliasPath) {
+  if (
+    path.sep !== "/" ||
+    typeof process.getuid !== "function" ||
+    !path.isAbsolute(aliasPath) ||
+    path.normalize(aliasPath) !== aliasPath
+  ) {
+    reject("Unsealed toolchain path.");
+  }
+  const allowedUids = new Set([0, process.getuid()]);
+  const components = [];
+  let current = path.parse(aliasPath).root;
+  for (const part of aliasPath
+    .slice(current.length)
+    .split("/")
+    .filter(Boolean)) {
+    current = path.join(current, part);
+    let metadata;
+    try {
+      metadata = lstatSync(current);
+    } catch {
+      reject("Unavailable toolchain path component.");
+    }
+    const mode = metadata.mode & 0o7777;
+    if (!allowedUids.has(metadata.uid)) {
+      reject("Unsealed toolchain path component.");
+    }
+    let linkTarget = null;
+    if (metadata.isSymbolicLink()) {
+      linkTarget = readlinkSync(current);
+      inspectPathComponents(realpathSync(current));
+    } else if ((mode & 0o022) !== 0) {
+      reject("Unsealed toolchain path component.");
+    }
+    components.push(
+      Object.freeze({
+        dev: String(metadata.dev),
+        gid: metadata.gid,
+        ino: String(metadata.ino),
+        linkTarget,
+        mode,
+        path: current,
+        uid: metadata.uid,
+      }),
+    );
+  }
+  return Object.freeze(components);
+}
+
 function inspectExecutable(
   invocationPath,
   requireCanonical,
@@ -250,6 +305,10 @@ function inspectToolchain(
   if (!statSync(resolvedExecPath).isDirectory()) {
     reject("Git exec-path is not a directory.");
   }
+  const reportedExecPathComponents =
+    requireSealed && reportedExecPath !== resolvedExecPath
+      ? inspectAliasComponents(reportedExecPath)
+      : Object.freeze([]);
 
   const gitPrograms = REQUIRED_GIT_PROGRAMS.map((name) => {
     const invocationPath = path.join(resolvedExecPath, name);
@@ -272,6 +331,7 @@ function inspectToolchain(
     ),
     git,
     gitExecPath: Object.freeze({
+      reportedComponents: reportedExecPathComponents,
       reportedPath: reportedExecPath,
       resolvedPath: resolvedExecPath,
     }),

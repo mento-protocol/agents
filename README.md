@@ -348,7 +348,7 @@ trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
 ```
 
-CI runs the last two skill checks on Ubuntu and macOS. On macOS also run
+CI runs the skill validation, the skill suites and the link harness on Ubuntu and macOS. On macOS also run
 `BASH_BIN=/bin/bash bash scripts/test-link-skills.sh`, which exercises the
 bash 3.2 that `link-skills.sh` must keep working with.
 

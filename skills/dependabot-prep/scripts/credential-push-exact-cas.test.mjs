@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
+  symlinkSync,
   copyFileSync,
   mkdtempSync,
   mkdirSync,
@@ -68,7 +69,10 @@ function createSealedFixtureRoot(t) {
   return root;
 }
 
-function createFixture(t, { ancestry = true } = {}) {
+function createFixture(
+  t,
+  { ancestry = true, execPathAlias = null, mutateGhOnPush = false } = {},
+) {
   const root = createSealedFixtureRoot(t);
 
   const candidate = path.join(root, "candidate");
@@ -102,12 +106,27 @@ function createFixture(t, { ancestry = true } = {}) {
   writeFileSync(pushCount, "0", { mode: 0o600 });
   writeFileSync(remoteState, OLD_OID, { mode: 0o600 });
 
+  const ghPath = path.join(tools, "gh");
+  // The exec path the fake Git reports: the sealed directory itself, a symlink
+  // to it inside the sealed root, or a symlink beneath a world-writable
+  // directory that the inspector must refuse.
+  let reportedExecPath = gitExecPath;
+  if (execPathAlias === "sealed") {
+    reportedExecPath = path.join(root, "alias-exec");
+    symlinkSync(gitExecPath, reportedExecPath);
+  } else if (execPathAlias === "writable") {
+    const open = path.join(root, "open");
+    mkdirSync(open, { mode: 0o777 });
+    chmodSync(open, 0o777);
+    reportedExecPath = path.join(open, "alias-exec");
+    symlinkSync(gitExecPath, reportedExecPath);
+  }
   const gitPath = path.join(tools, "git");
   const fakeGit = `#!${process.execPath}
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") { process.stdout.write("git version 99.0.0-test\\n"); process.exit(0); }
-if (args.length === 1 && args[0] === "--exec-path") { process.stdout.write(${JSON.stringify(`${gitExecPath}\n`)}); process.exit(0); }
+if (args.length === 1 && args[0] === "--exec-path") { process.stdout.write(${JSON.stringify(`${reportedExecPath}\n`)}); process.exit(0); }
 if (args[0] === "rev-parse") { process.stdout.write(${JSON.stringify(`${NEW_OID}\n`)}); process.exit(0); }
 if (args[0] === "merge-base") { process.exit(${ancestry ? 0 : 1}); }
 if (args[0] === "config") {
@@ -134,6 +153,7 @@ const lease = args.find((value) => value.startsWith("--force-with-lease="));
 const expected = lease?.slice(lease.lastIndexOf(":") + 1);
 if (readFileSync(${JSON.stringify(remoteState)}, "utf8") !== expected) process.exit(1);
 writeFileSync(${JSON.stringify(remoteState)}, ${JSON.stringify(NEW_OID)}, "utf8");
+${mutateGhOnPush ? `appendFileSync(${JSON.stringify(ghPath)}, "\\n");` : ""}
 process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/frontend-monorepo.git\n \t${NEW_OID}:refs/heads/${REF_NAME}\t1111111..2222222\nDone\n`)});
 `;
   writeFileSync(gitPath, fakeGit, { mode: 0o700 });
@@ -153,7 +173,6 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
     chmodSync(target, 0o700);
   }
 
-  const ghPath = path.join(tools, "gh");
   writeFileSync(
     ghPath,
     `#!${process.execPath}\nif (process.argv[2] === "--version") { process.stdout.write("gh version 99.0.0-test\\nhttps://example.invalid/v99.0.0-test\\n"); process.exit(0); } if (process.argv.slice(2).join(" ") === "auth token --help") { process.stdout.write("  -h, --hostname string   host\\n  -u, --user string       user\\n"); process.exit(0); } process.exit(91);\n`,
@@ -231,8 +250,47 @@ process.stdout.write(${JSON.stringify(`To https://github.com/mento-protocol/fron
       ),
     ),
   };
-  return { ghPath, pushCount, pushLog, remoteState, request, root, trusted };
+  return {
+    ghPath,
+    manifest,
+    pushCount,
+    pushLog,
+    remoteState,
+    request,
+    root,
+    trusted,
+  };
 }
+
+test("toolchain drift after the push reports ambiguity, not refusal", (t) => {
+  const fixture = createFixture(t, { mutateGhOnPush: true });
+  assert.throws(
+    () => pushExactCas(fixture.request, fixture.trusted),
+    /after the push ran; live readback is required/,
+  );
+  assert.equal(readFileSync(fixture.pushCount, "utf8"), "1");
+  assert.equal(readFileSync(fixture.remoteState, "utf8"), NEW_OID);
+});
+
+test("a sealed exec-path alias is bound; a writable alias fails closed", (t) => {
+  const aliased = createFixture(t, { execPathAlias: "sealed" });
+  assert.notEqual(
+    aliased.manifest.gitExecPath.reportedPath,
+    aliased.manifest.gitExecPath.resolvedPath,
+  );
+  const [link] = aliased.manifest.gitExecPath.reportedComponents.filter(
+    (component) => component.linkTarget !== null,
+  );
+  assert.ok(link, "the alias symlink is recorded in the manifest");
+  const result = pushExactCas(aliased.request, aliased.trusted);
+  assert.equal(result.expectedNewOid, NEW_OID);
+  assert.equal(readFileSync(aliased.pushCount, "utf8"), "1");
+
+  assert.throws(
+    () => createFixture(t, { execPathAlias: "writable" }),
+    /Unsealed toolchain path component/,
+  );
+});
 
 test("one-shot wrapper emits one exact compare-and-swap push", (t) => {
   const fixture = createFixture(t);

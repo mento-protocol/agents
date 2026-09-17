@@ -583,12 +583,19 @@ export function pushExactCas(requestInput, trustedInput) {
     push.stderr.fill(0);
   }
 
-  const postManifest = verifyCredentialPushToolchain(
-    trusted.expectedToolchainSha256,
-    trusted.toolchainOptions,
-  );
-  if (postManifest.gh.sha256 !== trusted.ghSha256) {
-    reject("Toolchain drifted during the push; live readback is required.");
+  // The push ran. Any failure from here on is ambiguity, not refusal: the
+  // manifest digest binds every pinned digest, so a drift or a failed probe
+  // means the remote may have moved under an unverified toolchain.
+  try {
+    verifyCredentialPushToolchain(
+      trusted.expectedToolchainSha256,
+      trusted.toolchainOptions,
+    );
+  } catch (error) {
+    throw new Error(
+      "Toolchain drifted or could not be verified after the push ran; live readback is required.",
+      { cause: error },
+    );
   }
   return Object.freeze({
     expectedNewOid: request.expectedNewOid,
