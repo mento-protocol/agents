@@ -156,12 +156,11 @@ The tests for `scripts/validate-skills.mjs` live under
 `scripts/tests/validate-skills/`: one file per YAML topic, plus
 `cli.test.mjs` and `layout.test.mjs` for the command's own behaviour, and a
 `helpers/` directory with the shared fixtures and builders. Run them with
-`pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` that have
-moved out of the runner live under `scripts/tests/link-skills/`, one file per
-topic, sourced from an explicit ordered list the way the modules are. Each
+`pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` live under
+`scripts/tests/link-skills/`, one file per topic, sourced from an explicit
+ordered list the way the modules are; the runner itself holds no case. Each
 topic file ends with a `cases_<topic>` function that calls `case_run` for its
-cases in order, and the runner's `main` calls that function in place of the
-lines it replaced.
+cases in order, and the runner's `main` calls those functions in order.
 
 Rules for a module file:
 
@@ -180,11 +179,12 @@ Rules for a module file:
   `git ls-files -z '*.sh' | xargs -0 shellcheck` follows the `source` lines.
   Do not add `# shellcheck disable=SC1091`.
 
-Two files predate these limits and are listed in
-`scripts/shell-size-baseline.txt` with their current line count:
-`scripts/link-skills.sh` and `scripts/test-link-skills.sh`. The check
-refuses any other path in that file. A change may not grow either of them. Add a case or a function by first splitting the topic it
-belongs to out of the monolith, then lower the baseline entry to the new
+Two files predate these limits: `scripts/link-skills.sh`, which is listed in
+`scripts/shell-size-baseline.txt` with its current line count, and
+`scripts/test-link-skills.sh`, which now fits the limits and is checked like
+any other file. The check refuses any other path in that file. A change may
+not grow a listed file. Add a case or a function by first splitting the topic
+it belongs to out of the monolith, then lower the baseline entry to the new
 count: the check fails while the entry is above the file's real length, and
 on a pull request CI also compares the change with the base branch, so
 the allowance only ratchets down: an entry may not rise, a removed entry
