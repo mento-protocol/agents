@@ -17,6 +17,10 @@ set -euo pipefail
 MAX_FILE_LINES=${MAX_FILE_LINES:-500}
 MAX_FUNCTION_LINES=${MAX_FUNCTION_LINES:-50}
 
+# The only files the baseline may name. A new script never joins this list:
+# it is written within the limits from the start.
+LEGACY_FILES="scripts/link-skills.sh scripts/test-link-skills.sh"
+
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=$(cd "$HERE/.." && pwd -P)
 BASELINE="$HERE/shell-size-baseline.txt"
@@ -38,9 +42,26 @@ baseline_limit() {
 # Reports every function longer than MAX_FUNCTION_LINES in the file named in
 # $1. A function starts at a line of the form `name() {`, `function name {`
 # or `function name() {` in column one and ends at the first `}` in column
-# one, which is how shfmt lays them out.
+# one, which is how shfmt lays them out. The payload of a here document is
+# skipped, so a `}` inside one does not end the function early.
 check_functions() {
 	awk -v max="$MAX_FUNCTION_LINES" -v file="$1" '
+		in_doc != "" {
+			line = $0
+			if (doc_strip) sub(/^\t+/, "", line)
+			if (line == in_doc) in_doc = ""
+			next
+		}
+		{
+			probe = $0
+			gsub(/<<</, "", probe)
+			if (match(probe, /<<-?[ \t]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*/)) {
+				tok = substr(probe, RSTART, RLENGTH)
+				doc_strip = (substr(tok, 3, 1) == "-")
+				sub(/^<<-?[ \t]*['"'"'"]?/, "", tok)
+				in_doc = tok
+			}
+		}
 		/^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*(\(\))?[ \t]*\{/ {
 			name = $0
 			sub(/^function[ \t]+/, "", name)
@@ -74,6 +95,10 @@ check_baseline() {
 		*" $file "*) problem "shell-size-baseline.txt names $file twice; keep one entry" ;;
 		esac
 		seen="$seen$file "
+		case " $LEGACY_FILES " in
+		*" $file "*) ;;
+		*) problem "shell-size-baseline.txt names $file, which is not a legacy file; only $LEGACY_FILES may be listed" ;;
+		esac
 		if ! git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
 			problem "shell-size-baseline.txt names $file, which is not tracked; remove the entry"
 		fi
