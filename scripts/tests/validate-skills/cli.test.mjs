@@ -300,6 +300,36 @@ test("a key set twice in the frontmatter is reported as a repeated mapping key",
   assert.equal(clean.output.trim(), "validated 1 skills");
 });
 
+// validator_accepts_top_level_comment_before_value: a comment carries no value
+// of its own, so a key with nothing but a comment under it is empty, and an
+// empty description is under the lower bound of the length rule. The same file
+// with a value under the comment reads that value and validates.
+test("a description whose only line under it is a comment is reported as too short", (t) => {
+  const root = makeSkillsDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeSkill(
+    root,
+    "noted",
+    "---\ndescription:\n# explanation\nname: noted\n---\n\nBody.\n",
+  );
+
+  const { status, output } = runValidator(VALIDATOR, root);
+  assert.notEqual(status, 0);
+  assert.equal(
+    output.trim(),
+    'skills/noted: "description" must be 1-1024 chars after trimming',
+  );
+
+  writeSkill(
+    root,
+    "noted",
+    "---\ndescription:\n# explanation\n  a description under the comment\nname: noted\n---\n\nBody.\n",
+  );
+  const clean = runValidator(VALIDATOR, root);
+  assert.equal(clean.status, 0);
+  assert.equal(clean.output.trim(), "validated 1 skills");
+});
+
 // validator_rejects_control_character: the scan runs before the parse, so the
 // character is named and nothing else is reported about the document.
 test("a control character is reported by its line and its code point", (t) => {
