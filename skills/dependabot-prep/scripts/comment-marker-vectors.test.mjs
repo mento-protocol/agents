@@ -17,7 +17,9 @@ const MARKER_SCHEMAS = new Set([
   "dependabot-prep-reply:v2",
 ]);
 const SUMMARY_FIELDS = ["pr", "claim", "run-sha256", "operator-sha256"];
-const SUMMARY_SCHEMA_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*:v2$/u;
+// The one summary claim-marker schema `@mento-protocol/issues` builds, parses
+// and accepts for `reporting.prCommentClaimMarkerSchema`.
+const SUMMARY_SCHEMA = "mento-dependabot-preparation:v2";
 const DECISIONS = new Set(["fixed", "wont-fix"]);
 const HEX_40 = /^[0-9a-f]{40}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
@@ -286,18 +288,18 @@ function summaryOperatorDigest(vector) {
 // The v1 discovery line carries no fields: it is the same schema token at
 // revision v1, and it stays first in a v2 summary comment.
 function buildSummaryDiscoveryLine(markerSchema) {
-  assert.match(
+  assert.equal(
     markerSchema,
-    SUMMARY_SCHEMA_PATTERN,
+    SUMMARY_SCHEMA,
     "summary marker schema is invalid",
   );
   return `<!-- ${markerSchema.replace(/:v2$/u, ":v1")} -->`;
 }
 
 function buildSummaryMarker(vector) {
-  assert.match(
+  assert.equal(
     vector.markerSchema,
-    SUMMARY_SCHEMA_PATTERN,
+    SUMMARY_SCHEMA,
     "summary marker schema is invalid",
   );
   assert.match(String(vector.pr), /^[1-9][0-9]*$/u, "summary pr is invalid");
