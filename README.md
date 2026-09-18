@@ -64,7 +64,10 @@ scripts/link-skills.sh
 ```
 
 The first run creates `~/.agents/skill-sources` and points `~/.claude/skills`
-at the assembly; the second links your skills into it. From then on edit your
+at the assembly; the second links your skills into it. If the sources file
+already existed, the first run leaves it alone, so add this clone's `skills`
+directory to it as well before the second run, or the shared skills are not
+linked. From then on edit your
 skills in `~/my-skills`, never through `~/.claude/skills`, which is now a
 symlink into the assembly. See
 [Composing with a personal skills directory](#composing-with-a-personal-skills-directory)
