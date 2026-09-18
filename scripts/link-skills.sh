@@ -1676,9 +1676,9 @@ take_lock() {
 			LOCK_HELD=1
 			printf '%s\t%s\n' "$$" "$(proc_start_time "$$")" \
 				>"$LOCK_DIR/pid" 2>/dev/null || true
-			# Test hook: hold the lock this long before the work starts, so
-			# that a test can read the pid file while its owner still runs.
-			if [ -n "${LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS-}" ]; then sleep "$LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS" 2>/dev/null || true; fi
+			# Test hook: hold the lock this long, 1 to 999 seconds, before the
+			# work starts, so a test can read the pid file while its owner runs.
+			case ${LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) sleep "$LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS" 2>/dev/null || true ;; esac
 			return 0
 		fi
 		# mkdir lost to something. A symlink or a file that appeared between
