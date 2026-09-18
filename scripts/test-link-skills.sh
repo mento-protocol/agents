@@ -16,10 +16,18 @@ BASH_BIN=${BASH_BIN:-bash}
 
 PASS=0
 FAIL=0
+SKIPPED=0
+CASE_NUM=0
 CURRENT=""
 CASE_FAILS=0
+
+# The PATH this run started with. case_setup restores it before every case,
+# so a shim a case installed is gone whatever that case did with it.
+HARNESS_PATH=$PATH
+
 ROOT=""
 CASE_DIR=""
+SKIP_NOTE=""
 BARE=""
 SEED=""
 COMPANY=""
@@ -868,8 +876,7 @@ sources_missing_path_with_space_is_missing() {
 install_hooks_missing_file() {
 	local backups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -891,8 +898,7 @@ install_hooks_missing_file() {
 install_hooks_existing_groups_preserved() {
 	local groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -930,8 +936,7 @@ install_hooks_existing_groups_preserved() {
 install_hooks_idempotent() {
 	local n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -962,8 +967,7 @@ install_hooks_idempotent() {
 install_hooks_embeds_custom_paths() {
 	local sources assembly command rc
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	sources="$CASE_DIR/custom-sources"
@@ -1464,8 +1468,7 @@ assembly_dir_refused_as_source() {
 # collision and drop the skill.
 case_only_rename_relinks() {
 	if ! fs_case_insensitive "$CASE_DIR"; then
-		printf '    (skipped: case-sensitive filesystem)\n'
-		return
+		case_skip "case-sensitive filesystem"
 	fi
 	fixtures_skill "$CASE_DIR/one" foo
 	fixtures_skill "$CASE_DIR/one" keep
@@ -1487,8 +1490,7 @@ case_only_rename_relinks() {
 # Two names the filesystem cannot tell apart are a duplicate, reported as one.
 case_variant_names_are_duplicates() {
 	if ! fs_case_insensitive "$CASE_DIR"; then
-		printf '    (skipped: case-sensitive filesystem)\n'
-		return
+		case_skip "case-sensitive filesystem"
 	fi
 	fixtures_skill "$CASE_DIR/one" Bar
 	fixtures_skill "$CASE_DIR/one" keep
@@ -1652,8 +1654,7 @@ ds_store_only_claude_skills_replaced() {
 # A failed ln or manifest write must be counted, never reported as success.
 unwritable_assembly_reports_failure() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1701,8 +1702,7 @@ script_reached_through_a_symlink() {
 install_hooks_path_with_space() {
 	local clone cmd
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	clone="$CASE_DIR/my repos/agents"
 	mkdir -p "$clone/scripts"
@@ -1726,8 +1726,7 @@ install_hooks_path_with_space() {
 install_hooks_symlinked_settings() {
 	local n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1755,8 +1754,7 @@ install_hooks_symlinked_settings() {
 # A dangling settings symlink must be reported, never written through.
 install_hooks_dangling_symlink_refused() {
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1777,8 +1775,7 @@ install_hooks_dangling_symlink_refused() {
 install_hooks_apostrophe_path_idempotent() {
 	local clone n cmd
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	clone="$CASE_DIR/it's tools/agents"
 	mkdir -p "$clone/scripts"
@@ -1810,8 +1807,7 @@ install_hooks_apostrophe_path_idempotent() {
 settings_mode_preserved() {
 	local mode n old_umask
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1854,8 +1850,7 @@ settings_mode_preserved() {
 install_hooks_backups_never_overwritten() {
 	local n base
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1886,8 +1881,7 @@ install_hooks_backups_never_overwritten() {
 install_hooks_leaves_minified_file_unchanged() {
 	local file before n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1919,8 +1913,7 @@ install_hooks_leaves_minified_file_unchanged() {
 install_hooks_replaces_dead_script_path() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1969,8 +1962,7 @@ install_hooks_replaces_dead_script_path() {
 install_hooks_rewrites_relative_script_path() {
 	local clone file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2075,8 +2067,7 @@ check_without_sources_file_exits_2() {
 # belongs in the assembly, so its links stay.
 unreadable_source_keeps_links() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" other
@@ -2153,8 +2144,7 @@ check_reports_unlistable_source_as_unreadable() {
 recorded_link_not_repointed_while_source_unavailable() {
 	local manifest
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	manifest="$HOME/.agents/skills/.skill-links"
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -2418,8 +2408,7 @@ aged_lock_with_live_owner_is_kept() {
 lock_owner_survives_timezone_change() {
 	local lock start other
 	if ! probe_ps_reports_start_time; then
-		printf '    (skipped: ps does not report process start times here)\n'
-		return
+		case_skip "ps does not report process start times here"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2434,8 +2423,7 @@ lock_owner_survives_timezone_change() {
 	other=$(TZ=America/New_York LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null |
 		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
 	if [ -z "$start" ] || [ "$start" = "$other" ]; then
-		printf '    (skipped: ps start times do not follow TZ here)\n'
-		return
+		case_skip "ps start times do not follow TZ here"
 	fi
 	mkdir "$lock"
 	printf '%s\t%s\n' "$$" "$start" >"$lock/pid"
@@ -2636,8 +2624,7 @@ parent_traversal_through_file_refused() {
 unreadable_manifest_aborts() {
 	local manifest
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2683,8 +2670,7 @@ fifo_at_sources_path_refused() {
 	fixtures_company
 	mkdir -p "$HOME/.agents"
 	if ! mkfifo "$HOME/.agents/skill-sources" 2>/dev/null; then
-		printf '    (skipped: mkfifo is not available)\n'
-		return
+		case_skip "mkfifo is not available"
 	fi
 	out="$CASE_DIR/fifo-run.out"
 
@@ -2727,8 +2713,7 @@ fifo_at_sources_path_refused() {
 # A removal that fails is reported, keeps its manifest entry, and fails the run.
 unlink_reports_deletion_failure() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2898,8 +2883,7 @@ check_keeps_duplicate_link_not_orphan() {
 manifest_write_failure_keeps_old_manifest() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3017,8 +3001,7 @@ unlink_leaves_foreign_file_in_stamp_dir() {
 # that a later run can still remove it, and must count as an error.
 prune_failure_keeps_manifest_entry() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" beta
@@ -3048,8 +3031,7 @@ prune_failure_keeps_manifest_entry() {
 manifest_write_failure_restores_repointed_link() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3090,8 +3072,7 @@ manifest_write_failure_restores_repointed_link() {
 manifest_write_failure_restores_pruned_links() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" beta
@@ -3224,8 +3205,7 @@ hook_exits_zero_on_init_failure() {
 install_hooks_ignores_similar_named_script() {
 	local custom
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3263,8 +3243,7 @@ install_hooks_ignores_similar_named_script() {
 install_hooks_leaves_unrelated_command_alone() {
 	local file got groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3315,8 +3294,7 @@ install_hooks_leaves_unrelated_command_alone() {
 install_hooks_recognizes_shell_options_before_script() {
 	local file n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3371,8 +3349,7 @@ install_hooks_recognizes_shell_options_before_script() {
 install_hooks_replaces_operand_option_command() {
 	local file opt n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3439,8 +3416,7 @@ install_hooks_replaces_operand_option_command() {
 install_hooks_replaces_terminal_option_command() {
 	local file opt n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3482,8 +3458,7 @@ install_hooks_replaces_terminal_option_command() {
 # the old target directory, where nothing ever finds it again.
 relink_failure_keeps_old_link_and_entry() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" alpha
@@ -3516,8 +3491,7 @@ relink_failure_keeps_old_link_and_entry() {
 # test with 'absent', which reads exactly like a skill that was deleted.
 unreadable_skill_directory_keeps_link() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/one" beta
@@ -3563,8 +3537,7 @@ unreadable_skill_directory_keeps_link() {
 # deleted skill either, so a recorded link survives the permission problem.
 unreadable_skill_file_keeps_link() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/one" beta
@@ -3712,8 +3685,7 @@ lock_vanish_is_retried() {
 # repoint a name at a different skill.
 unreadable_name_not_repointed() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3801,8 +3773,7 @@ relink_creation_failure_restores_old_link() {
 install_hooks_replaces_other_installation() {
 	local file sources assembly n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3879,8 +3850,7 @@ check_malformed_hook_command() {
 install_hooks_replaces_malformed_option_command() {
 	local file
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3918,8 +3888,7 @@ install_hooks_replaces_malformed_option_command() {
 install_hooks_replaces_unbalanced_quote_command() {
 	local file n groups other spaced
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4020,8 +3989,7 @@ write_two_hook_groups() {
 install_hooks_removes_bad_duplicate_beside_valid_entry() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4079,8 +4047,7 @@ install_hooks_removes_bad_duplicate_beside_valid_entry() {
 install_hooks_repairs_one_and_removes_other_bad_entries() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4156,8 +4123,7 @@ print(entry.get(sys.argv[2], "<missing>"))' "$1" "$2" 2>/dev/null
 install_hooks_replacement_resets_timeout() {
 	local file sources assembly got
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4341,8 +4307,7 @@ dangling_symlink_component_refused() {
 stale_lock_with_reused_pid_is_cleared() {
 	local lock pid start
 	if ! probe_ps_reports_start_time; then
-		printf '    (skipped: ps does not report process start times here)\n'
-		return
+		case_skip "ps does not report process start times here"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4476,8 +4441,7 @@ hook_bounded_without_tmpdir() {
 install_hooks_normalizes_exact_command_entry() {
 	local file got n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4559,8 +4523,7 @@ write_session_hook_settings() {
 install_hooks_replaces_sh_invocation() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4619,8 +4582,7 @@ install_hooks_replaces_sh_invocation() {
 install_hooks_replaces_missing_interpreter() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4688,8 +4650,7 @@ write_installed_hook_settings() {
 install_hooks_replaces_non_executable_direct_script() {
 	local copy file n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4802,8 +4763,7 @@ make_meddling_cp() {
 install_hooks_refuses_when_settings_changed_underneath() {
 	local file shims n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -5009,8 +4969,6 @@ manifest_two_column_lines_still_parse() {
 # ------------------------------------------------------------------- main ---
 
 main() {
-	local version
-
 	if [ ! -f "$SOURCE_SCRIPT" ]; then
 		printf 'test-link-skills: cannot find %s\n' "$SOURCE_SCRIPT" >&2
 		exit 2
@@ -5031,14 +4989,11 @@ main() {
 		exit 1
 	fi
 	# Only now is ROOT known to be a fresh directory this run created: arm the
-	# case_cleanup trap so a failed mktemp above never runs case_cleanup against an empty
+	# traps, so a failed mktemp above never runs case_cleanup against an empty
 	# or unverified ROOT.
-	trap case_cleanup EXIT INT TERM
+	case_arm_traps
 
-	# BASH_VERSION must be read by the interpreter under test, not by this one.
-	# shellcheck disable=SC2016
-	version=$("$BASH_BIN" -c 'printf "%s" "$BASH_VERSION"')
-	printf 'interpreter: %s (bash %s)\n\n' "$BASH_BIN" "$version"
+	case_tap_header
 
 	case_run fresh_install_auto_init
 	case_run idempotent_rerun
@@ -5184,11 +5139,7 @@ main() {
 	case_run manifest_two_column_lines_still_parse
 	case_run mktemp_failure_arms_no_cleanup
 
-	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
-	if [ "$FAIL" -gt 0 ]; then
-		return 1
-	fi
-	return 0
+	case_tap_summary
 }
 
 main "$@"
