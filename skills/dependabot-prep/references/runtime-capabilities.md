@@ -32,24 +32,30 @@ It does not decide who may write to a PR: a host-local slot does not serialize
 Mac/server writers, and exact-head leases catch branch races, not duplicate
 comments or all repository-wide operations. Never claim otherwise.
 
-When repository policy prescribes claims (a `coordination.claims` block), the
-claim ref is the sole per-PR writer authority. SKILL.md's _Inventory and host
-setup_ and _Prepare and babysit_ steps define the claim lifecycle — which
-command runs when, and the token each one takes. There is no hand-edited path
-into that ref: an expired claim is taken over only by the claim command's own
-takeover. Without a `coordination.claims` block, skip every claim step — the
-host-local heavy-tree slot and the exact-head push lease are the only
-coordination in effect.
+Claims are in effect when the repository policy carries a `coordination.claims`
+block, or when the repository is under `mento-protocol/` and carries no policy
+file; [Mento defaults](mento-defaults.md) supplies the claim document and the
+pinned runner for the second case. Then the claim ref is the sole per-PR writer
+authority. SKILL.md's _Inventory and host setup_ and _Prepare and babysit_
+steps define the claim lifecycle — which command runs when, and the token each
+one takes. There is no hand-edited path into that ref: an expired claim is
+taken over only by the claim command's own takeover. Outside those two cases,
+skip every claim step — the host-local heavy-tree slot and the exact-head push
+lease are the only coordination in effect.
 
-If repository policy defines `coordination.claims.command`, run that exact
-command (no shell interpolation of PR numbers — pass them as separate argv
-entries) to claim, renew, release or take over a PR. Run it from a checkout that
-tracks the live base ref — prefix the runner's working-directory flag, such as
-`pnpm --dir <checkout>`, when the current directory is a candidate tree — so a
-candidate branch cannot supply its own policy. Read `namespace`,
-`ttlMinutes`, `renewMinutes`, `graceMinutes`, `minRemainingSeconds`, `label`,
-`requiredBefore` and `advisoryBefore` as this run's operating parameters; do
-not invent defaults. `requiredBefore`'s `branch-push` and `advisoryBefore`'s
+The claims command is the repository policy's `coordination.claims.command`
+when the policy defines one, and otherwise the pinned runner in
+[Mento defaults](mento-defaults.md#the-runner-and-its-working-directory). Run
+it exactly, with no shell interpolation of PR numbers — pass them as separate
+argv entries — to claim, renew, release or take over a PR, and from a working
+directory no candidate tree controls: a policy command that is a repository
+script runs from a checkout that tracks the live base ref, with the runner's
+working-directory flag such as `pnpm --dir <checkout>` when the current
+directory is a candidate tree; the pinned runner runs from a directory outside
+every checkout. Read `namespace`, `ttlMinutes`, `renewMinutes`,
+`graceMinutes`, `minRemainingSeconds`, `label`, `requiredBefore` and
+`advisoryBefore` from the loaded document — the policy, or the copied default —
+as this run's operating parameters; do not invent defaults. `requiredBefore`'s `branch-push` and `advisoryBefore`'s
 `long-wait` name the `push` and `wait` gates; the other three names match their
 gates exactly. SKILL.md's push, review-request and wait steps say which
 operations run inside `claims guard`. Exit codes: 0 proceed; 10/11/14/15 act as

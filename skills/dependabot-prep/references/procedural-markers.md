@@ -3,13 +3,15 @@
 Use this byte contract with SKILL.md for every top-level response, review reply
 and preparation-summary comment, in every repository, with or without claims.
 Only the `claim` field is conditional. The executable form of this contract is
-the claim command's `markers` group: the policy's `coordination.claims.command`
-followed by `markers summary --input <job.json>`, by
+the claim command's `markers` group: the claims command in effect — the
+policy's `coordination.claims.command`, or the pinned runner from
+[Mento defaults](mento-defaults.md) — followed by
+`markers summary --input <job.json>`, by
 `markers build --input <job.json> [--out <body.txt>]`, or by
 `markers verify --input <check.json>`; `verify` exits 0 when the comment is what
 the inputs produce and 2 when it is not, so exit 2 there is a mismatch, not a
-usage error. With the Mento command, that first form
-reads `pnpm dependabot:claim -- markers summary --input <job.json>`. The
+usage error. Under a policy whose command is a repository script, that first
+form reads `pnpm dependabot:claim -- markers summary --input <job.json>`. The
 `@mento-protocol/issues/markers` subpath is the same contract and applies only
 where the package is an installed dependency.
 `fixtures/comment-marker-vectors.json` is the byte authority for cross-runtime
@@ -64,14 +66,14 @@ marker bytes. Do not append a final newline.
 The marker revision is the policy's `markers.revision`, or its claims block's
 `markerRevision` when `markers.revision` is absent (`coordination.claims` in a
 `dependabot-prep-policy:v4` document, top-level `claims` in a
-`mento-issues-config:v1` document); `v2` is the default. Use v1 when repository
-policy prescribes no claims, or when that revision is `v1`:
+`mento-issues-config:v1` document); `v2` is the default. Use v1 when no claims
+are in effect, or when that revision is `v1`:
 
 `<!-- dependabot-prep-comment:v1 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> -->`
 
 `<!-- dependabot-prep-reply:v1 ... -->` carries the same fields on a review reply.
 
-Use v2 when repository policy prescribes claims and that revision is `v2`:
+Use v2 when claims are in effect and the loaded config's marker revision is `v2`:
 
 `<!-- dependabot-prep-comment:v2 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> claim=<40hex> -->`
 
@@ -89,8 +91,9 @@ The repository's configured summary marker — `reporting.prCommentMarker`, or
 discovery token for the one summary comment per author login per PR. Keep it
 unchanged, on the comment's first line.
 
-When policy prescribes claims, it also names a claim-marker schema
-(`reporting.prCommentClaimMarkerSchema`), whatever the marker revision: the
+When claims are in effect, the loaded config also names a claim-marker schema
+(`reporting.prCommentClaimMarkerSchema`, `mento-dependabot-preparation:v2`
+when the document names none), whatever the marker revision: the
 revision governs comment and reply markers only, and `markers summary` always
 emits the claim line. Add that line on its own line immediately after the
 discovery marker:
@@ -108,7 +111,7 @@ For example, with the Mento schema:
 `reporting.prCommentMarker`. When the configured discovery marker is a different
 line, keep the configured marker first and use `v2Line` alone.
 
-A repository that prescribes no claims keeps the discovery marker alone.
+A repository with no claims in effect keeps the discovery marker alone.
 
 `pr` is decimal with no leading zero. `run-sha256` is `sha256(utf8(<owner run
 id>))` and is provenance only: it records which run last wrote the body. The
