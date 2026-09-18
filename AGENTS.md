@@ -54,10 +54,11 @@ requested the change, given for that specific PR.
 
 `.github/workflows/claude.yml` reviews a PR when it opens and when a draft
 becomes ready, not on later pushes. That automatic review skips fork PRs and
-bot-authored PRs. An organization member with write access gets a later
-review with an `@claude review` comment; the workflow refuses that comment
-on a fork PR. The workflow needs the `CLAUDE_CODE_OAUTH_TOKEN` repository
-secret.
+bot-authored PRs. For a later review, or any other request, write `@claude`
+in a PR or issue comment, a review, or a new issue. The workflow accepts
+that from an organization owner or member, the action then requires write
+access, and the workflow refuses a request on a fork PR. The workflow needs
+the `CLAUDE_CODE_OAUTH_TOKEN` secret.
 
 ## Promoting a skill from a personal library
 
