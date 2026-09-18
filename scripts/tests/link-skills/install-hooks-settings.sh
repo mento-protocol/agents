@@ -10,7 +10,7 @@
 # the same second, a file that already runs the hook, the reservation of a
 # backup name, and a file another process rewrites mid-run.
 #
-# Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
+# Reads: CASE_DIR, HOME, LS, SOURCE_LIB.
 # Writes: LS_TEST_CP_SETTINGS and LS_TEST_CP_STATE, which the cp shim reads,
 # LS_OUT and LS_RC, which assert.sh reads, and nothing outside the case's own
 # throwaway HOME and CASE_DIR.
@@ -175,9 +175,9 @@ install_hooks_leaves_minified_file_unchanged() {
 # snapshot.
 install_hooks_backup_name_is_reserved() {
 	local text base first second
-	text=$(sed -n '/^backup_path() {/,/^}/p' "$SOURCE_SCRIPT")
+	text=$(sed -n '/^backup_path() {/,/^}/p' "$SOURCE_LIB/install-hooks.sh")
 	if [ -z "$text" ]; then
-		case_fail "backup_path was not found in $SOURCE_SCRIPT"
+		case_fail "backup_path was not found in $SOURCE_LIB/install-hooks.sh"
 		return
 	fi
 	base="$CASE_DIR/settings.json.bak-19700101T000000Z"

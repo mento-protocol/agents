@@ -8,22 +8,19 @@
 // `module::name` are all read the way bash reads them. A file the parser
 // rejects fails the check rather than passing unmeasured.
 //
-// A file listed in shell-size-baseline.txt is a legacy monolith that predates
-// the limits. It may not grow past the line count recorded there. The
-// recorded count must match the file: a file that shrinks fails the check
-// until its entry is lowered, so the allowance only ever ratchets down. An
-// entry at or below the file limit is refused, and only the named legacy file
-// may be listed.
+// shell-size-baseline.txt held the legacy monoliths that predate the limits.
+// It now holds no entries, and LEGACY_FILES is empty, so every entry is
+// refused and no file can buy an exemption. The file stays in the tree: the
+// ratchet below refuses its removal, and refuses an entry that returns.
 //
 // When SHELL_SIZE_BASE names a git ref (CI sets it to the pull request's
 // base branch), the change is also compared with that ref:
 // - a baseline entry higher than the base's, or one the base no longer has,
 //   is refused, so a change cannot grow a legacy file and raise its entry;
 // - the baseline file may not be removed once the base has it, so a removed
-//   exemption cannot return later;
-// - in a legacy file, a function over the limit is refused unless the base
-//   already has a function of that name at that length or longer, so the
-//   monolith cannot gain oversized functions while its total stays flat.
+//   exemption cannot return later.
+// The legacy-function comparison still runs for any file the baseline lists;
+// with no entries left, nothing reaches it.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
@@ -34,11 +31,13 @@ import sh from "mvdan-sh";
 const MAX_FILE_LINES = Number(process.env.MAX_FILE_LINES ?? 500);
 const MAX_FUNCTION_LINES = Number(process.env.MAX_FUNCTION_LINES ?? 50);
 
-// The only file the baseline may name. A new script never joins this list:
-// it is written within the limits from the start. scripts/test-link-skills.sh
-// was listed too, and left once the runner held no case and fit both limits;
-// the ratchet refuses a removed entry that returns, so it cannot come back.
-const LEGACY_FILES = ["scripts/link-skills.sh"];
+// The files the baseline may name. It is empty: every legacy monolith has
+// been split, so no path may be listed any more. A new script never joins
+// this list, because it is written within the limits from the start.
+// scripts/test-link-skills.sh and scripts/link-skills.sh were listed and left
+// once each fit both limits; the ratchet refuses a removed entry that
+// returns, so neither can come back.
+const LEGACY_FILES = [];
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -104,8 +103,12 @@ function readBaseline(tracked) {
     if (limits.has(file))
       problem(`${BASELINE_REL} names ${file} twice; keep one entry`);
     if (!LEGACY_FILES.includes(file)) {
+      const allowed =
+        LEGACY_FILES.length === 0
+          ? "no file may be listed any more"
+          : `only ${LEGACY_FILES.join(" ")} may be listed`;
       problem(
-        `${BASELINE_REL} names ${file}, which is not a legacy file; only ${LEGACY_FILES.join(" ")} may be listed`,
+        `${BASELINE_REL} names ${file}, which is not a legacy file; ${allowed}`,
       );
     }
     if (!tracked.includes(file))
