@@ -48,10 +48,15 @@ DEFAULT_ASSEMBLY_DIR=""
 STAMP_DIR=""
 MANIFEST=""
 LOCK_DIR=""
+# This script as the real file behind any symlink, and the directory its topic
+# modules are sourced from. Both are set at load time, in the boot section
+# below, before the first module is sourced.
 SCRIPT_PATH=""
+LIB_DIR=""
 FETCH_INTERVAL_HOURS=6
 # 1 while the session hook is the command being run. A session start must end
 # well whatever it finds, so every refusal below reports one line and exits 0.
+# shellcheck disable=SC2034 # read by output.sh
 HOOK_MODE=0
 
 # Serialisation of the runs that write the assembly. A run waits this long for a
@@ -67,6 +72,7 @@ LOCK_PROBLEM=""
 
 # -1 until the probe below has run: 1 on a filesystem that treats 'Foo' and
 # 'foo' as one name, 0 otherwise.
+# shellcheck disable=SC2034 # read by names.sh
 CASE_INSENSITIVE=-1
 
 ERRORS=0
@@ -121,112 +127,11 @@ REPOINT_OLD=()
 PRUNEBACK_NAME=()
 PRUNEBACK_TARGET=()
 
-# ---------------------------------------------------------------- output ----
+# ------------------------------------------------------------------ boot ----
 
-info() {
-	if [ "$QUIET" -eq 0 ]; then
-		printf '%s\n' "$*"
-	fi
-}
-
-err() {
-	printf '%s: %s\n' "$PROG" "$*" >&2
-	ERRORS=$((ERRORS + 1))
-}
-
-# A problem worth naming that must not change the exit code.
-warn() {
-	if [ "$QUIET" -eq 0 ]; then
-		printf '%s: warning: %s\n' "$PROG" "$*" >&2
-	fi
-}
-
-# A refusal that stops the run. The session hook is the exception: a session
-# must start whatever this script finds, so in hook mode the same refusal is
-# one '[link-skills]' line and exit 0. Every other command keeps exit 2.
-die() {
-	if [ "$HOOK_MODE" -eq 1 ]; then
-		hook_say "$*"
-		exit 0
-	fi
-	printf '%s: %s\n' "$PROG" "$*" >&2
-	exit 2
-}
-
-hook_say() {
-	printf '[%s] %s\n' "$PROG" "$*"
-}
-
-# No here documents anywhere in this script: bash 3.2 writes every here
-# document to a temporary file, which fails on hosts with a locked-down /tmp.
-# The help text names $HOME literally; it is documentation, not an expansion.
-# shellcheck disable=SC2016
-usage() {
-	printf '%s\n' \
-		'Usage: link-skills.sh [options] [command]' \
-		'' \
-		'Commands:' \
-		'  link            Link every skill in every source into the assembly' \
-		'                  directory and refresh the runtime symlinks. Default.' \
-		'  check           Report source and assembly state. Creates and removes' \
-		'                  no links. Fetches every git source every time it' \
-		'                  runs, and writes a fetch-* stamp in the' \
-		'                  .skill-links.d directory inside the assembly.' \
-		'  hook            SessionStart hook mode. Notifies only: it changes no' \
-		'                  clone and no link, and takes no lock. Silent when' \
-		'                  current, never fails. Bounded by 25 seconds of wall' \
-		'                  clock, everything it starts included.' \
-		'  install-hooks   Add the SessionStart hook to Claude Code and Codex.' \
-		'                  A settings file that already runs the hook is left' \
-		'                  byte for byte as it is. An entry that runs a' \
-		'                  link-skills.sh whose path no longer exists, whose' \
-		'                  path is relative, whose --sources or --assembly' \
-		'                  names another installation, or whose arguments are' \
-		'                  not a hook run, is rewritten to the command this' \
-		'                  run is for; an entry that runs another script is' \
-		'                  left alone.' \
-		'  unlink          Remove the links this script recorded, and the manifest.' \
-		'  help            Print this text.' \
-		'' \
-		'Options:' \
-		'  --sources FILE  Sources list (default: $HOME/.agents/skill-sources)' \
-		'  --assembly DIR  Assembly directory (default: $HOME/.agents/skills).' \
-		'                  It must not be, or hold, $HOME/.claude/skills or' \
-		'                  $HOME/.codex/skills: those two paths become links' \
-		'                  into the assembly, so either would be a link into' \
-		'                  itself.' \
-		'  --quiet         Print only problems.' \
-		'' \
-		'Environment:' \
-		'  SKILL_SOURCES_FILE                   Same as --sources.' \
-		'  SKILLS_ASSEMBLY_DIR                  Same as --assembly.' \
-		'  SKILL_SOURCES_FETCH_INTERVAL_HOURS   Hook fetch throttle in hours' \
-		'                                       (default 6, 0 fetches every' \
-		'                                       time). check always fetches.' \
-		'' \
-		'Exit codes:' \
-		'  0  nothing to report' \
-		'  1  at least one problem was reported' \
-		'  2  wrong usage, or no source to work from: no sources file, a' \
-		'     sources file that is not a regular file, names one of the' \
-		'     assembly control paths, or lists no source, a path whose' \
-		'     components are not all directories, or an assembly directory' \
-		'     that is or holds a runtime skills path' \
-		'' \
-		'Sources file format, one entry per line. Each path names the directory' \
-		'whose immediate children are skill directories holding a SKILL.md:' \
-		'  /absolute/path/to/skills' \
-		'  ~/code/my-skills/skills' \
-		'  ~/code/agents/skills' \
-		'' \
-		"Lines that are empty or start with '#' are ignored. A relative path" \
-		'resolves against the directory that holds the sources file. A line is' \
-		'one path, spaces in the path included. The one token refused is a' \
-		"trailing 'auto-update'. A line that names no directory is reported" \
-		'as a missing source.'
-}
-
-# ----------------------------------------------------------------- paths ----
+# The arguments of this run, kept for boot_fail alone: a module that will
+# not load has to be reported before the option parser has run.
+BOOT_ARGS=("$@")
 
 script_abs_path() {
 	local src dir base phys
@@ -260,6 +165,50 @@ resolve_symlink_path() {
 	done
 	printf '%s\n' "$p"
 }
+
+# Report the module that would not load, and stop. Every other reporting
+# function lives in a module, so this one prints for itself. A session start
+# must end well, so a hook run gets the bracketed line hook_say prints and
+# exit 0; every other command gets the line die prints and exit 2.
+#
+# The option parser has not run yet, so the command is read here by main's own
+# rule: the first argument that is neither an option nor the operand of
+# --sources or --assembly, with -h and --help naming help wherever they sit.
+boot_fail() {
+	local arg cmd="" skip=0
+	for arg in ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}; do
+		if [ "$skip" = 1 ]; then
+			skip=0
+			continue
+		fi
+		case "$arg" in
+		--sources | --assembly) skip=1 ;;
+		-h | --help) cmd="help" ;;
+		-*) ;;
+		*) [ -n "$cmd" ] || cmd=$arg ;;
+		esac
+	done
+	if [ "$cmd" = "hook" ]; then
+		printf '[%s] cannot load %s\n' "$PROG" "$LIB_DIR/$1"
+		exit 0
+	fi
+	printf '%s: cannot load %s\n' "$PROG" "$LIB_DIR/$1" >&2
+	exit 2
+}
+
+# Where the real file is, and where its topic modules are. The "[ -r ]" test
+# before every "." is load-bearing: "." is a special builtin, so on bash 3.2
+# an operand it cannot read ends the shell before "|| boot_fail" can run.
+SCRIPT_PATH=$(resolve_symlink_path "$0")
+LIB_DIR="${SCRIPT_PATH%/*}/lib/link-skills"
+[ -r "$LIB_DIR/output.sh" ] || boot_fail output.sh
+# shellcheck source=lib/link-skills/output.sh
+. "$LIB_DIR/output.sh" || boot_fail output.sh
+[ -r "$LIB_DIR/names.sh" ] || boot_fail names.sh
+# shellcheck source=lib/link-skills/names.sh
+. "$LIB_DIR/names.sh" || boot_fail names.sh
+
+# ----------------------------------------------------------------- paths ----
 
 # Quote a path for embedding in a shell command string. A path made only of
 # safe characters is left as it is, so the common case stays readable.
@@ -610,70 +559,6 @@ expand_home() {
 	'${HOME}/'*) p="$HOME/${p#\$\{HOME\}/}" ;;
 	esac
 	printf '%s\n' "$p"
-}
-
-# ------------------------------------------------------- names and casing ----
-
-# A manifest name must be one plain basename. Anything else could name a path
-# outside the assembly directory, so it never licenses a removal.
-name_is_safe() {
-	case "$1" in
-	"" | "." | "..") return 1 ;;
-	*/*) return 1 ;;
-	*$'\t'* | *$'\n'*) return 1 ;;
-	esac
-	return 0
-}
-
-# A manifest field is one tab-separated line, so neither a tab nor a newline can
-# round-trip through it.
-field_is_safe() {
-	case "$1" in
-	*$'\t'* | *$'\n'*) return 1 ;;
-	esac
-	return 0
-}
-
-to_lower() {
-	printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
-
-# Probe the assembly directory once per run. macOS formats APFS and HFS+
-# case-insensitive by default, so 'Foo' and 'foo' are one entry there and the
-# name comparisons below must agree with the filesystem.
-detect_case_insensitive() {
-	local probe base up
-	if [ "$CASE_INSENSITIVE" -ge 0 ]; then
-		return 0
-	fi
-	CASE_INSENSITIVE=0
-	if [ ! -d "$ASSEMBLY_DIR" ]; then
-		return 0
-	fi
-	if ! probe=$(mktemp "$ASSEMBLY_DIR/.skill-links.case.XXXXXX" 2>/dev/null); then
-		return 0
-	fi
-	base=$(basename "$probe")
-	up=$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')
-	if [ "$up" != "$base" ] && [ -e "$ASSEMBLY_DIR/$up" ]; then
-		CASE_INSENSITIVE=1
-	fi
-	rm -f "$probe"
-	return 0
-}
-
-# Two entry names that the filesystem in use cannot tell apart.
-names_equal() {
-	if [ "$1" = "$2" ]; then
-		return 0
-	fi
-	if [ "$CASE_INSENSITIVE" != "1" ]; then
-		return 1
-	fi
-	if [ "$(to_lower "$1")" = "$(to_lower "$2")" ]; then
-		return 0
-	fi
-	return 1
 }
 
 # --------------------------------------------------------------- sources ----

@@ -11,7 +11,7 @@
 # _write_two_hook_groups is private to this file; write_installed_hook_settings
 # comes from install-hooks-common.sh.
 #
-# Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
+# Reads: CASE_DIR, HOME, LS.
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
 # assert.sh reads, and nothing outside the case's own throwaway HOME and
 # CASE_DIR.
@@ -116,7 +116,7 @@ _install_hooks_broken_quote_on_spaced_path() {
 	rm -f "$1" "$1".bak-*
 	spaced="$CASE_DIR/my repos/link-skills.sh"
 	mkdir -p "$CASE_DIR/my repos"
-	cp "$SOURCE_SCRIPT" "$spaced"
+	fixtures_install_script "$spaced"
 	LS="$spaced"
 	write_installed_hook_settings "$1" "bash '$spaced' \\\"hook"
 	case_run_script install-hooks

@@ -86,7 +86,11 @@ into this repository:
 
 `scripts/link-skills.sh` is the only supported way to install these skills
 into `~/.agents/skills`. It must stay compatible with bash 3.2 (the default
-`/bin/bash` on macOS) and pass `shellcheck` clean.
+`/bin/bash` on macOS) and pass `shellcheck` clean. The entry point sources its
+topic modules from `scripts/lib/link-skills/` by absolute path from an explicit
+ordered list, so it needs that directory next to it; the harness copies the
+script and the directory into every fixture through
+`fixtures_install_script`.
 
 After changing it, or after changing any file of its harness, run the harness,
 which CI runs on Ubuntu and macOS:

@@ -3,14 +3,36 @@
 # fixtures.sh - builders for the trees a case runs against: skill directories,
 # the sources file, and the bare repository with its seed and company clones.
 #
-# Reads: CASE_DIR and SOURCE_SCRIPT (fixtures_company), HOME
-# (fixtures_write_sources, fixtures_add_source), SEED (fixtures_push_beta).
+# Reads: SOURCE_SCRIPT and SOURCE_LIB (fixtures_install_script), CASE_DIR
+# (fixtures_company), HOME (fixtures_write_sources, fixtures_add_source), SEED
+# (fixtures_push_beta).
 # Writes: BARE, SEED, COMPANY, LS, and files under CASE_DIR and HOME.
 #
 # CASE_DIR and HOME belong to case.sh and stay globals rather than arguments:
 # every one of the hundreds of fixture calls means the current case's HOME and
 # case directory, so passing them would touch every call site, not one line.
 # SEED is this module's own: fixtures_company sets it for fixtures_push_beta.
+
+# Put the script under test at an absolute path, with the modules it sources
+# next to it. The entry point looks for them at <dir of the real file>/lib, so
+# a fixture that held the script alone would not run at all. Takes the path the
+# script is installed at.
+fixtures_install_script() {
+	local dest dir
+	dest=$1
+	case "$dest" in
+	/*) ;;
+	*)
+		case_fail "fixtures_install_script: $dest is not absolute"
+		return 1
+		;;
+	esac
+	dir=$(dirname "$dest")
+	mkdir -p "$dir/lib"
+	cp "$SOURCE_SCRIPT" "$dest"
+	chmod +x "$dest"
+	cp -R "$SOURCE_LIB" "$dir/lib/"
+}
 
 fixtures_git() {
 	local d
@@ -40,8 +62,8 @@ fixtures_add_source() {
 }
 
 # A bare repository, a seed clone that pushes commits, and the clone the
-# sources file points at. The script under test is committed into the repo so
-# that the clone looks exactly like a coworker's checkout.
+# sources file points at. The script under test and its modules are committed
+# into the repo so that the clone looks exactly like a coworker's checkout.
 fixtures_company() {
 	BARE="$CASE_DIR/remote.git"
 	SEED="$CASE_DIR/seed"
@@ -51,8 +73,7 @@ fixtures_company() {
 	git clone --quiet "$BARE" "$SEED" 2>/dev/null
 	git -C "$SEED" symbolic-ref HEAD refs/heads/main
 	mkdir -p "$SEED/scripts"
-	cp "$SOURCE_SCRIPT" "$SEED/scripts/link-skills.sh"
-	chmod +x "$SEED/scripts/link-skills.sh"
+	fixtures_install_script "$SEED/scripts/link-skills.sh"
 	fixtures_skill "$SEED/skills" alpha
 	fixtures_git "$SEED" add -A
 	fixtures_git "$SEED" commit -q -m "init"

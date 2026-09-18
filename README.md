@@ -393,6 +393,11 @@ before the install-hooks topics that call it. The cases for
 `scripts/validate-skills.mjs` are
 `node:test` files under `scripts/tests/validate-skills/`.
 
+`scripts/link-skills.sh` is an entry point as well: it sources its topic
+modules from `scripts/lib/link-skills/` by absolute path from an explicit
+ordered list, so a copy of the script needs that directory beside it. The
+harness copies both into every fixture.
+
 Each package's own README documents its usage; run its suite directly with
 `pnpm --filter <package-name> test` during development.
 
