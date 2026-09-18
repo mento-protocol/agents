@@ -1,0 +1,28 @@
+{
+  "schema": "mento-issues-config:v1",
+  "repository": "mento-protocol/example",
+  "claims": {
+    "schema": "mento-claims-config:v1",
+    "profile": "pr",
+    "namespace": "refs/mento-claims/v1/pr",
+    "scopeTemplate": "refs/mento-claims/v1/pr/{pr}",
+    "label": null,
+    "ttlMinutes": 30,
+    "renewMinutes": 10,
+    "graceMinutes": 10,
+    "minRemainingSeconds": 360,
+    "maxTtlMinutes": 360,
+    "requiredBefore": ["branch-push", "review-request"],
+    "advisoryBefore": ["summary-comment", "inline-reply", "long-wait"],
+    "allowOverrides": false,
+    "allowCloudWriters": false,
+    "command": [
+      "pnpm",
+      "--config.ignore-scripts=true",
+      "--package=@mento-protocol/issues@0.2.0",
+      "dlx",
+      "mento-issues"
+    ],
+    "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
+  }
+}

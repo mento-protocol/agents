@@ -67,6 +67,16 @@ and unknown authority values. A bespoke policy is optional: otherwise discover t
 ordinary contribution/CI contract and use this skill's defaults. Do not require
 a Mento schema or invent a playbook. Missing rules/check evidence remains unknown.
 
+Claims are in effect when the base policy carries a `coordination.claims`
+block, or when the repository is under `mento-protocol/` and carries no policy
+file. In the second case [Mento defaults](references/mento-defaults.md) supplies
+the claim document — a byte-exact fixture copied outside every checkout with
+only `repository` substituted — the pinned runner, the Mento veto labels and
+the Mento needs-decision paths. Run every claims command from a working
+directory outside every checkout (`pnpm --dir <claims_cwd> …`), so no candidate
+tree decides the registry or the policy. Every "when claims are in effect"
+below covers both cases.
+
 If repository policy names a `workflow.revision`, an `executionModel`, or a policy
 schema version this skill was not written against, stop before any write, report
 both versions, and do not infer an unrecognized field's meaning. A stale skill
@@ -117,8 +127,8 @@ resolve the thread and read back its state. Apply the same open-PR, draft, hold
 and repository-policy restrictions as other preparation writes. For repositories
 with a revision-pinned preparation policy, resolve threads only when that policy
 explicitly permits thread resolution; a matching workflow revision alone does
-not grant this capability. Thread resolution remains disabled when policy
-prescribes claims: the current claim tool has no guarded resolution gate.
+not grant this capability. Thread resolution remains disabled when claims are
+in effect: the current claim tool has no guarded resolution gate.
 Continue other authorized preparation work and report the remaining thread gate.
 Leave unaddressed or declined findings open. Confidence alone is not proof of a
 fix. Do not resolve threads during audit or read-only work.
@@ -128,7 +138,7 @@ fix. Do not resolve threads during audit or read-only work.
 Inventory selected PRs with complete paginated issue comments, inline comments,
 review bodies/threads, holds, history, checks and reviews. Record URLs, versions,
 head/ref, live base, holds, coupling, work needed and per-PR verdict. When
-repository policy prescribes claims, read each PR's claim with `claims read` and
+claims are in effect, read each PR's claim with `claims read` and
 record its owner (owner run id, owner host, owner login), the claim expiry, and
 whether this run held, renewed or took over that claim. `claims read` writes
 nothing; `claims claim` takes an expired claim over, so never read with it.
@@ -145,8 +155,8 @@ any heavy work. That slot is per host, not per repository: one slot covers this
 host whatever repository this run targets, so a run for another repository
 cannot start a second heavy tree beside it. Use the repository's documented
 host slot path when prescribed. Never start a second heavy tree on this host
-and never clear someone else's slot. When repository policy
-prescribes claims, the claim ref is the sole per-PR writer authority: claim each
+and never clear someone else's slot. When claims are in
+effect, the claim ref is the sole per-PR writer authority: claim each
 selected PR before its first write to that PR, never write to a PR another live
 owner holds, and never take a claim from another owner except through the claim
 command's own takeover. Before the first write, require the loaded policy to
@@ -194,7 +204,7 @@ CI/review waits, work on independent PRs without a second heavy tree.
    coupling. Run normal installs, generators and checks with hooks enabled and
    effective serialization. Do not upgrade global tools or host security settings.
    Inspect dependency/generated deltas; keep unrelated updates out.
-4. When repository policy prescribes claims, claim every family member in
+4. When claims are in effect, claim every family member in
    ascending PR number before evaluating consolidation — `claims family claim
 --prs <a,b,c>` acquires that order and rolls back in reverse; if any claim in
    the family fails, release every claim this run took for that family and skip
@@ -204,7 +214,7 @@ CI/review waits, work on independent PRs without a second heavy tree.
    PRs, leave siblings open and never count siblings ready through the target's
    CI.
 5. Review the complete diff. Before pushing re-read open/draft/hold, identity,
-   ref/head, auto-merge and live base. When repository policy prescribes claims,
+   ref/head, auto-merge and live base. When claims are in effect,
    run the push itself through `claims guard --gate push`, which re-reads the
    claim ref, requires its LOCK oid to equal this run's token and its `ownerRunId`
    to equal this run's owner, refuses to start the push on a mismatch, and stops
@@ -223,7 +233,7 @@ CI/review waits, work on independent PRs without a second heavy tree.
    readiness claims.
    **Incident:** 2026-09-09, frontend-monorepo #872 and #922: immediate API
    assertions failed after successful pushes; fresh Git and API reads agreed.
-6. When repository policy prescribes claims, read the claim payload first: if
+6. When claims are in effect, read the claim payload first: if
    its `reviewRequestedHead` equals the current head, a review was already
    requested for this exact head by this run or by the owner it took over
    from — do not request again. Otherwise request through
@@ -240,7 +250,7 @@ CI/review waits, work on independent PRs without a second heavy tree.
 7. Monitor required checks/reviews bound to the current head and expected producer
    (App/workflow for check runs, creator/integration for statuses). Missing/zero
    checks, stale reviews or ambiguous duplicate contexts are not green. Use events
-   or bounded backoff polling. When repository policy prescribes claims, run the
+   or bounded backoff polling. When claims are in effect, run the
    wait under `claims guard --gate wait`, which renews the claim for the wait's
    lifetime; by default this gate is advisory and prints its verdict without
    stopping the command, and a policy that lists `long-wait` in `requiredBefore`
@@ -263,7 +273,7 @@ alternatives and remaining work. Paginate discovery, verify authorship, preserve
 human additions and prior decisions (mark superseded choices). Never overwrite
 another author's comment. Keep inline replies on their original threads.
 
-When repository policy prescribes claims, check the claim before posting a summary
+When claims are in effect, check the claim before posting a summary
 comment or an inline reply: `claims verify --gate summary-comment` or
 `claims verify --gate inline-reply` while this run holds the claim, `claims read`
 otherwise. These two gates are advisory only while the policy's `advisoryBefore`
@@ -304,8 +314,8 @@ copied from the old comment. After a normal release and a fresh acquisition
 there is no takeover, so omit the field. A v2
 summary comment keeps the repository's v1 marker line first and adds the v2 claim
 line immediately after it; see
-[procedural markers](references/procedural-markers.md). When policy prescribes
-claims, build these markers with the claim command's `markers` group rather than
+[procedural markers](references/procedural-markers.md). When claims are in
+effect, build these markers with the claim command's `markers` group rather than
 by hand. Record the comment URL with
 `claims renew --set summaryCommentUrl=<url>`. When policy names a claim label,
 treat it purely as a projection of the ref: it is present exactly while the ref
@@ -377,7 +387,7 @@ Perform a final live sweep and report each PR:
   include sourced research and recommendation, not merely the label.
 - **read-only**: inventory, findings, risks and proposed repairs; no mutations.
 
-When repository policy prescribes claims, release the claim whenever this run
+When claims are in effect, release the claim whenever this run
 stops acting on the PR, terminal or not; work in progress stays in the checkout
 and the next writer re-claims. Use the outcome that matches the verdict:
 `ready-for-maintainer-decision`, `needs-decision`, `blocked`, `skipped`,

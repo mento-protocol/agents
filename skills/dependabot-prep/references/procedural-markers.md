@@ -64,14 +64,14 @@ marker bytes. Do not append a final newline.
 The marker revision is the policy's `markers.revision`, or its claims block's
 `markerRevision` when `markers.revision` is absent (`coordination.claims` in a
 `dependabot-prep-policy:v4` document, top-level `claims` in a
-`mento-issues-config:v1` document); `v2` is the default. Use v1 when repository
-policy prescribes no claims, or when that revision is `v1`:
+`mento-issues-config:v1` document); `v2` is the default. Use v1 when no claims
+are in effect, or when that revision is `v1`:
 
 `<!-- dependabot-prep-comment:v1 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> -->`
 
 `<!-- dependabot-prep-reply:v1 ... -->` carries the same fields on a review reply.
 
-Use v2 when repository policy prescribes claims and that revision is `v2`:
+Use v2 when claims are in effect and the loaded config's marker revision is `v2`:
 
 `<!-- dependabot-prep-comment:v2 root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40 lowercase hex> visible-body-sha256=<64hex> operator-sha256=<64hex> decision=<fixed|wont-fix> claim=<40hex> -->`
 
@@ -89,8 +89,9 @@ The repository's configured summary marker — `reporting.prCommentMarker`, or
 discovery token for the one summary comment per author login per PR. Keep it
 unchanged, on the comment's first line.
 
-When policy prescribes claims, it also names a claim-marker schema
-(`reporting.prCommentClaimMarkerSchema`), whatever the marker revision: the
+When claims are in effect, the loaded config also names a claim-marker schema
+(`reporting.prCommentClaimMarkerSchema`, `mento-dependabot-preparation:v2`
+when the document names none), whatever the marker revision: the
 revision governs comment and reply markers only, and `markers summary` always
 emits the claim line. Add that line on its own line immediately after the
 discovery marker:
@@ -108,7 +109,7 @@ For example, with the Mento schema:
 `reporting.prCommentMarker`. When the configured discovery marker is a different
 line, keep the configured marker first and use `v2Line` alone.
 
-A repository that prescribes no claims keeps the discovery marker alone.
+A repository with no claims in effect keeps the discovery marker alone.
 
 `pr` is decimal with no leading zero. `run-sha256` is `sha256(utf8(<owner run
 id>))` and is provenance only: it records which run last wrote the body. The

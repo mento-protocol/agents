@@ -57,8 +57,12 @@ detection at every object level. Reject any duplicate key instead of accepting
 a parser's first-key or last-key result. Require a recognized schema, exact
 repository and base binding, complete identity tuples, and fail-closed history
 outcomes. Treat an unknown authority value, invalid value, or mismatched binding
-as a blocker. The file is optional for other repositories. Its absence does not
-weaken the conservative defaults in this skill.
+as a blocker. The file is optional. Its absence does not weaken the
+conservative defaults in this skill, and for a repository under
+`mento-protocol/` it selects the claim document and the Mento rules in
+[Mento defaults](mento-defaults.md). Decide absence on the exact base blob,
+never on a candidate tree: a branch that deletes the file does not change
+which document this run claims under.
 
 Resolve the target as follows:
 
