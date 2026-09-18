@@ -238,6 +238,12 @@ LIB_DIR="${SCRIPT_PATH%/*}/lib/link-skills"
 [ -r "$LIB_DIR/hook.sh" ] || boot_fail hook.sh
 # shellcheck source=lib/link-skills/hook.sh
 . "$LIB_DIR/hook.sh" || boot_fail hook.sh
+[ -r "$LIB_DIR/unlink.sh" ] || boot_fail unlink.sh
+# shellcheck source=lib/link-skills/unlink.sh
+. "$LIB_DIR/unlink.sh" || boot_fail unlink.sh
+[ -r "$LIB_DIR/config.sh" ] || boot_fail config.sh
+# shellcheck source=lib/link-skills/config.sh
+. "$LIB_DIR/config.sh" || boot_fail config.sh
 
 # --------------------------------------------------------- install-hooks ----
 
@@ -1017,142 +1023,35 @@ cmd_install_hooks() {
 	return "$rc"
 }
 
-# ---------------------------------------------------------------- unlink ----
-
-cmd_unlink() {
-	local i name target spelling entry cur stamp kept rc
-	rc=0
-	# The lock lives inside the assembly, so the directory has to be there
-	# before the lock can be taken. An assembly that was never created holds
-	# nothing to remove, and this leaves an empty directory behind, which the
-	# next link run fills.
-	if ! mkdir -p "$ASSEMBLY_DIR"; then
-		err "could not create the assembly directory $ASSEMBLY_DIR"
-		return 1
-	fi
-	take_lock wait || rc=$?
-	if [ "$rc" -eq 2 ]; then
-		err "$LOCK_PROBLEM"
-		return 1
-	fi
-	if [ "$rc" -ne 0 ]; then
-		err "another $PROG run holds the lock $LOCK_DIR; nothing was removed. Wait for it to finish, then run '$PROG unlink' again"
-		return 1
-	fi
-	# The manifest is the only list of links this script may remove. A symlink
-	# at that path would hand the run someone else's list, so it is refused
-	# before a single name is read from it.
-	if ! manifest_path_usable; then
-		return 1
-	fi
-	detect_case_insensitive
-	# The manifest is the list of what may be removed. A run that cannot read
-	# it removes nothing.
-	if ! load_manifest; then
-		err "could not read the manifest $MANIFEST; nothing was removed"
-		return 1
-	fi
-	kept=0
-	OUT_COUNT=0
-	i=0
-	while [ "$i" -lt "$MAN_COUNT" ]; do
-		name=${MAN_NAME[$i]}
-		target=${MAN_TARGET[$i]}
-		spelling=${MAN_SRC_SPELLING[$i]-}
-		i=$((i + 1))
-		entry="$ASSEMBLY_DIR/$name"
-		if [ ! -L "$entry" ]; then
-			continue
-		fi
-		cur=$(link_target_abs "$entry")
-		# A dangling link that no longer points where the manifest recorded
-		# belongs to whoever made it.
-		if [ ! -e "$entry" ]; then
-			if [ "$cur" != "$target" ]; then
-				info "$PROG: $name is a foreign dangling link to $cur; left alone"
-				continue
-			fi
-			# A link this run could not remove is still this script's to remove
-			# later, so its manifest entry stays.
-			if remove_link "$entry"; then
-				info "$PROG: removed dangling $name"
-			else
-				err "could not remove the dangling link $entry; kept its manifest entry"
-				record_output "$name" "$target" "$spelling"
-				kept=$((kept + 1))
-			fi
-			continue
-		fi
-		if same_path "$cur" "$target"; then
-			if remove_link "$entry"; then
-				info "$PROG: removed $name"
-			else
-				err "could not remove $entry; kept its manifest entry"
-				record_output "$name" "$target" "$spelling"
-				kept=$((kept + 1))
-			fi
-		fi
-	done
-	if [ "$kept" -gt 0 ]; then
-		write_manifest || true
-		info "$PROG: kept the manifest $MANIFEST for $kept link(s) that are still there"
-	elif rm -f "$MANIFEST"; then
-		info "$PROG: removed the manifest $MANIFEST"
-	else
-		err "could not remove the manifest $MANIFEST"
-	fi
-	remove_stamp_dir
-	if [ "$ERRORS" -gt 0 ]; then
-		return 1
-	fi
-	return 0
-}
-
-# Only the fetch stamps this script writes, then the directory itself. A stamp
-# is named 'fetch-<digits>' by stamp_file, so any other name in the directory
-# belongs to someone else and is left alone, and the directory stays whenever
-# anything is left in it. No wildcard ever runs in the assembly root, where the
-# user's own files are.
-remove_stamp_dir() {
-	local stamp base
-	if [ ! -d "$STAMP_DIR" ] || [ -L "$STAMP_DIR" ]; then
-		return 0
-	fi
-	for stamp in "$STAMP_DIR"/*; do
-		base=$(basename "$stamp")
-		case "$base" in
-		fetch-*) ;;
-		*) continue ;;
-		esac
-		case "${base#fetch-}" in
-		"" | *[!0-9]*) continue ;;
-		esac
-		if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then
-			if ! rm -f "$stamp" 2>/dev/null || [ -e "$stamp" ]; then
-				err "could not remove the fetch stamp $stamp"
-			fi
-		fi
-	done
-	if [ ! -d "$STAMP_DIR" ]; then
-		return 0
-	fi
-	if rmdir "$STAMP_DIR" 2>/dev/null; then
-		return 0
-	fi
-	# Anything the loop left behind is not this script's, and keeping the
-	# directory for it is the right outcome, not a failure.
-	if dir_is_empty "$STAMP_DIR"; then
-		err "could not remove the fetch stamp directory $STAMP_DIR"
-	else
-		info "$PROG: kept $STAMP_DIR: it holds entries this script did not write"
-	fi
-	return 0
-}
-
 # ------------------------------------------------------------------ main ----
 
+# Errexit is live here and in every phase below it, so each phase is called as
+# a bare simple command: a guard would turn errexit off inside it. cmd is
+# declared and initialised here, the only place that may declare it;
+# main_parse_options, main_select_command and main_require_home reach that same
+# variable, and a second 'local' would lose every write.
 main() {
-	local cmd arg rc spelled
+	local cmd=""
+	main_parse_options "$@"
+	main_select_command
+	main_require_home
+	config_resolve_sources
+	config_resolve_assembly
+	config_default_paths
+	config_guard_sources
+
+	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
+	# it is registered once, here, for every command below.
+	trap release_lock EXIT
+
+	main_dispatch "$cmd"
+}
+
+# The options and the command this run was given. Writes its caller's cmd, and
+# the option globals QUIET, SOURCES_OPT, SOURCES_SET, ASSEMBLY_OPT and
+# ASSEMBLY_SET, which config.sh reads.
+main_parse_options() {
+	local arg
 	cmd=""
 	while [ $# -gt 0 ]; do
 		arg=$1
@@ -1195,7 +1094,11 @@ main() {
 		esac
 		shift
 	done
+}
 
+# The command this run performs, and the one mode that depends on it. Reads
+# and writes its caller's cmd through bash's dynamic scoping; writes HOOK_MODE.
+main_select_command() {
 	if [ -z "$cmd" ]; then
 		cmd="link"
 	fi
@@ -1211,130 +1114,39 @@ main() {
 	# HOME and works in an environment that has none.
 	if [ "$cmd" = "help" ]; then
 		usage
-		return 0
+		# main is called once, bare, as the last line of this file, and the
+		# EXIT trap is registered after this point, so leaving the process here
+		# is exactly what returning 0 from main did.
+		exit 0
 	fi
+}
 
-	# Through a symlink on PATH, $0 is the link. The clone the script really
-	# lives in decides the sources-file bootstrap and the hook marker, so the
-	# chain is followed to the real file.
-	SCRIPT_PATH=$(resolve_symlink_path "$0")
-
-	# Every default below is derived from HOME, and so are the runtime links, so
-	# an unset or relative HOME must stop the run before anything is written.
-	# The hook runs on every session start and must never fail a session.
+# Every default below is derived from HOME, and so are the runtime links, so
+# an unset or relative HOME must stop the run before anything is written.
+# The hook runs on every session start and must never fail a session. Reads
+# its caller's cmd through bash's dynamic scoping.
+main_require_home() {
 	case "${HOME-}" in
 	/*) ;;
 	*)
 		if [ "$cmd" = "hook" ]; then
 			hook_say "HOME is not set"
-			return 0
+			# main is called once, bare, as the last line of this file, and the
+			# EXIT trap is registered after this point, so leaving the process
+			# here is exactly what returning 0 from main did.
+			exit 0
 		fi
 		die "HOME is not set to an absolute path; set HOME before running $PROG"
 		;;
 	esac
+}
 
-	if [ "$SOURCES_SET" -eq 1 ]; then
-		case "$SOURCES_OPT" in
-		"") die "--sources needs a file path" ;;
-		"/") die "--sources must name a file, not /" ;;
-		esac
-		SOURCES_FILE=$SOURCES_OPT
-	elif [ -n "${SKILL_SOURCES_FILE-}" ]; then
-		SOURCES_FILE=${SKILL_SOURCES_FILE}
-	else
-		SOURCES_FILE="$HOME/.agents/skill-sources"
-	fi
-	# A path is judged two ways, and the root is refused under either reading.
-	# By text, so that a spelling whose '..' segments climb to the root, such as
-	# '/tmp/..' or '/a/../..', is refused whatever those names resolve to. By
-	# the filesystem, so that '/.' and a symlink to / are refused too: only the
-	# physical path shows what they really name.
-	SOURCES_FILE=$(abs_path "$(expand_home "$SOURCES_FILE")")
-	case "$(normalize_lexical "$SOURCES_FILE")" in
-	"" | "/") die "the sources file must not be / or empty" ;;
-	esac
-	# canonical_path prints nothing, and a failed assignment would leave the
-	# spelling behind empty, so the path is held here for the refusal to name.
-	spelled=$SOURCES_FILE
-	if ! SOURCES_FILE=$(canonical_path "$spelled"); then
-		die "the sources file path $spelled runs through a name that is not a directory"
-	fi
-	case "$SOURCES_FILE" in
-	"" | "/") die "the sources file must not be / or empty" ;;
-	esac
-
-	if [ "$ASSEMBLY_SET" -eq 1 ]; then
-		case "$ASSEMBLY_OPT" in
-		"") die "--assembly needs a directory path" ;;
-		"/") die "--assembly must name a directory below /, not / itself" ;;
-		esac
-		ASSEMBLY_DIR=$ASSEMBLY_OPT
-	elif [ -n "${SKILLS_ASSEMBLY_DIR-}" ]; then
-		ASSEMBLY_DIR=${SKILLS_ASSEMBLY_DIR}
-	else
-		ASSEMBLY_DIR="$HOME/.agents/skills"
-	fi
-	ASSEMBLY_DIR=$(abs_path "$(expand_home "$ASSEMBLY_DIR")")
-	case "$(normalize_lexical "$ASSEMBLY_DIR")" in
-	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
-	esac
-	spelled=$ASSEMBLY_DIR
-	if ! ASSEMBLY_DIR=$(canonical_path "$spelled"); then
-		die "the assembly directory path $spelled runs through a name that is not a directory"
-	fi
-	case "$ASSEMBLY_DIR" in
-	"" | "/") die "the assembly directory must not be / or empty: it would put every skill link in the filesystem root" ;;
-	esac
-	ASSEMBLY_DIR=${ASSEMBLY_DIR%/}
-	# Refused here, before any command runs and so before any directory, link
-	# or manifest is created: an assembly that is or holds a runtime skills
-	# path would be linked into itself.
-	if assembly_holds_runtime_link; then
-		die "the assembly directory must not contain a runtime skills path: $ASSEMBLY_DIR"
-	fi
-	MANIFEST="$ASSEMBLY_DIR/.skill-links"
-	STAMP_DIR="$ASSEMBLY_DIR/.skill-links.d"
-	LOCK_DIR="$ASSEMBLY_DIR/.skill-links.lock"
-
-	# The same two paths with no option and no environment, canonicalized the
-	# same way, so that the hook command names only what really differs. A
-	# default that cannot be resolved is compared as it is spelled; nothing
-	# reads or writes it, and the run's own paths were judged above.
-	DEFAULT_SOURCES_FILE="$HOME/.agents/skill-sources"
-	DEFAULT_SOURCES_FILE=$(canonical_path "$DEFAULT_SOURCES_FILE" 2>/dev/null) ||
-		DEFAULT_SOURCES_FILE="$HOME/.agents/skill-sources"
-	DEFAULT_ASSEMBLY_DIR="$HOME/.agents/skills"
-	DEFAULT_ASSEMBLY_DIR=$(canonical_path "$DEFAULT_ASSEMBLY_DIR" 2>/dev/null) ||
-		DEFAULT_ASSEMBLY_DIR="$HOME/.agents/skills"
-	DEFAULT_ASSEMBLY_DIR=${DEFAULT_ASSEMBLY_DIR%/}
-
-	# The sources file is read by every command and written by the bootstrap in
-	# ensure_sources_file. A path that names one of this script's own control
-	# paths inside the assembly would have a run read its bookkeeping as a list
-	# of sources, or write a sources file over it. The comparison is on the
-	# canonical paths, so an alias is refused as well as the plain spelling,
-	# and it runs before anything is read, written or created.
-	if sources_is_control_path; then
-		die "the sources file must not be an assembly control file: $SOURCES_FILE"
-	fi
-	# Judged once, here, for every command: the readers below all reach this
-	# path, and the bootstrap in ensure_sources_file writes to it.
-	if ! sources_path_usable; then
-		die "the sources file $SOURCES_FILE is not a regular file; move it aside, then run '$PROG link' again"
-	fi
-	# Judged here too, so that every command refuses the line in its own
-	# voice, including the two that never read the sources file themselves.
-	refuse_auto_update_token
-
-	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
-	case "$FETCH_INTERVAL_HOURS" in '' | *[!0-9]*) FETCH_INTERVAL_HOURS=6 ;; esac
-	# '08' is a number of hours, never an octal literal, so the base is stated.
-	FETCH_INTERVAL_HOURS=$((10#$FETCH_INTERVAL_HOURS))
-
-	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
-	# it is registered once, here, for every command below.
-	trap release_lock EXIT
-
+# The command itself, run against the paths the phases above resolved. cmd is
+# this function's own copy, taken as an argument: main_dispatch is main's last
+# call and nothing reads main's cmd after it.
+main_dispatch() {
+	local cmd rc
+	cmd=$1
 	rc=0
 	case "$cmd" in
 	link)

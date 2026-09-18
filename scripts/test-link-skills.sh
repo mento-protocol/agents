@@ -101,6 +101,8 @@ SAVED_PATH=""
 . "$HERE/tests/link-skills/manifest.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/manifest.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/names-and-casing.sh
 . "$HERE/tests/link-skills/names-and-casing.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/names-and-casing.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/options.sh
+. "$HERE/tests/link-skills/options.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/options.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/output.sh
 . "$HERE/tests/link-skills/output.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/output.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/paths.sh
@@ -177,6 +179,7 @@ main() {
 	cases_names_and_casing
 	cases_lock_take
 	cases_output
+	cases_options
 	cases_harness
 
 	case_tap_summary
