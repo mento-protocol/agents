@@ -34,7 +34,7 @@ cmd_unlink() {
 	else
 		err "could not remove the manifest $MANIFEST"
 	fi
-	remove_stamp_dir
+	_unlink_remove_stamp_dir
 	if [ "$ERRORS" -gt 0 ]; then
 		return 1
 	fi
@@ -131,7 +131,7 @@ _unlink_remove_recorded() {
 # belongs to someone else and is left alone, and the directory stays whenever
 # anything is left in it. No wildcard ever runs in the assembly root, where the
 # user's own files are.
-remove_stamp_dir() {
+_unlink_remove_stamp_dir() {
 	local stamp base
 	if [ ! -d "$STAMP_DIR" ] || [ -L "$STAMP_DIR" ]; then
 		return 0
