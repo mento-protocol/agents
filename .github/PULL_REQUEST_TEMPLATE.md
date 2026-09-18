@@ -22,7 +22,7 @@
 
 ## Ship Checklist
 
-- [ ] PR title follows the [conventions](https://www.notion.so/Git-Branching-and-Commit-Message-Conventions-18f66f7d06444cfcbac5725ffbc7c04a?pvs=4#9355048863c549ef92fe210a8a1298aa)
+- [ ] PR title is a [Conventional Commits](https://www.conventionalcommits.org/) header, `type(scope): summary`, as `commitlint.config.mjs` enforces for commits
 - [ ] Performed a self-review of my own changes
 - [ ] `node scripts/validate-skills.mjs` and the affected test suites pass
 - [ ] Nothing in the diff breaks the public-readership rules in `AGENTS.md`
