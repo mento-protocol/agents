@@ -175,9 +175,9 @@ install_hooks_leaves_minified_file_unchanged() {
 # snapshot.
 install_hooks_backup_name_is_reserved() {
 	local text base first second
-	text=$(sed -n '/^backup_path() {/,/^}/p' "$SOURCE_LIB/install-hooks.sh")
+	text=$(sed -n '/^_install_hooks_backup_path() {/,/^}/p' "$SOURCE_LIB/install-hooks.sh")
 	if [ -z "$text" ]; then
-		case_fail "backup_path was not found in $SOURCE_LIB/install-hooks.sh"
+		case_fail "_install_hooks_backup_path was not found in $SOURCE_LIB/install-hooks.sh"
 		return
 	fi
 	base="$CASE_DIR/settings.json.bak-19700101T000000Z"
@@ -186,14 +186,14 @@ install_hooks_backup_name_is_reserved() {
 	# reservation the first one made on disk.
 	first=$(
 		eval "$text"
-		backup_path "$base"
+		_install_hooks_backup_path "$base"
 	)
 	second=$(
 		eval "$text"
-		backup_path "$base"
+		_install_hooks_backup_path "$base"
 	)
 	if [ -z "$first" ] || [ -z "$second" ]; then
-		case_fail "backup_path returned nothing: '$first' and '$second'"
+		case_fail "_install_hooks_backup_path returned nothing: '$first' and '$second'"
 		return
 	fi
 	if [ "$first" = "$second" ]; then

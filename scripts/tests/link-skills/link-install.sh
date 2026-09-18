@@ -2,7 +2,7 @@
 #
 # link-install.sh - the cases for the install half of the "link" command in
 # scripts/link-skills.sh: link_one, link_all, ensure_assembly, adopt_runtime,
-# runtime_link and the summary line they report.
+# _runtime_link and the summary line they report.
 #
 # The cases cover the first run on a machine, a second run that changes
 # nothing, a skill that arrives with a pull, a name two sources offer, a name a

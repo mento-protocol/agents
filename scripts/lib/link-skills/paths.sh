@@ -6,15 +6,15 @@
 # "paths" section of the single-file script.
 #
 # Reads: SCRIPT_PATH, SOURCES_FILE, DEFAULT_SOURCES_FILE, ASSEMBLY_DIR,
-# DEFAULT_ASSEMBLY_DIR (script_command_prefix).
+# DEFAULT_ASSEMBLY_DIR (paths_script_command_prefix).
 # Writes: nothing.
 #
-# canonical_path is called from a command substitution inside a condition, so
+# paths_canonical is called from a command substitution inside a condition, so
 # errexit is off in it and its walk reports a refused path by returning 1.
 
 # Quote a path for embedding in a shell command string. A path made only of
 # safe characters is left as it is, so the common case stays readable.
-shell_quote() {
+paths_shell_quote() {
 	local p
 	p=$1
 	case "$p" in
@@ -32,19 +32,19 @@ shell_quote() {
 # Every command this script prints for a person to run, and the command
 # install-hooks stores, is built from this: advice that dropped the options
 # would name the default installation, which is not the one being reported on.
-script_command_prefix() {
+paths_script_command_prefix() {
 	local out
-	out="bash $(shell_quote "$SCRIPT_PATH")"
+	out="bash $(paths_shell_quote "$SCRIPT_PATH")"
 	if [ "$SOURCES_FILE" != "$DEFAULT_SOURCES_FILE" ]; then
-		out="$out --sources $(shell_quote "$SOURCES_FILE")"
+		out="$out --sources $(paths_shell_quote "$SOURCES_FILE")"
 	fi
 	if [ "$ASSEMBLY_DIR" != "$DEFAULT_ASSEMBLY_DIR" ]; then
-		out="$out --assembly $(shell_quote "$ASSEMBLY_DIR")"
+		out="$out --assembly $(paths_shell_quote "$ASSEMBLY_DIR")"
 	fi
 	printf '%s\n' "$out"
 }
 
-abs_path() {
+paths_abs() {
 	local p
 	p=$1
 	case "$p" in
@@ -56,7 +56,7 @@ abs_path() {
 # A plain 'cd' in bash is logical: it collapses a '..' against the spelling it
 # was given instead of asking the filesystem, which is the one thing this
 # function is here to avoid. -P makes the kernel answer.
-phys_dir() {
+paths_phys_dir() {
 	if [ ! -d "$1" ]; then
 		return 1
 	fi
@@ -82,9 +82,9 @@ phys_dir() {
 # names only while the alias is gone.
 #
 # The links a source recorded are tied to its line by the lexical spelling
-# load_sources keeps beside this path, so a source that is only away keeps its
+# sources_load keeps beside this path, so a source that is only away keeps its
 # links even though this answer then names nothing.
-phys_prefix_path() {
+paths_phys_prefix() {
 	local p seg cur rest phys had_noglob oldifs off
 	p=$1
 	cur="/"
@@ -117,7 +117,7 @@ phys_prefix_path() {
 			cur=$(dirname "$cur")
 			continue
 		fi
-		if phys=$(phys_dir "${cur%/}/$seg"); then
+		if phys=$(paths_phys_dir "${cur%/}/$seg"); then
 			cur=$phys
 			continue
 		fi
@@ -141,7 +141,7 @@ phys_prefix_path() {
 # spelling ('/a/alias/../skills' and '/a/skills' name different directories
 # when 'alias' is a symlink), and the spelling is what ties a source that is
 # temporarily away to the links it recorded.
-spell_source() {
+paths_spell_source() {
 	local p seg out had_noglob oldifs
 	p=$1
 	out=""
@@ -167,7 +167,7 @@ spell_source() {
 	printf '%s\n' "${out:-/}"
 }
 
-normalize_lexical() {
+paths_normalize_lexical() {
 	local p seg out had_noglob oldifs
 	p=$1
 	out=""
@@ -206,8 +206,8 @@ normalize_lexical() {
 # text first would collapse the '..' against 'alias' and answer /path.
 #
 # Once a segment does not exist, the remaining segments are applied by text
-# alone, exactly as normalize_lexical does: a '..' pops the segment before it,
-# and nothing is created to resolve a name. Without that, '--assembly
+# alone, exactly as paths_normalize_lexical does: a '..' pops the segment
+# before it, and nothing is created to resolve a name. Without that, '--assembly
 # $HOME/new/..' would have 'new' created under $HOME while the links landed in
 # $HOME itself. A '..' at the root stays at the root, so no spelling can climb
 # above /.
@@ -219,7 +219,7 @@ normalize_lexical() {
 # return of 1 and nothing printed: the caller knows which path it asked about
 # and reports it. Printing here as well would put two diagnostics on one bad
 # path, and the session hook owes a session start one line.
-canonical_path() {
+paths_canonical() {
 	local p
 	p=$1
 	if [ -z "$p" ]; then
@@ -230,13 +230,13 @@ canonical_path() {
 	/*) ;;
 	*) p="$PWD/$p" ;;
 	esac
-	_canonical_walk
+	_paths_canonical_walk
 }
 
-# Walk the segments of the path canonical_path holds in its local p, from the
+# Walk the segments of the path paths_canonical holds in its local p, from the
 # root. The walk state is this function's own. It reads the caller's p and
 # writes nothing the caller declared.
-_canonical_walk() {
+_paths_canonical_walk() {
 	local cur rest nondir seg had_noglob oldifs
 	nondir=0
 	cur="/"
@@ -263,7 +263,7 @@ _canonical_walk() {
 		if [ -n "$rest" ] && [ "$nondir" -eq 1 ]; then
 			return 1
 		fi
-		_canonical_step "$seg"
+		_paths_canonical_step "$seg"
 	done
 	if [ -z "$rest" ]; then
 		printf '%s\n' "$cur"
@@ -276,9 +276,9 @@ _canonical_walk() {
 	return 0
 }
 
-# Apply one segment to the walk. It reads and writes _canonical_walk's cur,
-# rest and nondir through dynamic scoping, and declares none of the three.
-_canonical_step() {
+# Apply one segment to the walk. It reads and writes _paths_canonical_walk's
+# cur, rest and nondir through dynamic scoping, and declares none of the three.
+_paths_canonical_step() {
 	local seg next phys
 	seg=$1
 	# Past the last segment that exists: text alone from here on.
@@ -312,17 +312,17 @@ _canonical_step() {
 	return 0
 }
 
-same_path() {
+paths_same() {
 	local a b pa pb
 	a=$1
 	b=$2
 	if [ "$a" = "$b" ]; then
 		return 0
 	fi
-	if ! pa=$(phys_dir "$a"); then
+	if ! pa=$(paths_phys_dir "$a"); then
 		return 1
 	fi
-	if ! pb=$(phys_dir "$b"); then
+	if ! pb=$(paths_phys_dir "$b"); then
 		return 1
 	fi
 	if [ "$pa" = "$pb" ]; then
@@ -332,7 +332,7 @@ same_path() {
 }
 
 # Absolute target of a symlink, without requiring the target to exist.
-link_target_abs() {
+paths_link_target_abs() {
 	local l t d
 	l=$1
 	t=$(readlink "$l")
@@ -348,25 +348,25 @@ link_target_abs() {
 
 # Filesystem noise that no runtime treats as content. A ~/.claude/skills that
 # holds only a Finder .DS_Store counts as empty.
-dir_is_empty() {
+paths_dir_is_empty() {
 	local first
 	first=$(find "$1" -mindepth 1 -maxdepth 1 \
 		! -name .DS_Store ! -name .localized ! -name Thumbs.db 2>/dev/null | head -n 1)
 	[ -z "$first" ]
 }
 
-remove_dir_noise() {
+paths_remove_dir_noise() {
 	rm -f "$1/.DS_Store" "$1/.localized" "$1/Thumbs.db" 2>/dev/null || true
 }
 
-dir_first_entries() {
+paths_dir_first_entries() {
 	find "$1" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null |
 		head -n 3 | tr '\n' ' '
 }
 
 # The case patterns below are literal text to match, not expansions.
 # shellcheck disable=SC2088,SC2016
-expand_home() {
+paths_expand_home() {
 	local p
 	p=$1
 	case "$p" in

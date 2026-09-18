@@ -2,8 +2,9 @@
 #
 # sources-entries.sh - the cases for the "sources" section of
 # scripts/link-skills.sh that are about the directories the file lists:
-# load_sources, report_missing_sources, unreadable_has, unread_source_of,
-# collect_candidates, dup_has and target_source_unavailable.
+# sources_load, sources_report_missing, candidates_unreadable_has,
+# _candidates_unread_source_of, candidates_collect, candidates_dup_has and
+# candidates_target_source_unavailable.
 #
 # The cases cover a relative source that is away, a source listed twice by its
 # own spelling and through an alias, a duplicate name that keeps the link it

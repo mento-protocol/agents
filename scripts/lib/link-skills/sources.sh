@@ -5,15 +5,15 @@
 # holds the first half of the "sources" section of the single-file script.
 #
 # Reads: SOURCES_FILE (every function), MANIFEST, LOCK_DIR, STAMP_DIR,
-# ASSEMBLY_DIR (control_path_matches, sources_is_control_path), SRC_COUNT,
-# SRC_PATH, SRC_RAW (load_sources, report_missing_sources).
-# Writes: SRC_COUNT, SRC_PATH, SRC_RAW, SRC_SPELLING (load_sources).
+# ASSEMBLY_DIR (_sources_control_path_matches, sources_is_control_path),
+# SRC_COUNT, SRC_PATH, SRC_RAW (sources_load, sources_report_missing).
+# Writes: SRC_COUNT, SRC_PATH, SRC_RAW, SRC_SPELLING (sources_load).
 #
-# load_sources reads the sources file through the redirection on its while
-# loop, so _load_source_line and _record_source inherit that stdin. Neither
+# sources_load reads the sources file through the redirection on its while
+# loop, so _sources_load_line and _sources_record inherit that stdin. Neither
 # may run a command that reads stdin: it would swallow the rest of the file.
 
-trim() {
+_sources_trim() {
 	printf '%s' "$1" | sed -e 's/^[[:space:]][[:space:]]*//' -e 's/[[:space:]][[:space:]]*$//'
 }
 
@@ -37,7 +37,7 @@ sources_path_usable() {
 # assembly root whose name starts with '.skill-links'. The comparison is
 # textual, so the caller decides which spelling of the sources path to hand
 # in.
-control_path_matches() {
+_sources_control_path_matches() {
 	local p base dir
 	p=$1
 	case "$p" in
@@ -59,7 +59,7 @@ control_path_matches() {
 # them as a list of sources, or writing a bootstrap sources file over one,
 # would destroy the record of what this script may remove later.
 #
-# The path is judged by text and by identity. canonical_path resolves every
+# The path is judged by text and by identity. paths_canonical resolves every
 # directory it walks through but leaves a final symlink component as it is
 # spelled, so '--sources <alias>' with the alias pointing at the manifest
 # passes every textual test while naming the manifest itself: the run would
@@ -70,7 +70,7 @@ sources_is_control_path() {
 	if [ -z "$ASSEMBLY_DIR" ]; then
 		return 1
 	fi
-	if control_path_matches "$SOURCES_FILE"; then
+	if _sources_control_path_matches "$SOURCES_FILE"; then
 		return 0
 	fi
 	# Device and inode, so an alias to the manifest is caught whatever chain
@@ -82,7 +82,7 @@ sources_is_control_path() {
 	# The other control paths need not exist yet, so the chain is followed by
 	# hand and the end of it is compared as text again.
 	real=$(resolve_symlink_path "$SOURCES_FILE")
-	if [ "$real" != "$SOURCES_FILE" ] && control_path_matches "$real"; then
+	if [ "$real" != "$SOURCES_FILE" ] && _sources_control_path_matches "$real"; then
 		return 0
 	fi
 	return 1
@@ -96,24 +96,24 @@ sources_is_control_path() {
 # temporarily away must not turn its own path into one, so every other line is
 # the path, and one that names no directory is reported as a missing source by
 # the readers below.
-refuse_auto_update_token() {
+sources_refuse_auto_update_token() {
 	local line trimmed
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
 	while IFS= read -r line || [ -n "$line" ]; do
-		trimmed=$(trim "$line")
+		trimmed=$(_sources_trim "$line")
 		case "$trimmed" in
 		"" | "#"*) continue ;;
 		*[[:space:]]auto-update)
-			die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
+			output_die "unexpected token after the path in $SOURCES_FILE: $trimmed; auto-update is not supported, the session hook only notifies"
 			;;
 		esac
 	done <"$SOURCES_FILE"
 	return 0
 }
 
-load_sources() {
+sources_load() {
 	local line dir
 	SRC_COUNT=0
 	if [ ! -f "$SOURCES_FILE" ]; then
@@ -121,23 +121,23 @@ load_sources() {
 	fi
 	dir=$(dirname "$SOURCES_FILE")
 	while IFS= read -r line || [ -n "$line" ]; do
-		_load_source_line "$line" "$dir"
+		_sources_load_line "$line" "$dir"
 	done <"$SOURCES_FILE"
 }
 
 # One line of the sources file, turned into the two forms a source is
 # recorded in. $2 is the directory the sources file sits in, which a relative
 # path is taken from.
-_load_source_line() {
+_sources_load_line() {
 	local line dir trimmed path spelling resolved
 	line=$1
 	dir=$2
-	trimmed=$(trim "$line")
+	trimmed=$(_sources_trim "$line")
 	case "$trimmed" in
 	"" | "#"*) return 0 ;;
 	esac
 	path="$trimmed"
-	path=$(expand_home "$path")
+	path=$(paths_expand_home "$path")
 	case "$path" in
 	/*) ;;
 	*) path="$dir/$path" ;;
@@ -147,7 +147,7 @@ _load_source_line() {
 	# points at, so after the alias is gone only this spelling still ties
 	# them to the line that is still listed. It is not collapsed by text:
 	# two lines that collapse to the same text can name two directories.
-	spelling=$(spell_source "$path")
+	spelling=$(paths_spell_source "$path")
 	case "$spelling" in
 	/) ;;
 	*/) spelling=${spelling%/} ;;
@@ -157,7 +157,7 @@ _load_source_line() {
 	# would answer '/a/alias/../skills' with /a/skills while the kernel
 	# opens /b/skills, and the run would link from a directory the line
 	# never names.
-	resolved=$(phys_prefix_path "$path")
+	resolved=$(paths_phys_prefix "$path")
 	if [ -n "$resolved" ]; then
 		path="$resolved"
 	else
@@ -165,14 +165,14 @@ _load_source_line() {
 	fi
 	# A spelling that cannot round-trip through the tab-separated manifest
 	# is recorded as none; the physical rule below still covers it.
-	if ! field_is_safe "$spelling"; then
+	if ! names_field_is_safe "$spelling"; then
 		spelling=""
 	fi
 	case "$path" in
 	/) ;;
 	*/) path=${path%/} ;;
 	esac
-	_record_source "$trimmed" "$path" "$spelling"
+	_sources_record "$trimmed" "$path" "$spelling"
 }
 
 # Add one source to the SRC_ table, unless a line already named it. Two lines
@@ -180,7 +180,7 @@ _load_source_line() {
 # look like a duplicate of itself and none would link. Spellings that differ
 # in case, in a symlink, or in a trailing slash still name one directory, so
 # the comparison is by identity.
-_record_source() {
+_sources_record() {
 	local trimmed path spelling j dupidx
 	trimmed=$1
 	path=$2
@@ -208,12 +208,12 @@ _record_source() {
 	SRC_COUNT=$((SRC_COUNT + 1))
 }
 
-report_missing_sources() {
+sources_report_missing() {
 	local i
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		if [ ! -d "${SRC_PATH[$i]}" ]; then
-			err "source directory does not exist: ${SRC_PATH[$i]} (from '${SRC_RAW[$i]}' in $SOURCES_FILE)"
+			output_err "source directory does not exist: ${SRC_PATH[$i]} (from '${SRC_RAW[$i]}' in $SOURCES_FILE)"
 		fi
 		i=$((i + 1))
 	done

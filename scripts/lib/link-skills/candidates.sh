@@ -13,8 +13,8 @@
 # CAND_NAME, CAND_TARGET, CAND_SRC_SPELLING, DUP_COUNT, DUP_NAME,
 # UNREAD_COUNT, UNREAD_NAME, UNREAD_SRC, SRC_OK, SRC_FOUND.
 #
-# collect_candidates runs under 'run_link || true', 'if ! cmd_check' and
-# 'cmd_hook || true', so errexit is off in its whole subtree.
+# candidates_collect runs under '_runtime_run_link || true', 'if ! check_cmd'
+# and '_hook_cmd || true', so errexit is off in its whole subtree.
 
 # True when a child of a source is there but cannot be searched, so that every
 # file test below it answers 'absent'. A directory whose search bit is off is
@@ -22,7 +22,7 @@
 # listing is the ACL case. Either way the directory says nothing about whether
 # it holds a SKILL.md, and a deleted skill is the one thing it must not be
 # mistaken for.
-skill_dir_unsearchable() {
+_candidates_skill_dir_unsearchable() {
 	local d
 	d=$1
 	if [ ! -x "$d" ]; then
@@ -37,7 +37,7 @@ skill_dir_unsearchable() {
 # A skill name whose directory could not be read this run. Its link and its
 # manifest entry are kept: an unreadable directory is a transient problem, not
 # a skill that was deleted.
-unreadable_has() {
+candidates_unreadable_has() {
 	local i
 	i=0
 	while [ "$i" -lt "$UNREAD_COUNT" ]; do
@@ -51,7 +51,7 @@ unreadable_has() {
 
 # The source directory that holds the unreadable copy of a name, for the
 # message that names both sides of an unresolved duplicate.
-unread_source_of() {
+_candidates_unread_source_of() {
 	local i
 	i=0
 	while [ "$i" -lt "$UNREAD_COUNT" ]; do
@@ -67,19 +67,19 @@ unread_source_of() {
 # Fill CAND_NAME/CAND_TARGET with every immediate child directory of every
 # source that holds a SKILL.md this run can read. A name claimed by two sources is an error and
 # neither copy is linked.
-collect_candidates() {
+candidates_collect() {
 	RAW_COUNT=0
 	CAND_COUNT=0
 	DUP_COUNT=0
 	UNREAD_COUNT=0
-	_collect_sources
-	_collect_dedupe
+	_candidates_collect_sources
+	_candidates_collect_dedupe
 }
 
 # The first pass: every listed source in turn, scanned for skill directories.
 # A source this run could not list keeps SRC_OK at 0, so nothing recorded from
 # it is pruned.
-_collect_sources() {
+_candidates_collect_sources() {
 	local i src
 	i=0
 	# shellcheck disable=SC2153 # SRC_COUNT is written by sources.sh
@@ -104,8 +104,8 @@ _collect_sources() {
 		# mistake and is refused by name. SRC_OK stays 0, so nothing recorded
 		# from it is pruned. The identity test catches an alias as well as the
 		# plain spelling.
-		if same_path "$src" "$ASSEMBLY_DIR"; then
-			err "source directory is the assembly $ASSEMBLY_DIR itself; list the checkout it is built from instead (from '${SRC_RAW[$i]}' in $SOURCES_FILE)"
+		if paths_same "$src" "$ASSEMBLY_DIR"; then
+			output_err "source directory is the assembly $ASSEMBLY_DIR itself; list the checkout it is built from instead (from '${SRC_RAW[$i]}' in $SOURCES_FILE)"
 			i=$((i + 1))
 			continue
 		fi
@@ -114,24 +114,24 @@ _collect_sources() {
 		# The permission bits and the exit status of a real listing tell the two
 		# apart.
 		if [ ! -r "$src" ] || [ ! -x "$src" ] || ! ls -- "$src" >/dev/null 2>&1; then
-			err "source directory cannot be read: $src; its recorded links are kept"
+			output_err "source directory cannot be read: $src; its recorded links are kept"
 			i=$((i + 1))
 			continue
 		fi
-		_collect_scan_source "$src" "$i"
+		_candidates_collect_scan_source "$src" "$i"
 		i=$((i + 1))
 	done
 }
 
 # Scan one source, and record how many entries it holds. $2 is its index in
 # the SRC_ arrays, which this function writes SRC_OK and SRC_FOUND at.
-_collect_scan_source() {
+_candidates_collect_scan_source() {
 	local src idx entry found
 	src=$1
 	idx=$2
 	found=0
 	for entry in "$src"/*; do
-		if _collect_skill_entry "$entry" "$src" "$idx"; then
+		if _candidates_collect_skill_entry "$entry" "$src" "$idx"; then
 			found=$((found + 1))
 		fi
 	done
@@ -142,7 +142,7 @@ _collect_scan_source() {
 # One child of a source. It is true when the child counts as something the
 # source holds, whether it was recorded as a candidate or only as unreadable.
 # $3 is the source's index in the SRC_ arrays.
-_collect_skill_entry() {
+_candidates_collect_skill_entry() {
 	local entry src idx name
 	entry=$1
 	src=$2
@@ -156,8 +156,8 @@ _collect_skill_entry() {
 	# skill that was deleted and would prune a link that is
 	# still good. The two are told apart before the test is
 	# believed.
-	if [ ! -f "$entry/SKILL.md" ] && skill_dir_unsearchable "$entry"; then
-		err "skill directory cannot be read: $entry; its recorded link is kept"
+	if [ ! -f "$entry/SKILL.md" ] && _candidates_skill_dir_unsearchable "$entry"; then
+		output_err "skill directory cannot be read: $entry; its recorded link is kept"
 		UNREAD_NAME[UNREAD_COUNT]="$name"
 		UNREAD_SRC[UNREAD_COUNT]="$src"
 		UNREAD_COUNT=$((UNREAD_COUNT + 1))
@@ -175,9 +175,9 @@ _collect_skill_entry() {
 	# was deleted, so an existing link survives it.
 	if [ ! -r "$entry/SKILL.md" ]; then
 		if manifest_target_of "$name" >/dev/null; then
-			err "skill $name in $src: SKILL.md cannot be read; kept the existing link"
+			output_err "skill $name in $src: SKILL.md cannot be read; kept the existing link"
 		else
-			err "skill $name in $src: SKILL.md cannot be read; not linked"
+			output_err "skill $name in $src: SKILL.md cannot be read; not linked"
 		fi
 		UNREAD_NAME[UNREAD_COUNT]="$name"
 		UNREAD_SRC[UNREAD_COUNT]="$src"
@@ -193,7 +193,7 @@ _collect_skill_entry() {
 
 # The second pass: one candidate per name, with every name two sources claim
 # refused instead.
-_collect_dedupe() {
+_candidates_collect_dedupe() {
 	local i j n name
 	i=0
 	while [ "$i" -lt "$RAW_COUNT" ]; do
@@ -207,8 +207,8 @@ _collect_dedupe() {
 			j=$((j + 1))
 		done
 		if [ "$n" -gt 1 ]; then
-			_collect_report_duplicate "$name" "$i"
-		elif unreadable_has "$name"; then
+			_candidates_collect_report_duplicate "$name" "$i"
+		elif candidates_unreadable_has "$name"; then
 			# One source provides this name and another holds a copy of it
 			# that could not be read this run. The unreadable directory may
 			# well hold that skill too, so which copy the name means is not
@@ -216,7 +216,7 @@ _collect_dedupe() {
 			# candidate. Linking the readable copy would repoint a recorded
 			# link at a different skill on nothing but a permission problem,
 			# so the name keeps the link and the manifest entry it has.
-			err "duplicate: $name is unreadable in $(unread_source_of "$name") and also provided by $(dirname "${RAW_TARGET[$i]}"); kept the existing link"
+			output_err "duplicate: $name is unreadable in $(_candidates_unread_source_of "$name") and also provided by $(dirname "${RAW_TARGET[$i]}"); kept the existing link"
 			DUP_NAME[DUP_COUNT]="$name"
 			DUP_COUNT=$((DUP_COUNT + 1))
 		else
@@ -234,7 +234,7 @@ _collect_dedupe() {
 # Refuse a name two sources claim. $2 is the name's index in the RAW_ arrays.
 # Every copy of the name reaches this function, and the first of them reports
 # for all of them, so the run names each refused skill once.
-_collect_report_duplicate() {
+_candidates_collect_report_duplicate() {
 	local name idx first j paths
 	name=$1
 	idx=$2
@@ -255,7 +255,7 @@ _collect_report_duplicate() {
 			fi
 			j=$((j + 1))
 		done
-		err "duplicate skill name '$name' in:$paths; linking none of them"
+		output_err "duplicate skill name '$name' in:$paths; linking none of them"
 		DUP_NAME[DUP_COUNT]="$name"
 		DUP_COUNT=$((DUP_COUNT + 1))
 	fi
@@ -263,7 +263,7 @@ _collect_report_duplicate() {
 
 # A name the duplicate check refused this run. Its existing link, if any, is
 # left alone: a second copy appearing must not remove a skill that works.
-dup_has() {
+candidates_dup_has() {
 	local i
 	i=0
 	while [ "$i" -lt "$DUP_COUNT" ]; do
@@ -286,7 +286,7 @@ dup_has() {
 # alias is gone nothing in the target names the line that is still listed, and
 # the path rule below would prune every one of its links. A line written by an
 # older version carries no spelling, and the path rule answers for it.
-target_source_unavailable() {
+candidates_target_source_unavailable() {
 	local d s i
 	s=${2-}
 	if [ -n "$s" ]; then
@@ -304,7 +304,7 @@ target_source_unavailable() {
 	d=$(dirname "$1")
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
-		if [ "${SRC_PATH[$i]}" = "$d" ] || same_path "${SRC_PATH[$i]}" "$d"; then
+		if [ "${SRC_PATH[$i]}" = "$d" ] || paths_same "${SRC_PATH[$i]}" "$d"; then
 			if [ "${SRC_OK[$i]:-0}" != "1" ]; then
 				return 0
 			fi
@@ -315,12 +315,12 @@ target_source_unavailable() {
 	return 1
 }
 
-report_empty_sources() {
+candidates_report_empty_sources() {
 	local i
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		if [ "${SRC_OK[$i]:-0}" = "1" ] && [ "${SRC_FOUND[$i]:-0}" -eq 0 ]; then
-			warn "source ${SRC_PATH[$i]} holds no skill; a source is the directory whose children are <name>/SKILL.md."
+			output_warn "source ${SRC_PATH[$i]} holds no skill; a source is the directory whose children are <name>/SKILL.md."
 		fi
 		i=$((i + 1))
 	done
@@ -328,7 +328,7 @@ report_empty_sources() {
 
 # Name every source this run used, and say so when the clone that holds this
 # script is not one of them.
-report_sources_used() {
+candidates_report_sources_used() {
 	local i list dir parent skills
 	list=""
 	i=0
@@ -337,17 +337,17 @@ report_sources_used() {
 		i=$((i + 1))
 	done
 	if [ -z "$list" ]; then
-		warn "no source is listed in $SOURCES_FILE"
+		output_warn "no source is listed in $SOURCES_FILE"
 		return 0
 	fi
-	info "$PROG: sources:$list"
+	output_info "$PROG: sources:$list"
 
 	dir=$(dirname "$SCRIPT_PATH")
 	parent=$(dirname "$dir")
 	if [ "$(basename "$dir")" != "scripts" ] || [ ! -d "$parent/skills" ]; then
 		return 0
 	fi
-	if ! skills=$(phys_dir "$parent/skills"); then
+	if ! skills=$(paths_phys_dir "$parent/skills"); then
 		return 0
 	fi
 	i=0
@@ -357,10 +357,10 @@ report_sources_used() {
 		fi
 		i=$((i + 1))
 	done
-	warn "$skills is not listed in $SOURCES_FILE, so this clone's own skills are not linked; add that line to link them"
+	output_warn "$skills is not listed in $SOURCES_FILE, so this clone's own skills are not linked; add that line to link them"
 }
 
-cand_index_of() {
+candidates_index_of() {
 	local i
 	i=0
 	while [ "$i" -lt "$CAND_COUNT" ]; do

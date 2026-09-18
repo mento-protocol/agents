@@ -11,9 +11,10 @@
 # Writes: GIT_SSH_COMMAND and GIT_TERMINAL_PROMPT, both exported for the fetch
 # alone. Every count and note it produces is printed, not stored.
 #
-# check calls this section under 'if ! cmd_check' and the session hook under
-# 'cmd_hook || true', so errexit is off in this whole subtree. run_git_fetch
-# and maybe_fetch are also called in a substitution, so neither may end a run.
+# check calls this section under 'if ! check_cmd' and the session hook under
+# '_hook_cmd || true', so errexit is off in this whole subtree. _git_run_fetch
+# and git_maybe_fetch are also called in a substitution, so neither may end a
+# run.
 git_root() {
 	local root
 	if root=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null); then
@@ -73,7 +74,7 @@ git_default_branch() {
 
 # Upstream ref for the current branch, or origin/<default branch> when the
 # current branch tracks nothing.
-git_upstream() {
+_git_upstream() {
 	local root up def
 	root=$1
 	if up=$(git -C "$root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
@@ -113,13 +114,13 @@ git_pull_command() {
 	case "$def" in
 	-*) def="refs/heads/$def" ;;
 	esac
-	printf 'git pull --ff-only origin %s\n' "$(shell_quote "$def")"
+	printf 'git pull --ff-only origin %s\n' "$(paths_shell_quote "$def")"
 }
 
 git_behind_count() {
 	local root up
 	root=$1
-	if ! up=$(git_upstream "$root"); then
+	if ! up=$(_git_upstream "$root"); then
 		printf 'unknown\n'
 		return 0
 	fi
@@ -128,25 +129,25 @@ git_behind_count() {
 
 # Fetch stamps live in one directory of their own, so that removing them never
 # needs a wildcard in the assembly root next to the user's own files.
-ensure_stamp_dir() {
+_git_ensure_stamp_dir() {
 	if [ -L "$STAMP_DIR" ]; then
-		warn "$STAMP_DIR is a symlink; fetch stamps are not written"
+		output_warn "$STAMP_DIR is a symlink; fetch stamps are not written"
 		return 1
 	fi
 	if [ -e "$STAMP_DIR" ] && [ ! -d "$STAMP_DIR" ]; then
-		warn "$STAMP_DIR exists and is not a directory; fetch stamps are not written"
+		output_warn "$STAMP_DIR exists and is not a directory; fetch stamps are not written"
 		return 1
 	fi
 	if [ ! -d "$STAMP_DIR" ]; then
 		if ! mkdir "$STAMP_DIR" 2>/dev/null; then
-			warn "could not create $STAMP_DIR; fetch stamps are not written"
+			output_warn "could not create $STAMP_DIR; fetch stamps are not written"
 			return 1
 		fi
 	fi
 	return 0
 }
 
-stamp_file() {
+_git_stamp_file() {
 	local h
 	h=$(printf '%s' "$1" | cksum | awk '{print $1}')
 	printf '%s/fetch-%s\n' "$STAMP_DIR" "$h"
@@ -154,7 +155,7 @@ stamp_file() {
 
 # Hard links to a path, as a number. BSD stat and GNU stat spell the field
 # differently, so the one that answers decides. An unreadable path answers 0.
-link_count() {
+_git_link_count() {
 	local n
 	n=$(stat -f %l "$1" 2>/dev/null) || n=""
 	if [ -z "$n" ]; then
@@ -172,39 +173,39 @@ link_count() {
 # that file's content. A fresh file is written and moved over the stamp path
 # instead, which replaces the name and leaves any other name alone, and a
 # stamp that already has more than one name is left exactly as it is.
-write_stamp() {
+_git_write_stamp() {
 	local stamp tmp n
 	stamp=$1
-	if ! ensure_stamp_dir; then
+	if ! _git_ensure_stamp_dir; then
 		return 0
 	fi
 	if [ -L "$stamp" ]; then
-		warn "the fetch stamp $stamp is a symlink; it was not written"
+		output_warn "the fetch stamp $stamp is a symlink; it was not written"
 		return 0
 	fi
 	if [ -e "$stamp" ] && [ ! -f "$stamp" ]; then
-		warn "the fetch stamp $stamp is not a regular file; it was not written"
+		output_warn "the fetch stamp $stamp is not a regular file; it was not written"
 		return 0
 	fi
 	if [ -f "$stamp" ]; then
-		n=$(link_count "$stamp")
+		n=$(_git_link_count "$stamp")
 		if [ "$n" -gt 1 ]; then
-			warn "the fetch stamp $stamp has $n names; it was not written"
+			output_warn "the fetch stamp $stamp has $n names; it was not written"
 			return 0
 		fi
 	fi
 	if ! tmp=$(mktemp "$STAMP_DIR/fetch-tmp.XXXXXX" 2>/dev/null); then
-		warn "could not write the fetch stamp $stamp"
+		output_warn "could not write the fetch stamp $stamp"
 		return 0
 	fi
 	if ! mv -f "$tmp" "$stamp" 2>/dev/null; then
 		rm -f "$tmp" 2>/dev/null || true
-		warn "could not write the fetch stamp $stamp"
+		output_warn "could not write the fetch stamp $stamp"
 	fi
 	return 0
 }
 
-fetch_due() {
+_git_fetch_due() {
 	local stamp mins
 	stamp=$1
 	if [ ! -f "$stamp" ]; then
@@ -223,7 +224,7 @@ fetch_due() {
 # A fetch must never stop at a prompt. GIT_TERMINAL_PROMPT=0 covers HTTP; ssh
 # needs its own batch mode. An operator setting already in the environment
 # wins, so a custom ssh command keeps working.
-set_fetch_env() {
+_git_set_fetch_env() {
 	if [ -z "${GIT_SSH_COMMAND-}" ]; then
 		GIT_SSH_COMMAND="ssh -oBatchMode=yes"
 		export GIT_SSH_COMMAND
@@ -234,7 +235,7 @@ set_fetch_env() {
 # Signal the fetch on expiry. git starts its own ssh or curl child, so the
 # process group is the target when the fetch runs in one of its own; the pid
 # is the fallback when it does not.
-kill_fetch() {
+_git_kill_fetch() {
 	local sig pid
 	sig=$1
 	pid=$2
@@ -252,14 +253,14 @@ kill_fetch() {
 # leave them running and holding the .git locks. bash 3.2 starts no process
 # group for a background job without job control, so setsid provides one when
 # the host has it; without setsid the pid is signalled on its own.
-run_git_fetch() {
+_git_run_fetch() {
 	local root tmo pid waited limit rc
 	root=$1
 	tmo=${2:-$FETCH_TIMEOUT_SECONDS}
 	if [ "$tmo" -lt 1 ]; then
 		tmo=1
 	fi
-	set_fetch_env
+	_git_set_fetch_env
 	if command -v setsid >/dev/null 2>&1; then
 		setsid git -C "$root" fetch --quiet >/dev/null 2>&1 &
 	else
@@ -270,9 +271,9 @@ run_git_fetch() {
 	limit=$((tmo * 5))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$waited" -ge "$limit" ]; then
-			kill_fetch TERM "$pid"
+			_git_kill_fetch TERM "$pid"
 			sleep 1
-			kill_fetch KILL "$pid"
+			_git_kill_fetch KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			return 1
 		fi
@@ -286,23 +287,23 @@ run_git_fetch() {
 
 # Fetch when the throttle allows it, or always when the caller passes 'force'.
 # Prints a short note. Never fails.
-maybe_fetch() {
+git_maybe_fetch() {
 	local root stamp tmo force
 	root=$1
 	tmo=${2:-$FETCH_TIMEOUT_SECONDS}
 	force=${3-}
-	stamp=$(stamp_file "$root")
-	if [ "$force" != "force" ] && ! fetch_due "$stamp"; then
+	stamp=$(_git_stamp_file "$root")
+	if [ "$force" != "force" ] && ! _git_fetch_due "$stamp"; then
 		printf 'skipped\n'
 		return 0
 	fi
 	mkdir -p "$ASSEMBLY_DIR" 2>/dev/null || true
-	if run_git_fetch "$root" "$tmo"; then
-		write_stamp "$stamp"
+	if _git_run_fetch "$root" "$tmo"; then
+		_git_write_stamp "$stamp"
 		printf 'ok\n'
 		return 0
 	fi
-	write_stamp "$stamp"
+	_git_write_stamp "$stamp"
 	printf 'failed\n'
 	return 0
 }
