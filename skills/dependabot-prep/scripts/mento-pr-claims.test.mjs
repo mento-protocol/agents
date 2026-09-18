@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturePath = join(here, "..", "fixtures", "mento-pr-claims.json");
+const fixturePath = join(here, "..", "assets", "mento-pr-claims.json");
 const PINNED_VERSION = "0.2.0";
 
 function readFixture() {
@@ -21,6 +21,26 @@ test("the fixture is the package's own config shape, bound to a placeholder", ()
   assert.equal(doc.schema, "mento-issues-config:v1");
   assert.equal(doc.repository, "mento-protocol/example");
   assert.deepEqual(Object.keys(doc), ["schema", "repository", "claims"]);
+  // The exact key set: an added key such as `markerRevision` or `author`
+  // would change every run's behaviour without touching a pinned value.
+  assert.deepEqual(Object.keys(doc.claims), [
+    "schema",
+    "profile",
+    "namespace",
+    "scopeTemplate",
+    "label",
+    "ttlMinutes",
+    "renewMinutes",
+    "graceMinutes",
+    "minRemainingSeconds",
+    "maxTtlMinutes",
+    "requiredBefore",
+    "advisoryBefore",
+    "allowOverrides",
+    "allowCloudWriters",
+    "command",
+    "package",
+  ]);
 });
 
 test("the claims block keeps the production PR namespace and lease", () => {

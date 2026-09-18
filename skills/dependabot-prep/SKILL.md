@@ -28,7 +28,9 @@ bundled credential-helper and push `scripts/`, and the
 `fixtures/base-context-sentinel.json` self-check are historical compatibility
 artifacts, not this workflow's dependencies. `fixtures/comment-marker-vectors.json`
 and `scripts/comment-marker-vectors.test.mjs` are live: they carry the
-procedural-marker byte authority this workflow posts against.
+procedural-marker byte authority this workflow posts against. So are
+`assets/mento-pr-claims.json` and `scripts/mento-pr-claims.test.mjs`: the
+default claim document for a Mento repository and the test that pins it.
 
 ## Resolve scope and authority
 
@@ -70,12 +72,11 @@ a Mento schema or invent a playbook. Missing rules/check evidence remains unknow
 Claims are in effect when the base policy carries a `coordination.claims`
 block, or when the repository is under `mento-protocol/` and carries no policy
 file. In the second case [Mento defaults](references/mento-defaults.md) supplies
-the claim document — a byte-exact fixture copied outside every checkout with
-only `repository` substituted — the pinned runner, the Mento veto labels and
-the Mento needs-decision paths. Run every claims command from a working
-directory outside every checkout (`pnpm --dir <claims_cwd> …`), so no candidate
-tree decides the registry or the policy. Every "when claims are in effect"
-below covers both cases.
+the claim document — a byte-exact copy of the skill's own document, placed
+outside every checkout with only `repository` substituted — and the pinned
+runner, run with `pnpm --dir <claims_cwd>` from a directory outside every
+checkout, so no candidate tree decides the registry or the policy. Every "when
+claims are in effect" below covers both cases.
 
 If repository policy names a `workflow.revision`, an `executionModel`, or a policy
 schema version this skill was not written against, stop before any write, report

@@ -59,7 +59,7 @@ repository and base binding, complete identity tuples, and fail-closed history
 outcomes. Treat an unknown authority value, invalid value, or mismatched binding
 as a blocker. The file is optional. Its absence does not weaken the
 conservative defaults in this skill, and for a repository under
-`mento-protocol/` it selects the claim document and the Mento rules in
+`mento-protocol/` it selects the claim document in
 [Mento defaults](mento-defaults.md). Decide absence on the exact base blob,
 never on a candidate tree: a branch that deletes the file does not change
 which document this run claims under.
