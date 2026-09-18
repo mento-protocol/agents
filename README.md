@@ -52,6 +52,24 @@ that is empty is replaced by the symlink (a directory holding only Finder
 metadata such as `.DS_Store` counts as empty), and one that holds anything else
 is refused with a message telling you to move it aside.
 
+When that existing `~/.claude/skills` holds skills you want to keep, move it
+to a new home and list that home as a second source, so the assembly holds
+your skills and the shared ones side by side:
+
+```bash
+mv ~/.claude/skills ~/my-skills
+scripts/link-skills.sh
+echo ~/my-skills >> ~/.agents/skill-sources
+scripts/link-skills.sh
+```
+
+The first run creates `~/.agents/skill-sources` and points `~/.claude/skills`
+at the assembly; the second links your skills into it. From then on edit your
+skills in `~/my-skills`, never through `~/.claude/skills`, which is now a
+symlink into the assembly. See
+[Composing with a personal skills directory](#composing-with-a-personal-skills-directory)
+for the format of the sources file.
+
 Because those two paths become links into the assembly, the assembly directory
 must not be either of them and must not hold either of them. An `--assembly`
 or `SKILLS_ASSEMBLY_DIR` path that is, or contains, `~/.claude/skills` or
