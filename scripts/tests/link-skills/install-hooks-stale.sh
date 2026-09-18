@@ -12,7 +12,7 @@
 # write_session_hook_settings and write_installed_hook_settings come from
 # install-hooks-common.sh.
 #
-# Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
+# Reads: CASE_DIR, HOME, LS.
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
 # assert.sh reads, and nothing outside the case's own throwaway HOME and
 # CASE_DIR.
@@ -121,8 +121,7 @@ install_hooks_rewrites_relative_script_path() {
 	fixtures_add_source "$CASE_DIR/one"
 	clone="$CASE_DIR/clone"
 	mkdir -p "$clone/scripts"
-	cp "$SOURCE_SCRIPT" "$clone/scripts/link-skills.sh"
-	chmod +x "$clone/scripts/link-skills.sh"
+	fixtures_install_script "$clone/scripts/link-skills.sh"
 	LS="$clone/scripts/link-skills.sh"
 	mkdir -p "$HOME/.claude"
 	file="$HOME/.claude/settings.json"
@@ -275,7 +274,7 @@ install_hooks_replaces_non_executable_direct_script() {
 	# The run under test is this copy, so the command it generates names it
 	# and the entry below names the same file.
 	copy="$CASE_DIR/link-skills.sh"
-	cp "$SOURCE_SCRIPT" "$copy"
+	fixtures_install_script "$copy"
 	chmod 644 "$copy"
 	LS="$copy"
 	write_installed_hook_settings "$file" "$copy hook"

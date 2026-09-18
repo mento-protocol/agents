@@ -12,6 +12,9 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 SOURCE_SCRIPT="$HERE/link-skills.sh"
+# The topic modules the entry point sources. A fixture needs both, so every
+# copy of the script goes through fixtures_install_script.
+SOURCE_LIB="$HERE/lib/link-skills"
 BASH_BIN=${BASH_BIN:-bash}
 
 PASS=0
@@ -111,11 +114,15 @@ SAVED_PATH=""
 
 # ------------------------------------------------------------------- main ---
 
-# The run needs the script under test and git. Either one missing ends the run
-# with exit 2, before anything is created.
+# The run needs the script under test, its modules and git. Any one missing
+# ends the run with exit 2, before anything is created.
 harness_require_subject() {
 	if [ ! -f "$SOURCE_SCRIPT" ]; then
 		printf 'test-link-skills: cannot find %s\n' "$SOURCE_SCRIPT" >&2
+		exit 2
+	fi
+	if [ ! -d "$SOURCE_LIB" ]; then
+		printf 'test-link-skills: cannot find %s\n' "$SOURCE_LIB" >&2
 		exit 2
 	fi
 	if ! command -v git >/dev/null 2>&1; then
