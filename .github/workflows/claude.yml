@@ -47,6 +47,11 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Two requests on one PR or issue would race to update the same sticky
+    # comment, so the second waits. It is not cancelled: every request counts.
+    concurrency:
+      group: claude-on-demand-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     # Review-only: the github_token input below is the workflow-scoped
     # GITHUB_TOKEN, so the action cannot exchange OIDC for a broader GitHub App
     # token and this job does not need id-token: write.
