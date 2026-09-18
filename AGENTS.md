@@ -83,7 +83,7 @@ into `~/.agents/skills`. It must stay compatible with bash 3.2 (the default
 After changing it, run its harness, which CI runs on Ubuntu and macOS:
 
 ```bash
-shellcheck scripts/*.sh
+git ls-files -z '*.sh' | xargs -0 shellcheck
 bash scripts/test-link-skills.sh
 BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 ```
@@ -113,17 +113,18 @@ Layout for a script that outgrows one file:
 ```text
 scripts/<tool>.sh              entry point: option parsing, sources lib/, calls main
 scripts/lib/<tool>/<topic>.sh  one topic per file; defines functions, runs nothing at load
-scripts/test-<tool>.sh         runner: sources tests/lib/, runs every tests/<tool>/*.sh
+scripts/test-<tool>.sh         runner: sources tests/lib/, runs each tests/<tool>/<topic>.sh from an explicit ordered list
 scripts/tests/lib/<name>.sh    shared assertions, fixtures, and shims
 scripts/tests/<tool>/<topic>.sh cases for one topic, in the same order as lib/
 scripts/tests/<tool>/<topic>.test.mjs  node:test cases for a JavaScript subject, one topic per file
 scripts/tests/<tool>/helpers/<name>.mjs shared fixtures and builders for those cases
 ```
 
-The parser tests for `scripts/validate-skills.mjs` live under
-`scripts/tests/validate-skills/`: each file covers one YAML topic, and
-`cli.test.mjs` runs the command itself over a temporary skills/ tree. Run
-them with `pnpm test:scripts`.
+The tests for `scripts/validate-skills.mjs` live under
+`scripts/tests/validate-skills/`: one file per YAML topic, plus
+`cli.test.mjs` and `layout.test.mjs` for the command's own behaviour, and a
+`helpers/` directory with the shared fixtures and builders. Run them with
+`pnpm test:scripts`.
 
 Rules for a module file:
 
@@ -138,8 +139,9 @@ Rules for a module file:
 - Each module names, in a comment at the top, the globals it reads and
   writes. A module that needs a variable another module owns takes it as a
   function argument instead where that is practical.
-- `.shellcheckrc` sets `source-path`, so `shellcheck scripts/*.sh` follows
-  the `source` lines. Do not add `# shellcheck disable=SC1091`.
+- `.shellcheckrc` sets `source-path`, so
+  `git ls-files -z '*.sh' | xargs -0 shellcheck` follows the `source` lines.
+  Do not add `# shellcheck disable=SC1091`.
 
 Two files predate these limits and are listed in
 `scripts/shell-size-baseline.txt` with their current line count:

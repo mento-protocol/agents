@@ -53,7 +53,8 @@ export function makeSkillsDir() {
 
 /**
  * Write `text` as skills/<name>/SKILL.md under `dir` and return the skill's
- * directory.
+ * directory. `text` may be a Buffer, which is how a case writes bytes no
+ * string spells, such as an invalid UTF-8 byte.
  */
 export function writeSkill(dir, name, text) {
   const skillDir = join(dir, "skills", name);
