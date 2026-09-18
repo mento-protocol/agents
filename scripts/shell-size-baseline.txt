@@ -2,4 +2,4 @@
 # Format: <path> <line count>. A file may not grow past its count.
 # Lower the count as the file shrinks; delete the line once it fits, and
 # keep this file even when it holds no entries.
-scripts/link-skills.sh 1365
+scripts/link-skills.sh 1177
