@@ -22,7 +22,7 @@
 
 ## Ship Checklist
 
-- [ ] PR title is a [Conventional Commits](https://www.conventionalcommits.org/) header, `type(scope): summary`, as `commitlint.config.mjs` enforces for commits
+- [ ] PR title is a [Conventional Commits](https://www.conventionalcommits.org/) header, `type: summary` or `type(scope): summary`, as `commitlint.config.mjs` enforces for commits
 - [ ] Performed a self-review of my own changes
 - [ ] `node scripts/validate-skills.mjs` and the affected test suites pass
 - [ ] Nothing in the diff breaks the public-readership rules in `AGENTS.md`
