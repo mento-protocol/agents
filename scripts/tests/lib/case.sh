@@ -8,12 +8,14 @@
 # Reads: BASH_BIN (case_run_script, case_run_script_in, case_tap_header),
 # CASE_ALIVE (case_run, case_tap_summary), CASE_FAILS (case_fail, _case_body),
 # CASE_FAIL_MAX (_case_body, _case_tap), CASE_JOBS (case_run), CASE_NAMES and
-# CASE_PID and CASE_STATUS (_case_poll, _case_report_ready), CASE_NUM
-# (case_run, _case_poll, _case_report_ready, case_tap_summary),
+# CASE_PID and CASE_STATUS (_case_poll, _case_report_ready; CASE_PID also
+# case_signal), CASE_NUM (case_run, _case_poll, _case_report_ready,
+# case_signal, case_tap_summary),
 # CASE_SKIP_STATUS (case_skip, _case_tap), CURRENT (case_fail), FAIL
 # (_case_tap, case_tap_summary), HARNESS_JOBS (_case_jobs), HARNESS_PATH
 # (case_setup), LS (case_run_script, case_run_script_in), NEXT_REPORT
-# (_case_poll, _case_report_ready), PASS (_case_tap, case_tap_summary), ROOT
+# (_case_poll, _case_report_ready, case_signal), PASS (_case_tap,
+# case_tap_summary), ROOT
 # (case_cleanup, case_setup, _case_start, _case_tap), SKIPPED (_case_tap,
 # case_tap_summary), SKIP_NOTE (case_skip), SOURCE_SCRIPT (case_setup).
 # Writes: CASE_ALIVE, CASE_DIR, CASE_FAILS, CASE_JOBS, CASE_NAMES, CASE_NUM,
@@ -70,17 +72,50 @@ case_arm_traps() {
 	trap 'case_signal TERM 15' TERM
 }
 
+# Every process below one pid, deepest first, read from the ps snapshot in
+# $2, one "pid ppid" pair per line: for a worker, that is the run under test
+# it started and the helpers either of them left in the background, such as
+# a sleeping lock owner. An empty snapshot lists nothing.
+_case_descendants() {
+	local pid child parent
+	pid=$1
+	printf '%s\n' "$2" | while read -r child parent; do
+		if [ "$parent" = "$pid" ]; then
+			_case_descendants "$child" "$2"
+			printf '%s\n' "$child"
+		fi
+	done
+}
+
 # End the run on a signal. The handler clears the traps, then sends TERM to
-# its own process group, so the case subshell and the helpers a case started,
-# such as a sleeping lock owner, stop with the harness instead of outliving
-# it. That signal reaches this process too, so TERM is ignored here first and
-# stays ignored: the harness must survive it long enough to remove ROOT. The
-# status is 128 plus the signal number, what a shell reports for a command a
-# signal killed: 130 for INT, 143 for TERM.
+# every worker still running and to everything below it, so the case
+# subshell and the helpers a case started stop with the harness instead of
+# outliving it. The workers and their descendants are signalled one by one,
+# never a process group: the harness shares its group with the shell or the
+# script that started it, so a TERM to that group would reach the caller and
+# the caller's other children. Where ps cannot list processes, the workers
+# alone are signalled. The workers are waited for, so ROOT is removed once
+# they have stopped writing to it. The status is 128 plus the signal number,
+# what a shell reports for a command a signal killed: 130 for INT, 143 for
+# TERM.
 case_signal() {
+	local num pid table victims
 	trap - EXIT INT TERM
-	trap '' TERM
-	kill -TERM 0 2>/dev/null || true
+	table=$(ps -Ao pid=,ppid= 2>/dev/null) || table=""
+	victims=""
+	num=$NEXT_REPORT
+	while [ "$num" -le "$CASE_NUM" ]; do
+		pid=${CASE_PID[num]-}
+		if [ -n "$pid" ]; then
+			victims="$victims $(_case_descendants "$pid" "$table") $pid"
+		fi
+		num=$((num + 1))
+	done
+	if [ -n "${victims// /}" ]; then
+		# shellcheck disable=SC2086 # victims is a list of pids to split
+		kill -TERM $victims 2>/dev/null || true
+	fi
+	wait 2>/dev/null
 	case_cleanup
 	printf '# run interrupted by SIG%s\n' "$1"
 	exit $((128 + $2))
