@@ -170,14 +170,28 @@ resolve_symlink_path() {
 # function lives in a module, so this one prints for itself. A session start
 # must end well, so a hook run gets the bracketed line hook_say prints and
 # exit 0; every other command gets the line die prints and exit 2.
+#
+# The option parser has not run yet, so the command is read here by main's own
+# rule: the first argument that is neither an option nor the operand of
+# --sources or --assembly, with -h and --help naming help wherever they sit.
 boot_fail() {
-	local arg
+	local arg cmd="" skip=0
 	for arg in ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}; do
-		if [ "$arg" = "hook" ]; then
-			printf '[%s] cannot load %s\n' "$PROG" "$LIB_DIR/$1"
-			exit 0
+		if [ "$skip" = 1 ]; then
+			skip=0
+			continue
 		fi
+		case "$arg" in
+		--sources | --assembly) skip=1 ;;
+		-h | --help) cmd="help" ;;
+		-*) ;;
+		*) [ -n "$cmd" ] || cmd=$arg ;;
+		esac
 	done
+	if [ "$cmd" = "hook" ]; then
+		printf '[%s] cannot load %s\n' "$PROG" "$LIB_DIR/$1"
+		exit 0
+	fi
 	printf '%s: cannot load %s\n' "$PROG" "$LIB_DIR/$1" >&2
 	exit 2
 }
