@@ -9,42 +9,15 @@
 # and an option of this script that leaves 'hook' as something other than the
 # subcommand.
 #
-# write_installed_hook_settings and check_malformed_hook_command are defined
-# here and are used by install-hooks-stale.sh and install-hooks-duplicates.sh
-# as well.
+# write_installed_hook_settings comes from install-hooks-common.sh.
 #
 # Reads: CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
 # case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
-
-# An entry carrying the type and the timeout this script installs, so that the
-# command alone decides what the merge makes of it.
-write_installed_hook_settings() {
-	printf '%s\n' \
-		'{' \
-		'  "hooks": {' \
-		'    "SessionStart": [' \
-		'      {' \
-		'        "hooks": [' \
-		'          {' \
-		'            "type": "command",' \
-		"            \"command\": \"$2\"," \
-		'            "timeout": 60' \
-		'          }' \
-		'        ]' \
-		'      }' \
-		'    ]' \
-		'  }' \
-		'}' >"$1"
-}
 
 # One stored command that this script cannot run as the hook: it is backed up,
 # replaced by the generated command, and reported. $3 names the shape.
-check_malformed_hook_command() {
+_check_malformed_hook_command() {
 	local file n
 	file=$1
 	rm -f "$file" "$file".bak-*
@@ -114,7 +87,7 @@ install_hooks_recognizes_shell_options_before_script() {
 
 	# Finding the script past the shell options is not the end of the
 	# reading: the tail after the script still has to be a hook run.
-	check_malformed_hook_command "$file" "bash -x $LS --sources hook" \
+	_check_malformed_hook_command "$file" "bash -x $LS --sources hook" \
 		"a shell option before a missing option operand"
 }
 
@@ -138,7 +111,7 @@ install_hooks_replaces_operand_option_command() {
 	file="$HOME/.claude/settings.json"
 
 	for opt in -c -o -O --rcfile --init-file; do
-		check_malformed_hook_command "$file" "bash $opt $LS hook" \
+		_check_malformed_hook_command "$file" "bash $opt $LS hook" \
 			"the shell option $opt taking the script as its operand"
 	done
 
@@ -216,14 +189,14 @@ install_hooks_replaces_terminal_option_command() {
 	file="$HOME/.claude/settings.json"
 
 	for opt in --version --help -s -n -D --dump-strings --dump-po-strings; do
-		check_malformed_hook_command "$file" "bash $opt $LS hook" \
+		_check_malformed_hook_command "$file" "bash $opt $LS hook" \
 			"the shell option $opt leaving no script to run"
 	done
 
 	# The same option written the long way. "-o" takes its own operand, so
 	# this one comes through the operand branch of the parser, and the script
 	# after it is still only read, never run.
-	check_malformed_hook_command "$file" "bash -o noexec $LS hook" \
+	_check_malformed_hook_command "$file" "bash -o noexec $LS hook" \
 		"the shell option -o noexec leaving no script to run"
 
 	rm -f "$file" "$file".bak-*
@@ -259,11 +232,11 @@ install_hooks_replaces_malformed_option_command() {
 	mkdir -p "$HOME/.claude"
 	file="$HOME/.claude/settings.json"
 
-	check_malformed_hook_command "$file" "bash $LS --sources hook" \
+	_check_malformed_hook_command "$file" "bash $LS --sources hook" \
 		"a missing option operand"
-	check_malformed_hook_command "$file" "bash $LS hook extra" \
+	_check_malformed_hook_command "$file" "bash $LS hook extra" \
 		"a second positional"
-	check_malformed_hook_command "$file" "bash $LS --bogus hook" \
+	_check_malformed_hook_command "$file" "bash $LS --bogus hook" \
 		"an unknown option"
 
 	# The shapes the option loop does accept, with "hook" left as the one

@@ -15,10 +15,6 @@
 # Writes: LS_OUT and LS_RC, which the fifo case sets itself because it runs
 # the script in the background instead of through case_run_script, and nothing
 # outside the case's own throwaway HOME and CASE_DIR.
-#
-# LS_RC is written here and read by assert.sh, so shellcheck sees no reader
-# while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # The token an older sources file carried after a path asked the hook to
 # update that clone. The hook only notifies now, so the token is refused
@@ -240,6 +236,7 @@ fifo_at_sources_path_refused() {
 		return
 	fi
 	wait "$pid" 2>/dev/null
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
 	LS_OUT=$(cat "$out")
 	assert_rc 2 "link with a FIFO at the sources path"

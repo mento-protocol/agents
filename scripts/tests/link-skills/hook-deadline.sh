@@ -19,9 +19,15 @@
 # both cases give the hook, and HOOK_DEADLINE_TEST_MAX, the longest run they
 # accept. The hanging git shim sleeps forty seconds, far past the deadline, so
 # each case still measures a deadline and not a slow command.
+#
+# HOOK_DEADLINE_TEST_MAX is 20: well under the shim's forty second sleep and
+# under the script's own twenty-five second default, so a run that reaches the
+# bound still proves the shortened deadline fired. The slack is for the host,
+# not for the deadline. A case measured four seconds on a twelve-core machine
+# at four workers, and a two-core CI runner has less to spare.
 
 HOOK_DEADLINE_TEST_SECONDS=3
-HOOK_DEADLINE_TEST_MAX=8
+HOOK_DEADLINE_TEST_MAX=20
 
 # The hook must end the session start it runs in, whatever it started. A git
 # subcommand that outlasts the deadline is stopped with everything below it.

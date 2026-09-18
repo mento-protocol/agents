@@ -15,10 +15,6 @@
 # Reads: CASE_DIR, COMPANY, HOME.
 # Writes: LS (the command under test), and nothing outside the case's own
 # throwaway HOME and CASE_DIR.
-#
-# LS is written here and read by case.sh, so shellcheck sees no reader while
-# it lints this file on its own.
-# shellcheck disable=SC2034
 
 # The runtime skills paths become links into the assembly, so an assembly that
 # is one of them, or holds one of them, would be a link into itself: every
@@ -276,6 +272,7 @@ script_reached_through_a_symlink() {
 	fixtures_company
 	mkdir -p "$HOME/bin" "$HOME/.claude"
 	ln -s "$COMPANY/scripts/link-skills.sh" "$HOME/bin/link-skills"
+	# shellcheck disable=SC2034 # read by case.sh
 	LS="$HOME/bin/link-skills"
 	case_run_script
 	assert_rc 0 "link"
@@ -372,21 +369,21 @@ source_dotdot_after_symlink_resolves_physically() {
 # recorded one.
 source_dotdot_alias_missing_keeps_links() {
 	local manifest
-	source_dotdot_alias_fixture
+	_source_dotdot_alias_fixture
 	manifest="$HOME/.agents/skills/.skill-links"
 
 	case_run_script link
 	assert_rc 0 "link through a '..' after the alias"
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/b/skills/alpha" "alpha link"
 
-	source_dotdot_alias_gone
-	source_dotdot_alias_back
-	source_dotdot_alias_beside_collapsed_line
+	_source_dotdot_alias_gone
+	_source_dotdot_alias_back
+	_source_dotdot_alias_beside_collapsed_line
 }
 
 # An alias, a skill behind it, and a second skill in the directory the line
 # collapses to, listed through the alias.
-source_dotdot_alias_fixture() {
+_source_dotdot_alias_fixture() {
 	mkdir -p "$CASE_DIR/a" "$CASE_DIR/b/child"
 	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
 	fixtures_skill "$CASE_DIR/b/skills" alpha
@@ -397,7 +394,7 @@ source_dotdot_alias_fixture() {
 
 # The alias goes away: the line names no directory, so link and check report a
 # missing source and the recorded link stands.
-source_dotdot_alias_gone() {
+_source_dotdot_alias_gone() {
 	rm "$CASE_DIR/a/alias"
 	case_run_script link
 	assert_rc 1 "link while the alias is gone"
@@ -419,7 +416,7 @@ source_dotdot_alias_gone() {
 }
 
 # The alias comes back and the link is recognised again.
-source_dotdot_alias_back() {
+_source_dotdot_alias_back() {
 	ln -s "$CASE_DIR/b/child" "$CASE_DIR/a/alias"
 	case_run_script link
 	assert_rc 0 "link once the alias is back"
@@ -431,7 +428,7 @@ source_dotdot_alias_back() {
 # The line that collapses to the same text as the alias line is another
 # source: it is listed first, its beta links, and while the alias is gone
 # alpha stays tied to the alias line and is not pruned on beta's account.
-source_dotdot_alias_beside_collapsed_line() {
+_source_dotdot_alias_beside_collapsed_line() {
 	fixtures_write_sources
 	fixtures_add_source "$CASE_DIR/a/skills"
 	fixtures_add_source "$CASE_DIR/a/alias/../skills"

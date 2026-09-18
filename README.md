@@ -340,7 +340,9 @@ run still recognises it, and makes the command exit 1.
 ```bash
 pnpm install
 pnpm test                        # pnpm -r test — every package's test suite
+pnpm test:scripts                # node:test cases for scripts/validate-skills.mjs
 pnpm validate:skills             # node scripts/validate-skills.mjs
+pnpm check:shell                 # .sh file and function size limits
 node --test skills/*/scripts/*.test.mjs  # every skill's own suite; see below
 bash scripts/test-link-skills.sh # the link-skills.sh harness, 4 cases at once
 trunk check --all                # lint (or: pnpm lint)
@@ -353,11 +355,22 @@ such a path, do what CI does: create a mode-0700 directory, copy `node` into a
 `bin/` below it, set `DEPENDABOT_PREP_TEST_SEALED_ROOT` to that directory, and
 run the suites with the copied `node`.
 
-CI runs the skill validation, the skill suites and the link harness on Ubuntu and macOS. On macOS also run
+CI runs `shellcheck`, `pnpm validate:skills`, `pnpm test:scripts`, the skill
+suites and the harness on Ubuntu and macOS, and the package tests,
+`pnpm check:shell` and trunk on Ubuntu. On macOS also run
 `BASH_BIN=/bin/bash bash scripts/test-link-skills.sh`, which exercises the
 bash 3.2 that `link-skills.sh` must keep working with. `HARNESS_JOBS` sets how
 many cases the harness runs at a time, four by default;
 `HARNESS_JOBS=1 bash scripts/test-link-skills.sh` runs them one after another.
+
+The harness prints TAP 13 and ends with a
+`# N passed, N failed, N skipped (interpreter <name>)` line. It is
+`scripts/test-link-skills.sh`, a runner that holds no case: it sources six
+modules from `scripts/tests/lib/` and one file per topic from
+`scripts/tests/link-skills/`, where the shared `install-hooks-common.sh` comes
+before the install-hooks topics that call it. The cases for
+`scripts/validate-skills.mjs` are
+`node:test` files under `scripts/tests/validate-skills/`.
 
 Each package's own README documents its usage; run its suite directly with
 `pnpm --filter <package-name> test` during development.

@@ -11,10 +11,6 @@
 # Reads: BASH_BIN, CASE_DIR, HOME, LS.
 # Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
 # case's own throwaway HOME and CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # A pid is not an identity: the number is reused, and after the owner of a lock
 # dies an unrelated process can carry it. The start time recorded beside the
@@ -152,7 +148,9 @@ lock_owner_survives_timezone_change() {
 
 	# The same two lines as case_run_script, with the zone of the run changed. The
 	# assignment stays with the command it prefixes.
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_OUT=$(TZ=America/New_York "$BASH_BIN" "$LS" link 2>&1)
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
 	assert_rc 1 "link from another time zone over a live owner's lock"
 	assert_out_has "holds the lock" "lock message"

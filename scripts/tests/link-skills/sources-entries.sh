@@ -12,7 +12,8 @@
 # listed as a source.
 #
 # Reads: CASE_DIR, HOME.
-# Writes: nothing outside the case's own throwaway HOME and CASE_DIR.
+# Writes: LS_OUT and LS_RC, which assert.sh reads, and nothing outside the
+# case's own throwaway HOME and CASE_DIR.
 
 # A source line with a '..' names one directory whether or not that directory
 # is there at the moment it is read. A source that is renamed away is
@@ -151,14 +152,14 @@ recorded_link_not_repointed_while_source_unavailable() {
 		case_skip "running as root"
 	fi
 	manifest="$HOME/.agents/skills/.skill-links"
-	recorded_link_first_link
-	recorded_link_second_source_takes_the_name
-	recorded_link_check_and_hook_agree
-	recorded_link_both_sources_readable
+	_recorded_link_first_link
+	_recorded_link_second_source_takes_the_name
+	_recorded_link_check_and_hook_agree
+	_recorded_link_both_sources_readable
 }
 
 # Two listed sources, one skill, and a link recorded against the first.
-recorded_link_first_link() {
+_recorded_link_first_link() {
 	fixtures_skill "$CASE_DIR/one" alpha
 	mkdir -p "$CASE_DIR/two"
 	fixtures_write_sources
@@ -171,7 +172,7 @@ recorded_link_first_link() {
 }
 
 # The second source takes the same name while the first cannot be read.
-recorded_link_second_source_takes_the_name() {
+_recorded_link_second_source_takes_the_name() {
 	fixtures_skill "$CASE_DIR/two" alpha
 	chmod 000 "$CASE_DIR/one"
 	case_run_script link
@@ -195,7 +196,7 @@ recorded_link_second_source_takes_the_name() {
 
 # check and the hook say what link does: the link is kept, not stale, and
 # not dangling either, though its target sits inside the unreadable source.
-recorded_link_check_and_hook_agree() {
+_recorded_link_check_and_hook_agree() {
 	chmod 000 "$CASE_DIR/one"
 	case_run_script check
 	chmod 700 "$CASE_DIR/one"
@@ -214,7 +215,7 @@ recorded_link_check_and_hook_agree() {
 }
 
 # Both sources readable again: the name is a duplicate and keeps its link.
-recorded_link_both_sources_readable() {
+_recorded_link_both_sources_readable() {
 	case_run_script link
 	assert_rc 1 "link with both sources readable"
 	assert_out_has "duplicate skill name 'alpha'" "the duplicate is reported"

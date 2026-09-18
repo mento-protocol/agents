@@ -39,10 +39,6 @@
 # BASH_BIN, CURRENT and LS stay globals rather than arguments: the cases call
 # case_fail and the two run helpers several hundred times between them, so
 # passing each value would touch every call site, not one line.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 # A case body ends in an exit status that the parent reads as the verdict: 0
 # for a pass, 1 to CASE_FAIL_MAX for that many failed assertions,
@@ -162,6 +158,7 @@ case_setup() {
 	# fails before drop_shims still hands the next case the real commands.
 	PATH=$HARNESS_PATH
 	export PATH
+	# shellcheck disable=SC2034 # read by shims.sh
 	SAVED_PATH=""
 	GIT_CONFIG_GLOBAL=/dev/null
 	GIT_CONFIG_SYSTEM=/dev/null
@@ -180,7 +177,9 @@ case_setup() {
 	unset SKILL_SOURCES_FILE || true
 	unset SKILLS_ASSEMBLY_DIR || true
 	LS="$SOURCE_SCRIPT"
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_OUT=""
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=0
 }
 

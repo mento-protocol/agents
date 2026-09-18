@@ -13,10 +13,6 @@
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
 # assert.sh reads, and nothing outside the case's own throwaway HOME and
 # CASE_DIR.
-#
-# LS_OUT and LS_RC are written here and read by assert.sh, so shellcheck sees
-# no reader while it lints this file on its own.
-# shellcheck disable=SC2034
 
 install_hooks_missing_file() {
 	local backups
@@ -132,7 +128,9 @@ install_hooks_embeds_custom_paths() {
 	command=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"])' \
 		"$HOME/.claude/settings.json")
 	rc=0
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_OUT=$(sh -c "$command" 2>&1) || rc=$?
+	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$rc
 	assert_rc 0 "the stored hook command"
 	fs_assert_is_dir_not_link "$assembly" "the hook works on the custom assembly"
@@ -183,6 +181,7 @@ install_hooks_apostrophe_path_idempotent() {
 	fixtures_write_sources
 	fixtures_add_source "$clone/skills"
 	mkdir -p "$HOME/.claude"
+	# shellcheck disable=SC2034 # read by case.sh
 	LS="$clone/scripts/link-skills.sh"
 	case_run_script install-hooks
 	assert_rc 0 "first install-hooks"

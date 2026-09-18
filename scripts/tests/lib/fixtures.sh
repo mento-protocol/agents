@@ -11,10 +11,6 @@
 # every one of the hundreds of fixture calls means the current case's HOME and
 # case directory, so passing them would touch every call site, not one line.
 # SEED is this module's own: fixtures_company sets it for fixtures_push_beta.
-#
-# LS is written here and read by case.sh, so shellcheck sees no reader while
-# it lints this file on its own.
-# shellcheck disable=SC2034
 
 fixtures_git() {
 	local d
@@ -62,6 +58,7 @@ fixtures_company() {
 	fixtures_git "$SEED" commit -q -m "init"
 	git -C "$SEED" push -q origin main
 	git clone --quiet "$BARE" "$COMPANY"
+	# shellcheck disable=SC2034 # read by case.sh
 	LS="$COMPANY/scripts/link-skills.sh"
 }
 
