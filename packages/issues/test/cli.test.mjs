@@ -26,12 +26,15 @@ import { GUARD_SLOT_SCHEMA, createStateStore } from "../src/cli/state-file.mjs";
 import { claimProfile } from "../src/claims/profile.mjs";
 import {
   CLAIM_CODE_STATUSES,
+  COARSE_EXIT_RULE,
+  EXIT_ADVICE,
   STATUS_EXIT_CODES,
   exitCodeForCliError,
   statusForError,
 } from "../src/cli/exit-codes.mjs";
 import { runCli } from "../src/cli/main.mjs";
 import {
+  CLAIM_EXIT_CODES,
   ClaimAlreadyHeldError,
   ClaimClockSkewError,
   ClaimConfigError,
@@ -43,6 +46,7 @@ import {
   ClaimRefInvalidError,
   ClaimRenewRequiredError,
   ClaimStaleError,
+  ClaimSubjectKindError,
   ClaimSupersededError,
   ClaimUnknownOutcomeError,
 } from "../src/claims/errors.mjs";
@@ -141,7 +145,7 @@ const BASE_CLAIMS = Object.freeze({
   renewMinutes: 10,
   graceMinutes: 5,
   label: "dependabot-prep:claimed",
-  package: { name: "@mento-protocol/issues", version: "0.1.0" },
+  package: { name: "@mento-protocol/issues", version: "0.2.0" },
 });
 
 function packageDocument(claims = {}) {
@@ -566,14 +570,14 @@ test("the loader rejects renewMinutes twice over ttlMinutes, minRemainingSeconds
   // hand, and deadlocking the run would be the worse outcome.
   const drifted = harness();
   const warned = await drifted.run(["claims", "read", "--pr", String(PR)], {
-    packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+    packageIdentity: { name: "@mento-protocol/issues", version: "0.9.9" },
   });
   assert.equal(warned.exitCode, 0);
   assert.deepEqual(
     warned.document.warnings.map((warning) => warning.stage),
     ["package-version"],
   );
-  assert.match(warned.document.warnings[0].message, /0\.1\.0.*0\.2\.0/u);
+  assert.match(warned.document.warnings[0].message, /0\.2\.0.*0\.9\.9/u);
 });
 
 test("the config rejects a package block without an exact version", async () => {
@@ -618,7 +622,7 @@ test("the config rejects a package block without an exact version", async () => 
   const accepted = normalizeConfigDocument(packageDocument());
   assert.deepEqual(accepted.claims.package, {
     name: "@mento-protocol/issues",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 });
 
@@ -1250,6 +1254,27 @@ test("mutating commands refuse a missing or non-40-lowercase-hex token with exit
   assert.equal(missing.server.calls.read.length, 0);
 });
 
+test("the advice rows consuming skills copy are pinned, word for word", () => {
+  // README.md's footnote states that these three strings are copied verbatim
+  // into the dependabot-prep skill, its playbook and its prompt, and that the
+  // issue profile inherits the pull-request wording on purpose. Rewording a
+  // row here silently invalidates every copy, so the copies are the test.
+  assert.equal(EXIT_ADVICE[10], "skip this pull request (or family) this run");
+  assert.equal(
+    EXIT_ADVICE[13],
+    "stop publishing this PR and treat work in flight as forfeit",
+  );
+  assert.equal(
+    COARSE_EXIT_RULE,
+    "0 proceed; 10/11/14/15 act as printed; 12 run adopt; 13 stop publishing this PR and treat work in flight as forfeit; 3/16/21 stop and report; 20 retry.",
+  );
+  // Exit 13's long wording is the one the coarse rule repeats (AMENDMENTS §O).
+  assert.ok(
+    COARSE_EXIT_RULE.includes(EXIT_ADVICE[13]),
+    "the coarse rule carries the exit-13 advice verbatim",
+  );
+});
+
 test("the exit-code table matches the status table for every status and error class", async () => {
   // Every claim code names a status, and every status names an exit code.
   for (const [claimCode, status] of Object.entries(CLAIM_CODE_STATUSES)) {
@@ -1258,12 +1283,37 @@ test("the exit-code table matches the status table for every status and error cl
       `${claimCode} names an unknown status ${status}`,
     );
   }
+  // Both directions, because a code in one table and not the other is how an
+  // error falls through to exit 1 with status `usage` — an exit code that
+  // appears in no row of this table, beside a status whose row says 2.
+  // `CLAIM_CONFLICT`, the base class's own code, is in neither table and so is
+  // walked by neither loop. That is deliberate and unchanged: giving it a row
+  // moves a lost compare-and-swap response under the pull-request profile from
+  // exit 1 to exit 10, which is a contract change for the skills that already
+  // read these codes, not something this package may do in passing.
+  for (const [claimCode, exitCode] of Object.entries(CLAIM_EXIT_CODES)) {
+    const status = CLAIM_CODE_STATUSES[claimCode];
+    assert.ok(status, `${claimCode} has no status row`);
+    assert.equal(
+      STATUS_EXIT_CODES[status],
+      exitCode,
+      `${claimCode} exits ${exitCode} but names status ${status}`,
+    );
+  }
+  for (const claimCode of Object.keys(CLAIM_CODE_STATUSES)) {
+    if (claimCode === "CLAIM_USAGE") continue; // raised by the CLI, not the table
+    assert.ok(
+      Object.hasOwn(CLAIM_EXIT_CODES, claimCode),
+      `${claimCode} has no exit-code row`,
+    );
+  }
   const classes = [
     [new ClaimUsageError("usage"), 2, "usage"],
     [new ClaimConfigError("config"), 3, "config"],
     [new ClaimContendedError("contended"), 10, "contended"],
     [new ClaimAlreadyHeldError("held"), 10, "already-held"],
     [new ClaimNotExpiredError("live"), 10, "not-eligible"],
+    [new ClaimSubjectKindError("pull request"), 10, "not-eligible"],
     [new ClaimClockSkewError("skew"), 10, "clock-skew"],
     [new ClaimExpiredError("expired"), 11, "expired"],
     [new ClaimUnknownOutcomeError("unknown"), 12, "unknown-outcome"],
@@ -1618,7 +1668,7 @@ test("doctor reports a measured clock offset and warns above half the budget", a
   assert.equal(inBudget.document.clock.warn, false);
   assert.equal(inBudget.document.clock.measured, true);
   assert.deepEqual(inBudget.document.scopes, ["repo", "workflow"]);
-  assert.equal(inBudget.document.version, "0.1.0");
+  assert.equal(inBudget.document.version, "0.2.0");
   assert.match(inBudget.document.exitCodes.rule, /^0 proceed; 10\/11\/14\/15/u);
   assert.deepEqual(inBudget.document.warnings, []);
 
@@ -5507,7 +5557,7 @@ test("guard reports the warnings its runtime collected before it started", async
     ],
     {
       spawn: recordingSpawn(0).spawn,
-      packageIdentity: { name: "@mento-protocol/issues", version: "0.2.0" },
+      packageIdentity: { name: "@mento-protocol/issues", version: "0.9.9" },
     },
   );
 

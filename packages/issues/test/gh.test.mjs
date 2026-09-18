@@ -40,7 +40,11 @@ import {
 } from "../src/gh/index.mjs";
 import { callOptions } from "../src/gh/rest.mjs";
 import { exitCodeForCliError, statusForError } from "../src/cli/exit-codes.mjs";
-import { readPullRequestState, readTokenScopes } from "../src/cli/github.mjs";
+import {
+  readIssueState,
+  readPullRequestState,
+  readTokenScopes,
+} from "../src/cli/github.mjs";
 import { splitRepo } from "../src/shared/split-repo.mjs";
 
 const REF_NAME = "refs/mento-claims/v1/pr/872";
@@ -921,6 +925,89 @@ test("the CLI reads forward the caller's env, signal and timeout", async () => {
     timeoutMs: 7_000,
     signal: controller.signal,
     env: options.env,
+  });
+});
+
+test("readIssueState asks for the issue, its state reason and its kind", async () => {
+  // Every other test in this repository reaches `readIssueState` through an
+  // `operations.gh` stub, so the argv, the `--jq` and the never-throw contract
+  // were asserted nowhere. `verifySubjectKind` reads the exit-10 refusal
+  // through this one call, and `claims list --issues` prints its three fields.
+  const seen = [];
+  const json = async (args, runOptions) => {
+    seen.push({ args, runOptions });
+    return { state: "closed", stateReason: "completed", pullRequest: true };
+  };
+
+  const closed = await readIssueState({ repo: "owner/name" }, 4312, { json });
+  assert.deepEqual(closed, {
+    number: 4312,
+    state: "closed",
+    stateReason: "completed",
+    pullRequest: true,
+    error: null,
+  });
+  assert.equal(seen.length, 1);
+  // The path is `issues/{n}`, not `pulls/{n}`: one number space, and only the
+  // issues endpoint answers for both kinds. `state_reason` is a REST field
+  // name and `pull_request` a REST key whose presence — not its value — is
+  // what makes the number a pull request.
+  assert.deepEqual(seen[0].args, [
+    "api",
+    "repos/owner/name/issues/4312",
+    "--jq",
+    "{state: .state, stateReason: .state_reason, pullRequest: (.pull_request != null)}",
+  ]);
+  assert.equal(seen[0].runOptions.mutates, false);
+
+  // An open issue that is not a pull request: `state_reason` is null there,
+  // and null is not a string, so it stays null rather than becoming "null".
+  const open = await readIssueState({ repo: "owner/name" }, 4313, {
+    json: async () => ({
+      state: "open",
+      stateReason: null,
+      pullRequest: false,
+    }),
+  });
+  assert.deepEqual(open, {
+    number: 4313,
+    state: "open",
+    stateReason: null,
+    pullRequest: false,
+    error: null,
+  });
+
+  // A number that is not a positive safe integer is spliced into an unencoded
+  // REST path, so it is refused before the call, in the ordinary result shape:
+  // a listing must still print the issues it did read.
+  let calls = 0;
+  const counted = async () => {
+    calls += 1;
+    return { state: "open", stateReason: null, pullRequest: false };
+  };
+  for (const number of [0, -1, 1.5, Number.NaN, "1/../../secrets"]) {
+    const refused = await readIssueState({ repo: "owner/name" }, number, {
+      json: counted,
+    });
+    assert.equal(refused.state, null, `${number} must not be read`);
+    assert.equal(refused.pullRequest, null, `${number} must not be read`);
+    assert.match(refused.error, /must be a positive integer/u);
+  }
+  assert.equal(calls, 0, "no gh call was made");
+
+  // The never-throw contract: one unreadable issue is reported as its own
+  // `error` string, so it cannot abort the listing around it.
+  const failed = await readIssueState({ repo: "owner/name" }, 4314, {
+    json: async () => {
+      throw new Error("HTTP 404: Not Found\nsecond line");
+    },
+  });
+  assert.deepEqual(failed, {
+    number: 4314,
+    state: null,
+    stateReason: null,
+    pullRequest: null,
+    error: "HTTP 404: Not Found",
   });
 });
 

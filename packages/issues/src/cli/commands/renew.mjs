@@ -31,7 +31,7 @@ import {
  */
 export async function runRenew(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const token = flags.token;
   const runId = flags["run-id"];
   const ifDue = flags["if-due"] === true;

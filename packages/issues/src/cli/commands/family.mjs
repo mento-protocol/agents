@@ -36,6 +36,7 @@ import {
   recordLeaseState,
   recordUnknownOutcome,
 } from "./common.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 
 /**
  * Which collected release failure speaks for the whole family.
@@ -79,8 +80,10 @@ function guardCommand(runtime, members) {
   // as the rest, and a third interpolation of the raw config path was a third
   // way to get both wrong.
   const globals = runtime.commandGlobals ?? "";
+  const numberFlag =
+    runtime.numberFlag ?? runtime.ctx?.profile?.numberKey ?? "pr";
   const pairs = members
-    .map((member) => `--pr ${member.number} --token ${member.token}`)
+    .map((member) => `--${numberFlag} ${member.number} --token ${member.token}`)
     .join(" ");
   const runId = members[0]?.runId ?? "<run-id>";
   return `mento-issues claims guard${globals} ${pairs} --run-id ${runId} --gate push -- <command>`;
@@ -129,7 +132,7 @@ async function labelSurvivingLocks(runtime, order, error) {
  */
 export async function runFamilyClaim(runtime) {
   const { ctx, flags } = runtime;
-  const numbers = flags.prs;
+  const numbers = runtime.numbers;
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
   markFailureContext(runtime, numbers[0]);
   // The plan predicts execution, so it is refused by the same input checks.
@@ -142,6 +145,31 @@ export async function runFamilyClaim(runtime) {
   // naming one member twice printed two identical plans and then refused the
   // moment it was run. The plan is built from the order the run would use.
   const order = planFamilyClaims(numbers);
+
+  // The same acquire-time check `claim` and `takeover` make, for every member,
+  // in claim order and before the first write. A family is the path most
+  // likely to be handed a pull-request number — a list of numbers is pasted,
+  // not typed — and a refusal in the middle of one leaves the earlier members
+  // to the rollback. Off unless the config asks, so it costs nothing by
+  // default. Above the dry-run branch, because a sweep plans the batch before
+  // it commits to it: a plan that skipped the check called every pull-request
+  // number in the batch claimable.
+  //
+  // The failure context is moved to each member before its own check, because
+  // the check throws about that member and the document is built from the
+  // context. While it stayed on `numbers[0]`, a family whose third member was
+  // a pull request printed the first member's `ref`, `scope`, inspection line
+  // and recovery commands beside an `error.details.number` naming the third —
+  // an operator sent to act on a claim that was never refused. Each failed
+  // read is recorded on the runtime by `assertSubjectKind` itself, so a
+  // warning about one member survives a refusal or a throw about a later one.
+  for (const number of order) {
+    markFailureContext(runtime, number);
+    await assertSubjectKind(runtime, number);
+  }
+  // Every member passed, so the context returns to the member the write path
+  // reports under: `claimFamily` fails as one family, not as one member.
+  markFailureContext(runtime, numbers[0]);
 
   if (ctx.options.dryRun === true) {
     const plans = [];
@@ -210,13 +238,13 @@ export async function runFamilyClaim(runtime) {
  */
 export async function runFamilyRelease(runtime) {
   const { ctx, flags } = runtime;
-  const numbers = flags.prs;
+  const numbers = runtime.numbers;
   const tokens = flags.tokens;
   const runId = flags["run-id"];
   const outcome = assertOutcome(flags.outcome);
   if (numbers.length !== tokens.length) {
     throw new ClaimUsageError(
-      `family release needs one token per pull request; got ${numbers.length} numbers and ${tokens.length} tokens`,
+      `family release needs one token per ${ctx.profile.subjectNoun}; got ${numbers.length} numbers and ${tokens.length} tokens`,
       { details: { numbers, tokens: tokens.length } },
     );
   }

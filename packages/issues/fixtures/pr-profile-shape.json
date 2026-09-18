@@ -1,0 +1,282 @@
+{
+  "comment": "The frozen shape of `prClaimProfile()`, recorded from 0.1.0 BEFORE the `numberedClaimProfile` extraction and never regenerated. Every production dependabot-prep ref derives from this factory, so the extraction is only safe while this file still describes it: field for field, metadataKeys in order, the rendered ref names, and the exact text of every refusal the factory raises. Regenerating this file would delete the proof it exists to carry.",
+  "recordedFrom": {
+    "package": "@mento-protocol/issues",
+    "version": "0.1.0"
+  },
+  "inputs": {
+    "repository": "mento-protocol/frontend-monorepo",
+    "numbers": ["1", "872", "9007199254740991"],
+    "actions": ["acquire", "renew", "takeover", "release"],
+    "overrides": {
+      "namespace": "refs/rehearsal-claims/v9/pr",
+      "refTemplate": "refs/rehearsal-claims/v9/pr/{pr}",
+      "kind": "mento-claim-rehearsal",
+      "payloadVersion": 7,
+      "author": {
+        "name": "Rehearsal claims",
+        "email": "rehearsal@users.noreply.github.com"
+      }
+    },
+    "metadataValidatorVectors": [
+      null,
+      "0000000000000000000000000000000000000000",
+      "0123456789abcdef0123456789abcdef01234567",
+      "0123456789ABCDEF0123456789abcdef01234567",
+      "0123456789abcdef0123456789abcdef0123456",
+      "https://github.com/mento-protocol/frontend-monorepo/pull/872#issuecomment-1",
+      "https://example.com/x",
+      "https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "",
+      42
+    ]
+  },
+  "default": {
+    "id": "pr",
+    "kind": "mento-claim",
+    "payloadVersion": 1,
+    "namespace": "refs/mento-claims/v1/pr",
+    "refTemplate": "refs/mento-claims/v1/pr/{pr}",
+    "author": {
+      "name": "Mento claims",
+      "email": "claims@users.noreply.github.com"
+    },
+    "errorCodes": {
+      "conflict": "CLAIM_CONFLICT",
+      "stale": "CLAIM_STALE",
+      "unknown": "CLAIM_UNKNOWN_OUTCOME"
+    },
+    "leaseCapable": true,
+    "releaseRequiresOwnerCheck": true,
+    "numberKey": "pr",
+    "metadataKeys": [
+      "lastPushedHead",
+      "reviewRequestedHead",
+      "summaryCommentUrl"
+    ],
+    "metadataValidatorKeys": [
+      "lastPushedHead",
+      "reviewRequestedHead",
+      "summaryCommentUrl"
+    ],
+    "subjectNoun": "pull request",
+    "ownKeys": [
+      "id",
+      "kind",
+      "payloadVersion",
+      "namespace",
+      "refTemplate",
+      "author",
+      "errorCodes",
+      "leaseCapable",
+      "releaseRequiresOwnerCheck",
+      "numberKey",
+      "metadataKeys",
+      "metadataValidators",
+      "subjectNoun",
+      "canonicalScope",
+      "refName",
+      "sameIdentity",
+      "subject",
+      "operationFor"
+    ],
+    "scopes": {
+      "1": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 1
+      },
+      "872": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 872
+      },
+      "9007199254740991": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 9007199254740991
+      }
+    },
+    "refNames": {
+      "1": "refs/mento-claims/v1/pr/1",
+      "872": "refs/mento-claims/v1/pr/872",
+      "9007199254740991": "refs/mento-claims/v1/pr/9007199254740991"
+    },
+    "subjects": {
+      "1": "PR #1",
+      "872": "PR #872",
+      "9007199254740991": "PR #9007199254740991"
+    },
+    "operationFor": {
+      "acquire": "acquire",
+      "renew": "renew",
+      "takeover": "takeover",
+      "release": "complete"
+    },
+    "metadataValidators": {
+      "lastPushedHead": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reviewRequestedHead": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "summaryCommentUrl": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ]
+    }
+  },
+  "overridden": {
+    "id": "pr",
+    "kind": "mento-claim-rehearsal",
+    "payloadVersion": 7,
+    "namespace": "refs/rehearsal-claims/v9/pr",
+    "refTemplate": "refs/rehearsal-claims/v9/pr/{pr}",
+    "author": {
+      "name": "Rehearsal claims",
+      "email": "rehearsal@users.noreply.github.com"
+    },
+    "errorCodes": {
+      "conflict": "CLAIM_CONFLICT",
+      "stale": "CLAIM_STALE",
+      "unknown": "CLAIM_UNKNOWN_OUTCOME"
+    },
+    "leaseCapable": true,
+    "releaseRequiresOwnerCheck": true,
+    "numberKey": "pr",
+    "metadataKeys": [
+      "lastPushedHead",
+      "reviewRequestedHead",
+      "summaryCommentUrl"
+    ],
+    "metadataValidatorKeys": [
+      "lastPushedHead",
+      "reviewRequestedHead",
+      "summaryCommentUrl"
+    ],
+    "subjectNoun": "pull request",
+    "ownKeys": [
+      "id",
+      "kind",
+      "payloadVersion",
+      "namespace",
+      "refTemplate",
+      "author",
+      "errorCodes",
+      "leaseCapable",
+      "releaseRequiresOwnerCheck",
+      "numberKey",
+      "metadataKeys",
+      "metadataValidators",
+      "subjectNoun",
+      "canonicalScope",
+      "refName",
+      "sameIdentity",
+      "subject",
+      "operationFor"
+    ],
+    "scopes": {
+      "1": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 1
+      },
+      "872": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 872
+      },
+      "9007199254740991": {
+        "repo": "mento-protocol/frontend-monorepo",
+        "pr": 9007199254740991
+      }
+    },
+    "refNames": {
+      "1": "refs/rehearsal-claims/v9/pr/1",
+      "872": "refs/rehearsal-claims/v9/pr/872",
+      "9007199254740991": "refs/rehearsal-claims/v9/pr/9007199254740991"
+    },
+    "subjects": {
+      "1": "PR #1",
+      "872": "PR #872",
+      "9007199254740991": "PR #9007199254740991"
+    },
+    "operationFor": {
+      "acquire": "acquire",
+      "renew": "renew",
+      "takeover": "takeover",
+      "release": "complete"
+    },
+    "metadataValidators": {
+      "lastPushedHead": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reviewRequestedHead": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "summaryCommentUrl": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ]
+    }
+  },
+  "refusals": {
+    "templateWithoutToken": "The pull-request ref template must contain {pr} exactly once, got: \"refs/mento-claims/v1/pr/fixed\"",
+    "templateWithTwoTokens": "The pull-request ref template must contain {pr} exactly once, got: \"refs/mento-claims/v1/pr/{pr}/{pr}\"",
+    "templateNotAString": "The pull-request ref template must contain {pr} exactly once, got: 17",
+    "templateOutsideNamespace": "The pull-request ref template must render under the namespace \"refs/mento-claims/v1/pr\", got: \"refs/custom/{pr}/claim\"",
+    "scopeZero": "Pull request number must be a positive safe integer, got: <number>",
+    "scopeNegative": "Pull request number must be a positive safe integer, got: <number>",
+    "scopeFractional": "Pull request number must be a positive safe integer, got: <number>",
+    "scopeUnsafe": "Pull request number must be a positive safe integer, got: <number>",
+    "scopeString": "Pull request number must be a positive safe integer, got: <string, 3 characters>",
+    "scopeNull": "Pull request number must be a positive safe integer, got: null"
+  }
+}

@@ -13,6 +13,7 @@ import {
 } from "../../claims/transitions.mjs";
 import { projectClaimLabelAfter } from "../../claims/label.mjs";
 import { collectSetFlags } from "../args.mjs";
+import { assertSubjectKind } from "./subject-kind.mjs";
 import { planTransition } from "../dry-run.mjs";
 import { claimBlock } from "../output.mjs";
 import {
@@ -27,7 +28,7 @@ import {
  */
 export async function runTakeover(runtime) {
   const { ctx, flags } = runtime;
-  const number = flags.pr;
+  const number = runtime.number;
   const supersedes = flags.supersedes;
   const { scope, ref } = markFailureContext(runtime, number);
   const metadata = collectSetFlags(flags.set, ctx.profile.metadataKeys);
@@ -36,6 +37,14 @@ export async function runTakeover(runtime) {
     metadata,
     runIdPrefix: flags["run-id-prefix"] ?? null,
   });
+
+  // Optional, and off unless the config asks: one read that proves the number
+  // is an issue and not a pull request wearing an issue number. Above the
+  // dry-run branch, exactly as in `claim`, so the plan and the run agree on a
+  // pull-request number instead of the plan answering `ok`. A failed read is
+  // recorded on the runtime, exactly as in `claim`, so it survives a throw
+  // from the transition below.
+  await assertSubjectKind(runtime, number);
 
   if (ctx.options.dryRun === true) {
     return {

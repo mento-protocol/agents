@@ -20,9 +20,16 @@ directory name. A skill directory may also contain:
 - `scripts/`: helper scripts the skill runs.
 - `references/`: supporting documents the skill reads on demand.
 - `assets/`: files the skill's output is built from or copies.
+- `fixtures/`: recorded inputs and byte vectors the skill's own test suite
+  under `scripts/` reads.
+- One archived companion document next to `SKILL.md`, such as
+  `SEALED-LEGACY.md`, when a superseded procedure must stay readable.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
-and layout. CI runs it on every pull request.
+and layout, and `node --test skills/*/scripts/*.test.mjs` to run every
+skill's own suite; on a host whose temp directory is world-writable, set
+`DEPENDABOT_PREP_TEST_SEALED_ROOT` to a directory only you can write. CI runs
+both on every pull request.
 
 ## Public readership
 
@@ -53,12 +60,16 @@ into this repository:
 1. Scrub the skill for the public-readership rule above: internal
    hostnames, private repository names, personal machine paths, incident
    notes, and personal model-routing rules.
-2. Run `node scripts/validate-skills.mjs` and fix every reported problem.
+2. Run `node scripts/validate-skills.mjs` and
+   `node --test skills/*/scripts/*.test.mjs`, and fix every reported problem.
 3. Verify the skill from a fresh clone: run `scripts/link-skills.sh`, then
    `scripts/link-skills.sh check`, and confirm the skill links with no
    drift.
-4. Delete the source copy in the personal library in the same change, so
-   the skill has only one home.
+4. Delete the source copy in the personal library, so the skill has only one
+   home. Merge the company-side addition and pull it on every consumer first;
+   the personal-side removal merges after. `link-skills.sh` prunes a dangling
+   link on its next run, so any gap uninstalls the skill everywhere
+   (dependabot-prep, 2026-09-17).
 5. For a third-party skill, record its upstream source and license in the
    skill's `SKILL.md` frontmatter.
 6. Keep `SKILL.md` under 500 lines and keep `references/` one level deep.

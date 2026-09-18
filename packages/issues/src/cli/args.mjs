@@ -69,18 +69,19 @@ export const COMMAND_SPECS = Object.freeze({
     command: "claims.read",
     mutates: false,
     requiresConfig: true,
-    flags: { pr: { type: "integer" } },
-    required: ["pr"],
+    flags: {},
+    numberFlags: "single",
+    required: [],
   },
   "claims list": {
     command: "claims.list",
     mutates: false,
     requiresConfig: true,
     flags: {
-      prs: { type: "integers" },
       stale: { type: "boolean" },
       concurrency: { type: "integer" },
     },
+    numberFlags: "filter",
     required: [],
   },
   "claims claim": {
@@ -89,24 +90,24 @@ export const COMMAND_SPECS = Object.freeze({
     requiresConfig: true,
     generatesRunId: true,
     flags: {
-      pr: { type: "integer" },
       "run-id-prefix": { type: "string" },
       "no-takeover": { type: "boolean" },
       set: { type: "keyvalue", repeat: true },
     },
-    required: ["pr"],
+    numberFlags: "single",
+    required: [],
   },
   "claims renew": {
     command: "claims.renew",
     mutates: true,
     requiresConfig: true,
     flags: {
-      pr: { type: "integer" },
       token: { type: "string" },
       "if-due": { type: "boolean" },
       set: { type: "keyvalue", repeat: true },
     },
-    required: ["pr", "token", "run-id"],
+    numberFlags: "single",
+    required: ["token", "run-id"],
   },
   "claims takeover": {
     command: "claims.takeover",
@@ -114,35 +115,35 @@ export const COMMAND_SPECS = Object.freeze({
     requiresConfig: true,
     generatesRunId: true,
     flags: {
-      pr: { type: "integer" },
       supersedes: { type: "string" },
       "run-id-prefix": { type: "string" },
       set: { type: "keyvalue", repeat: true },
     },
-    required: ["pr", "supersedes"],
+    numberFlags: "single",
+    required: ["supersedes"],
   },
   "claims release": {
     command: "claims.release",
     mutates: true,
     requiresConfig: true,
     flags: {
-      pr: { type: "integer" },
       token: { type: "string" },
       outcome: { type: "string" },
     },
-    required: ["pr", "token", "run-id"],
+    numberFlags: "single",
+    required: ["token", "run-id"],
   },
   "claims verify": {
     command: "claims.verify",
     mutates: false,
     requiresConfig: true,
     flags: {
-      pr: { type: "integer" },
       token: { type: "string" },
       gate: { type: "string" },
       advisory: { type: "boolean" },
     },
-    required: ["pr", "token", "run-id"],
+    numberFlags: "single",
+    required: ["token", "run-id"],
   },
   "claims guard": {
     command: "claims.guard",
@@ -150,21 +151,20 @@ export const COMMAND_SPECS = Object.freeze({
     requiresConfig: true,
     childArgv: true,
     flags: {
-      pr: { type: "integer", repeat: true },
       token: { type: "string", repeat: true },
       gate: { type: "string" },
       "no-renew": { type: "boolean" },
       advisory: { type: "boolean" },
       report: { type: "string" },
     },
-    required: ["pr", "token", "run-id", "gate"],
+    numberFlags: "repeat",
+    required: ["token", "run-id", "gate"],
   },
   "claims adopt": {
     command: "claims.adopt",
     mutates: false,
     requiresConfig: true,
     flags: {
-      pr: { type: "integer" },
       candidate: { type: "string" },
       "operation-id": { type: "string" },
       // The LOCK a candidate UNLOCK closes. `adoptRelease` proves a landed
@@ -175,7 +175,8 @@ export const COMMAND_SPECS = Object.freeze({
       "from-state": { type: "boolean" },
       action: { type: "string" },
     },
-    required: ["pr"],
+    numberFlags: "single",
+    required: [],
   },
   "claims family claim": {
     command: "claims.family.claim",
@@ -183,22 +184,22 @@ export const COMMAND_SPECS = Object.freeze({
     requiresConfig: true,
     generatesRunId: true,
     flags: {
-      prs: { type: "integers" },
       "run-id-prefix": { type: "string" },
       set: { type: "keyvalue", repeat: true },
     },
-    required: ["prs"],
+    numberFlags: "list",
+    required: [],
   },
   "claims family release": {
     command: "claims.family.release",
     mutates: true,
     requiresConfig: true,
     flags: {
-      prs: { type: "integers" },
       tokens: { type: "strings" },
       outcome: { type: "string" },
     },
-    required: ["prs", "tokens", "run-id"],
+    numberFlags: "list",
+    required: ["tokens", "run-id"],
   },
   "claims label ensure": {
     command: "claims.label.ensure",
@@ -217,8 +218,9 @@ export const COMMAND_SPECS = Object.freeze({
     // applies when it does write.
     mutates: (flags) => flags?.apply === true,
     requiresConfig: true,
-    flags: { pr: { type: "integer" }, apply: { type: "boolean" } },
-    required: ["pr"],
+    flags: { apply: { type: "boolean" } },
+    numberFlags: "single",
+    required: [],
   },
   // The one command that removes a guard slot it did not create. `guard`
   // never takes a slot over, so a crashed guard's slot is cleared here, by an
@@ -228,8 +230,9 @@ export const COMMAND_SPECS = Object.freeze({
     command: "claims.slot.clear",
     mutates: false,
     requiresConfig: true,
-    flags: { pr: { type: "integer" } },
-    required: ["pr", "run-id"],
+    flags: {},
+    numberFlags: "single",
+    required: ["run-id"],
   },
   "claims doctor": {
     command: "claims.doctor",
@@ -439,8 +442,62 @@ export function resolveCommand(head) {
   );
 }
 
+/**
+ * The number flags each `numberFlags` mode declares, and how many are legal.
+ *
+ * One declaration, read by both the grammar and the exactly-one rule. Every
+ * command that names an item declares both flags and lets the loaded config's
+ * profile decide which one is legal, so `--pr` under an issue config is "the
+ * wrong flag for this profile" — named, and refused before any network call —
+ * rather than "unknown flag", which describes the grammar and not the mistake.
+ */
+const NUMBER_FLAG_MODES = Object.freeze({
+  single: {
+    names: Object.freeze(["pr", "issue"]),
+    declared: Object.freeze({ type: "integer" }),
+    required: true,
+  },
+  // `guard` takes a family as repeated `--pr`/`--token` pairs under one run id.
+  repeat: {
+    names: Object.freeze(["pr", "issue"]),
+    declared: Object.freeze({ type: "integer", repeat: true }),
+    required: true,
+  },
+  list: {
+    names: Object.freeze(["prs", "issues"]),
+    declared: Object.freeze({ type: "integers" }),
+    required: true,
+  },
+  // `claims list` filters an inventory, so naming no item lists them all. At
+  // most one flag still holds: a listing asked for both names two namespaces
+  // and this command reads one.
+  filter: {
+    names: Object.freeze(["prs", "issues"]),
+    declared: Object.freeze({ type: "integers" }),
+    required: false,
+  },
+});
+
+/**
+ * The number-flag rule this command follows, or null when it names no item.
+ *
+ * @param {object} spec a command spec.
+ * @returns {{names: string[], declared: object, required: boolean}|null}
+ */
+export function numberFlagMode(spec) {
+  const mode = spec?.numberFlags;
+  // Own properties only, the rule every lookup table in this package follows.
+  return typeof mode === "string" && Object.hasOwn(NUMBER_FLAG_MODES, mode)
+    ? NUMBER_FLAG_MODES[mode]
+    : null;
+}
+
 function flagGrammar(spec) {
-  return { ...GLOBAL_FLAGS, ...GATED_FLAGS, ...spec.flags };
+  const grammar = { ...GLOBAL_FLAGS, ...GATED_FLAGS, ...spec.flags };
+  const mode = numberFlagMode(spec);
+  if (mode === null) return grammar;
+  for (const name of mode.names) grammar[name] = mode.declared;
+  return grammar;
 }
 
 /**
@@ -471,6 +528,58 @@ export function parseCommandLine(argv) {
       error.commandKey = key;
     }
     throw error;
+  }
+}
+
+/**
+ * Refuse a command line that names its item with the wrong count of flags.
+ *
+ * Both flags are in the grammar and the loaded config decides which one is
+ * legal, so the count is all the parser can judge — and it judges it here,
+ * before a configuration document is read and long before any network call.
+ * Which of the two is right for the loaded profile is settled in
+ * `resolveNumberFlags`, and is also exit 2.
+ *
+ * It runs before the generic `spec.required` loop, because `"pr"`/`"prs"` led
+ * every `required` array this rule replaced. `claims renew` with nothing on
+ * the line named the number flag first; counting afterwards made it name
+ * `--token` instead, which sends an operator after the second missing flag
+ * while the first one is still missing.
+ *
+ * The missing-flag refusal keeps the `details.flag` key the generic
+ * `spec.required` loop wrote before this rule replaced it, carrying the
+ * pull-request spelling this command used to require (`"pr"`, `"prs"` — the
+ * bare name, as that loop wrote it). A consuming skill that reads
+ * `error.details.flag` read `undefined` the moment the key was renamed, and
+ * nothing in this feature needs that key gone. `details.flags` is the new
+ * key, listing both spellings with their dashes.
+ *
+ * @param {string} key the resolved command.
+ * @param {object} spec its spec.
+ * @param {object} flags the parsed flags.
+ * @returns {void}
+ * @throws {ClaimUsageError} for both flags, or for neither when one is needed.
+ */
+function assertOneNumberFlag(key, spec, flags) {
+  const mode = numberFlagMode(spec);
+  if (mode === null) return;
+  const supplied = mode.names.filter((name) => Object.hasOwn(flags, name));
+  const rendered = mode.names.map((name) => `--${name}`).join(" or ");
+  const spelled = mode.names.map((name) => `--${name}`);
+  if (supplied.length > 1) {
+    // No `flag` row here: this refusal is about the pair, and the line named
+    // both of them. The refusal below is the one that replaced a `required`
+    // row, so it is the one that owes the old key.
+    throw usage(`${key} takes ${rendered}, not both`, {
+      command: key,
+      flags: spelled,
+    });
+  }
+  if (supplied.length === 0 && mode.required) {
+    throw usage(
+      `${key} requires ${rendered} (the loaded config's profile decides which)`,
+      { command: key, flag: mode.names[0], flags: spelled },
+    );
   }
 }
 
@@ -582,6 +691,7 @@ function parseResolvedCommand({ key, spec, rest, childArgv }) {
     }
   }
 
+  assertOneNumberFlag(key, spec, flags);
   for (const name of spec.required) {
     if (!Object.hasOwn(flags, name)) {
       throw usage(`${key} requires --${name}`, { command: key, flag: name });
@@ -641,25 +751,32 @@ export function assertTimeoutSeconds(seconds) {
 }
 
 /**
- * Zip repeated `--pr`/`--token` occurrences into ordered pairs.
+ * Zip repeated number/`--token` occurrences into ordered pairs.
  *
  * AMENDMENTS §D: guard accepts a family as repeated pairs under one run id.
- * A pair is only well formed when each `--pr` is immediately followed by its
- * `--token`, so the pairing is read from the flag order rather than from two
- * independent lists that could silently mis-align.
+ * A pair is only well formed when each number flag is immediately followed by
+ * its `--token`, so the pairing is read from the flag order rather than from
+ * two independent lists that could silently mis-align.
+ *
+ * The number flag is named by the caller rather than matched as the literal
+ * `pr`, because the loaded config's profile decides which of `--pr` and
+ * `--issue` this run uses, and both refusals have to print the one the operator
+ * actually typed.
  *
  * @param {object[]} order the ordered flag occurrences.
+ * @param {string} [numberFlag] the number flag in force.
  * @returns {Array<{number: number, token: string}>}
  */
-export function pairClaimFlags(order) {
+export function pairClaimFlags(order, numberFlag = "pr") {
   const pairs = [];
   let pending = null;
   for (const entry of order) {
-    if (entry.name === "pr") {
+    if (entry.name === numberFlag) {
       if (pending !== null) {
-        throw usage(`--pr ${pending} is not followed by its --token`, {
-          number: pending,
-        });
+        throw usage(
+          `--${numberFlag} ${pending} is not followed by its --token`,
+          { number: pending },
+        );
       }
       pending = entry.value;
     } else if (entry.name === "token") {
@@ -667,7 +784,7 @@ export function pairClaimFlags(order) {
         // The value here is always a 40-hex object id: `assertObjectIdFlags`
         // runs before any handler and refuses anything else, so this reports a
         // commit oid rather than a credential.
-        throw usage("--token must follow the --pr it belongs to", {
+        throw usage(`--token must follow the --${numberFlag} it belongs to`, {
           token: entry.value,
         });
       }
@@ -676,7 +793,7 @@ export function pairClaimFlags(order) {
     }
   }
   if (pending !== null) {
-    throw usage(`--pr ${pending} is not followed by its --token`, {
+    throw usage(`--${numberFlag} ${pending} is not followed by its --token`, {
       number: pending,
     });
   }

@@ -56,7 +56,7 @@ adoption's diff, already written.
   it is not an authorization boundary. Binding possession to something
   non-public — a `runSecretSha256` in the LOCK payload, its preimage held in
   the process and in the 0600 state file — is the change that would close it,
-  and is not in 0.1.0.
+  and 0.2.0 does not do it.
 
 - **I-B (no publication without proof).** Every branch push and review request
   runs inside `guard`, which requires head ≡ token, `state === "LOCK"`,
@@ -156,21 +156,42 @@ recovery text assumes, so tuning it would make the printed advice wrong.
 
 ## Profiles
 
-A profile is the only thing that differs between the two namespaces.
+A profile is the only thing that differs between the three namespaces.
 
-| Field                       | `prClaimProfile()`                                           | `issueBoardProfile()`                                       |
-| --------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| `id`                        | `pr`                                                         | `issue-board`                                               |
-| `kind`                      | `mento-claim`                                                | `mento-issue-board-mutex`                                   |
-| `namespace`                 | `refs/mento-claims/v1/pr`                                    | `refs/mento-issue-board-locks/v1`                           |
-| reference name              | `<namespace>/<number>`                                       | `<namespace>/<sha256(repo\nissue)>`                         |
-| `author`                    | `Mento claims <claims@users.noreply.github.com>`             | `Mento issue board <issue-board@users.noreply.github.com>`  |
-| `leaseCapable`              | `true`                                                       | `false`                                                     |
-| `releaseRequiresOwnerCheck` | `true`                                                       | `false`                                                     |
-| `metadataKeys`              | `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl` | `branch`, `previousBranch`, `claimedAt`, `pr`, `previousPr` |
-| `errorCodes.conflict`       | `CLAIM_CONFLICT`                                             | `ISSUE_OWNERSHIP_CONFLICT`                                  |
-| `errorCodes.stale`          | `CLAIM_STALE`                                                | `ISSUE_MUTATION_LOCK_STALE`                                 |
-| `errorCodes.unknown`        | `CLAIM_UNKNOWN_OUTCOME`                                      | `ISSUE_MUTATION_LOCK_RECONCILIATION_UNKNOWN`                |
+| Field                       | `prClaimProfile()`                                           | `issueClaimProfile()`                            | `issueBoardProfile()`                                       |
+| --------------------------- | ------------------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------------------- |
+| `id`                        | `pr`                                                         | `issue`                                          | `issue-board`                                               |
+| `kind`                      | `mento-claim`                                                | `mento-claim`                                    | `mento-issue-board-mutex`                                   |
+| `namespace`                 | `refs/mento-claims/v1/pr`                                    | `refs/mento-claims/v1/issue`                     | `refs/mento-issue-board-locks/v1`                           |
+| reference name              | `<namespace>/<number>`                                       | `<namespace>/<number>`                           | `<namespace>/<sha256(repo\nissue)>`                         |
+| `numberKey`                 | `pr`                                                         | `issue`                                          | `issue`                                                     |
+| `numberToken`               | `{pr}`                                                       | `{issue}`                                        | `null`                                                      |
+| `itemKind`                  | `pullRequest`                                                | `issue`                                          | `null`                                                      |
+| `author`                    | `Mento claims <claims@users.noreply.github.com>`             | `Mento claims <claims@users.noreply.github.com>` | `Mento issue board <issue-board@users.noreply.github.com>`  |
+| `leaseCapable`              | `true`                                                       | `true`                                           | `false`                                                     |
+| `releaseRequiresOwnerCheck` | `true`                                                       | `true`                                           | `false`                                                     |
+| `metadataKeys`              | `lastPushedHead`, `reviewRequestedHead`, `summaryCommentUrl` | `branch`, `pullRequest`, `lastCommentUrl`        | `branch`, `previousBranch`, `claimedAt`, `pr`, `previousPr` |
+| `errorCodes.conflict`       | `CLAIM_CONFLICT`                                             | `CLAIM_CONFLICT`                                 | `ISSUE_OWNERSHIP_CONFLICT`                                  |
+| `errorCodes.stale`          | `CLAIM_STALE`                                                | `CLAIM_STALE`                                    | `ISSUE_MUTATION_LOCK_STALE`                                 |
+| `errorCodes.unknown`        | `CLAIM_UNKNOWN_OUTCOME`                                      | `CLAIM_UNKNOWN_OUTCOME`                          | `ISSUE_MUTATION_LOCK_RECONCILIATION_UNKNOWN`                |
+
+`prClaimProfile` and `issueClaimProfile` are one body — `numberedClaimProfile`
+— with a different spec. They claim one decimal item number rendered into one
+readable ref name, and differ only in their namespace, their placeholder, the
+nouns their refusals use and the metadata they carry. `numberToken` exists
+because two sites take a template apart, `claimNumberPattern` and the config
+loader's `assertScopeTemplate`, and both once hardcoded `{pr}`.
+
+The nouns are separate spec fields rather than derived from `subjectNoun`: the
+pull-request construction refusals read "pull-request", hyphenated, while
+`subjectNoun` is "pull request", and `fixtures/pr-profile-shape.json` pins
+both.
+
+GitHub serves issues and pull requests from one number space, so
+`refs/mento-claims/v1/pr/872` and `refs/mento-claims/v1/issue/872` are two
+independent mutexes over at most one real item. They never collide — separate
+refs, separate state-file prefixes, separate guard slots, separate labels — and
+they never coordinate either.
 
 Every reference name passes `assertValidRefName` before any network call: it
 starts with `refs/`, has at least two `/`, and carries no empty or `.`-leading
@@ -1018,6 +1039,7 @@ ClaimError
 │   ├── ClaimSupersededError    CLAIM_SUPERSEDED          13
 │   ├── ClaimNotHeldError       CLAIM_NOT_HELD            14
 │   └── ClaimRenewRequiredError CLAIM_RENEW_REQUIRED      15
+├── ClaimSubjectKindError       CLAIM_SUBJECT_KIND        10
 ├── ClaimUnknownOutcomeError    profile.errorCodes.unknown 12
 ├── ClaimStaleError             profile.errorCodes.stale  16
 │   └── ClaimRefInvalidError    CLAIM_REF_INVALID         16
@@ -1027,6 +1049,18 @@ ClaimError
 Every error carries **both** `err.code` — profile-mapped, so monitoring's
 existing string matching keeps working, unknown outcomes included — and
 `err.claimCode`, the canonical vocabulary the CLI's exit table reads.
+
+`ClaimRefInvalidError` carries `refInvalid === true` as well. `parseClaimPayload`
+marks its own refusal with that flag and every read path re-raises the refusal
+as this class, so the flag belongs to the class rather than to whichever error
+started the chain. Changed in 0.2.0: `acquireClaim` (through
+`initializeClaimRef`) and `takeoverClaim` used a raw read, so a payload the
+loaded profile cannot parse left them as a bare `ClaimConflictError` —
+`CLAIM_CONFLICT`, which the CLI exit table does not list, so exit 1 `usage`.
+Both now re-raise as `ClaimRefInvalidError`: exit 16 `stale`, the answer
+`readClaim`, `renewClaim` and `listClaims` always gave on the same reference.
+The `pr` profile changes with them, deliberately: one wedged reference must not
+answer two ways depending on which command found it.
 
 `isRecoverableClaimRaceError(err)` walks **only** `err.cause`, never
 `AggregateError.errors`. It returns `false` immediately on
@@ -1285,8 +1319,8 @@ fine-grained token with repository **Contents: Read and write** both suffice.
 
 ## Markers
 
-The byte contract in the `dependabot-prep` skill's `references/feedback.md` is
-the v1 law; this module is its executable form plus the v2 extension.
+The byte contract in `skills/dependabot-prep/references/procedural-markers.md`
+is the law; this module is its executable form, v1 and the v2 extension.
 
 ```text
 v1: <!-- <schema> root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40hex>
@@ -1310,13 +1344,9 @@ whitespace; `encodeVisibleBody` additionally forbids `\r` and trailing
 whitespace before a newline or end of string; `encodeClaimToken` requires 40
 lowercase hex.
 
-Two of those are **stricter than the referenced v1 contract**, deliberately,
-and are the two most likely first-use surprises:
+One of those is **stricter than a live `gh api user` response**, deliberately,
+and is the most likely first-use surprise:
 
-- `references/feedback.md` says the visible body carries "LF line endings, and
-  no trailing spaces". `encodeVisibleBody` also rejects a trailing **tab**. A
-  trailing tab is invisible in every review surface and changes the digest, so
-  it is refused rather than hashed.
 - `encodeOperator` requires the object's keys to be exactly `id`, `login` and
   `type` — no more. Pasting a live `gh api user` response verbatim fails with
   `MARKER_OPERATOR_INVALID`; pick those three fields out of it. The digest
@@ -1358,6 +1388,33 @@ Global flags: `--config <path>` (required for `claims`), `--json`, `--dry-run`,
 `--timeout-seconds <n>`, `--quiet`, `--host`, `--runtime`, `--login`,
 `--agent`, `--state <path>`, `--run-id` (rejected on `claim`, `takeover` and
 `family claim`; required elsewhere).
+
+### The number flag the profile selects
+
+Every command that names an item declares **both** `--pr` and `--issue`
+(`--prs`/`--issues` on `claims list` and the `family` commands), injected per
+command by `flagGrammar` from the spec's `numberFlags` mode. The parser cannot
+know which profile is loaded, so it judges only the count:
+
+- both flags — `claims claim takes --pr or --issue, not both`;
+- neither, on a command that requires one —
+  `claims claim requires --pr or --issue (the loaded config's profile decides which)`;
+- `claims list` is the one `filter` mode: naming no item lists the whole
+  namespace, and at most one flag still holds.
+
+`resolveNumberFlags` then settles which of the two is legal, from
+`config.profile.numberKey`, and refuses the other:
+`The loaded config selects the issue profile, so claims claim takes --issue, not --pr`.
+It returns immediately when `runtime.config` is null, because a command run
+without `--config` — `markers build` — names no item and has no profile to
+read. Every refusal here is exit 2, raised after the config loads and before
+`ensureLogin`, `assertMutationAllowed` and the first write, so it costs no
+round trip.
+
+The handlers then read `runtime.number` and `runtime.numbers` rather than
+`flags.pr` and `flags.prs`, `pairClaimFlags` takes the flag name so guard's
+pairing refusals print the flag the operator typed, and every generated line
+already interpolates `profile.numberKey`.
 
 Gated flags, refused with exit 3 unless the loaded config sets
 `allowOverrides: true`: `--ttl-minutes`, `--grace-minutes`,
@@ -1456,6 +1513,7 @@ Required keys in `claims`: `schema`, `profile`, `namespace`, `scopeTemplate`,
 lease-capable profile — `ttlMinutes`, `renewMinutes`, `graceMinutes`.
 
 Optional keys and their defaults: `kind` (`mento-claim`), `payloadVersion` (1),
+`verifySubjectKind` (`false`),
 `author` (the profile's), `maxTtlMinutes` (360), `minRemainingSeconds` (360),
 `skewToleranceSeconds` (300), `markerRevision` (`v2`), `requiredBefore`
 (`["branch-push", "review-request"]`), `advisoryBefore`
@@ -1480,8 +1538,9 @@ Every failure exits 3 **before any network call**:
 - No string anywhere in the document may be a credential; see the redaction
   section. It is checked over the whole normalized shape rather than key by
   key, because a config value is written into payloads and commit messages.
-- `scopeTemplate` starts with `refs/`, contains `{pr}` exactly once, renders
-  through `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
+- `scopeTemplate` starts with `refs/`, contains the selected profile's
+  placeholder (`{pr}` or `{issue}`) exactly once, renders through
+  `assertValidRefName`, and `namespace` is its prefix. Git's grammar is
   not the whole rule: the rendered name and the namespace are each checked
   against `transportRefNameProblem` too, the same grammar the transport applies
   before it splices one into a REST path. `#`, `%` and `&` are legal in a
@@ -1543,11 +1602,40 @@ Every failure exits 3 **before any network call**:
   cache or a checkout bin run by hand.
 - `requiredBefore` and `advisoryBefore` must together name every fence purpose,
   each exactly once. They are the mandatory/advisory table the run uses.
-- `profile` must be `pr`. `issue-board` is a valid profile value in the library
-  but is refused by the configuration loader
+- `profile` must be `pr` or `issue`. `issue-board` is a valid profile value in
+  the library but is refused by the configuration loader
   (`CLAIM_CONFIG_PROFILE_UNSUPPORTED`): its canonical scope needs a Project
   owner and number that no command line supplies. Lease keys on a
   `leaseCapable: false` profile are refused.
+- `scopeTemplate` carries the **selected profile's** placeholder, `{pr}` or
+  `{issue}`, exactly once, with the namespace as its prefix. Two refusals name
+  the copied-policy mistakes: `CLAIM_CONFIG_SCOPE_TEMPLATE_TOKEN` for a
+  template holding the other profile's placeholder, and
+  `CLAIM_CONFIG_NAMESPACE_OVERLAP` for a namespace that equals, is a prefix of,
+  or is prefixed by another configurable profile's default namespace. Both are
+  exit 3 at load. Without them a misconfigured document validates and then
+  wedges references one at a time as `CLAIM_REF_INVALID`, which reads as a
+  corrupt reference rather than as the configuration that caused it.
+- `verifySubjectKind` (default `false`) makes `claim`, `takeover` and
+  `family claim` read `repos/{owner}/{repo}/issues/{n}` after the login and
+  refuse with exit 10 `not-eligible` when the number is really a pull request.
+  The refusal is a `ClaimSubjectKindError`, `CLAIM_SUBJECT_KIND`, and it is not
+  recoverable: exit 10 asks the caller to skip the item, and no retry turns a
+  pull-request number into an issue. Changed in 0.2.0: the refusal was a
+  `ClaimNotExpiredError`, so `CLAIM_NOT_EXPIRED` made every failure document
+  report a permanent policy refusal as a recoverable race.
+  GitHub gives issues and pull requests one number space, so an issue claim can
+  otherwise stand on a pull-request number another skill holds under the `pr`
+  namespace. A family reads its members in claim order and stops at the first
+  refusal, so a refused family writes nothing, and the refusal carries that
+  member's `ref`, `scope` and recovery commands rather than the first member's.
+  The check fails open: a read that fails yields a `verify-subject-kind`
+  warning and allows the claim, because a transport fault must not deny a claim
+  the operator is entitled to. The warning is recorded on the runtime as soon
+  as it is produced, so it reaches the failure document too when a later step —
+  the login, the compare-and-swap, the label projection, another family member
+  — throws. It is inert under `profile: "pr"`, where the endpoint already names
+  the kind.
 - `gh.timeoutSeconds`, when given, is the per-`gh` wall-clock default that
   `--timeout-seconds` overrides. Both are bounded the same way: more than 0 and
   at most 86400 seconds. `runGh` arms its timer only for a finite, positive
@@ -1801,7 +1889,7 @@ Consumers do not add this package to a `package.json` or a lockfile. The policy
 pins the exact version and a thin wrapper spawns it:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.1.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
   dlx mento-issues claims read --pr 872 --config .github/dependabot-prep-policy.json
 ```
 

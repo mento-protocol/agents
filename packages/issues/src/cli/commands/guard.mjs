@@ -148,7 +148,10 @@ export async function runGuard(runtime) {
   // loop, which created a slot file per pair and then threw deriving the ref
   // for the impossible member, so an invocation the grammar refuses left
   // reservations behind that only `claims slot clear` could remove.
-  const pairs = normalizeGuardClaims(pairClaimFlags(runtime.order));
+  const pairs = normalizeGuardClaims(
+    pairClaimFlags(runtime.order, runtime.numberFlag),
+    runtime.numberFlag,
+  );
   const purpose = canonicalFencePurpose(flags.gate);
   const runId = flags["run-id"];
   markFailureContext(runtime, pairs[0].number);

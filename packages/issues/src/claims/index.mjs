@@ -43,6 +43,7 @@ export {
   ClaimRefInvalidError,
   ClaimRenewRequiredError,
   ClaimStaleError,
+  ClaimSubjectKindError,
   ClaimSupersededError,
   ClaimUnknownOutcomeError,
   exitCodeForError,
@@ -65,6 +66,7 @@ export {
   CLAIM_PROFILES,
   claimProfile,
   issueBoardProfile,
+  issueClaimProfile,
   prClaimProfile,
 } from "./profile.mjs";
 

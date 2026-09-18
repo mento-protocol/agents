@@ -14,6 +14,7 @@ export const CLAIM_EXIT_CODES = Object.freeze({
   CLAIM_ALREADY_HELD: 10,
   CLAIM_NOT_EXPIRED: 10,
   CLAIM_CLOCK_SKEW: 10,
+  CLAIM_SUBJECT_KIND: 10,
   CLAIM_FAMILY_ABORTED: 10,
   CLAIM_EXPIRED: 11,
   CLAIM_UNKNOWN_OUTCOME: 12,
@@ -29,6 +30,7 @@ const NON_RECOVERABLE_CLAIM_CODES = new Set([
   "CLAIM_UNKNOWN_OUTCOME",
   "CLAIM_STALE",
   "CLAIM_REF_INVALID",
+  "CLAIM_SUBJECT_KIND",
 ]);
 
 /** The same stop set in monitoring-monorepo's vocabulary. */
@@ -64,6 +66,21 @@ export class ClaimError extends Error {
 /** Configuration, identity or environment refusal; exit 3. */
 export class ClaimConfigError extends ClaimError {
   static defaultClaimCode = "CLAIM_CONFIG";
+}
+
+/**
+ * The number is not the kind of subject this profile claims; exit 10.
+ *
+ * `claims.verifySubjectKind` refuses an issue claim on a pull-request number.
+ * The exit code is 10, because the caller should move on to the next item, but
+ * the refusal is a policy verdict about the item itself, not a race: no wait
+ * and no retry makes that number an issue. So this is a direct `ClaimError`
+ * rather than a `ClaimConflictError`, and `isRecoverableClaimRaceError` answers
+ * false. While the refusal carried `CLAIM_NOT_EXPIRED`, every failure document
+ * advertised a permanent refusal as a recoverable race.
+ */
+export class ClaimSubjectKindError extends ClaimError {
+  static defaultClaimCode = "CLAIM_SUBJECT_KIND";
 }
 
 /** Any observed-state disagreement; profile-mapped to `errorCodes.conflict`. */
@@ -121,8 +138,22 @@ export class ClaimStaleError extends ClaimError {
   static defaultClaimCode = "CLAIM_STALE";
 }
 
-/** The ref does not hold a readable claim payload; exit 16. */
+/**
+ * The ref does not hold a readable claim payload; exit 16.
+ *
+ * `refInvalid === true` is part of this class, not of the one error that
+ * happens to start the chain. `parseClaimPayload` marks its own refusal with
+ * the flag, and every read path re-raises that refusal as this class; a
+ * re-raise that did not carry the flag forward left library callers — which
+ * read `err.refInvalid`, not `err.cause.refInvalid` — unable to tell a wedged
+ * reference from any other exit-16 state.
+ */
 export class ClaimRefInvalidError extends ClaimStaleError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.refInvalid = true;
+  }
+
   static defaultClaimCode = "CLAIM_REF_INVALID";
 }
 

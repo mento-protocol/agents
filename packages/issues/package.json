@@ -1,6 +1,6 @@
 {
   "name": "@mento-protocol/issues",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GitHub ref-backed claims (compare-and-swap mutex with an opt-in lease), a bounded gh runner, and procedural-marker byte contracts.",
   "repository": {
     "type": "git",

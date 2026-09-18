@@ -1,0 +1,40 @@
+{
+  "comment": "The exact `JSON.stringify` bytes a pr-profile bootstrap UNLOCK, acquire LOCK and release UNLOCK carry, recorded from 0.1.0 BEFORE the `numberedClaimProfile` extraction and never regenerated. These bytes are DERIVED FROM CODE under an injected clock, an injected uuid source and an injected entropy source; nothing here was read back from GitHub, which the offline suite may not reach. The object-literal order in `buildClaimPayload` is the byte order on the server, so any envelope reorder, any metadata-key reorder and any changed default fails the test that reads this file.",
+  "recordedFrom": {
+    "package": "@mento-protocol/issues",
+    "version": "0.1.0"
+  },
+  "inputs": {
+    "repository": "mento-protocol/frontend-monorepo",
+    "pr": 872,
+    "now": "2026-09-09T09:58:12.004Z",
+    "releaseAdvanceMs": 120000,
+    "uuids": [
+      "3c7f1b90-5a24-4e11-9c63-8ad0f2e17b45",
+      "9e2d4a01-7b38-4cf6-a512-6d09c4b3ef28"
+    ],
+    "entropyHex": "7c1a9e4213b0",
+    "acquireMetadata": {
+      "agent": "dependabot-prep",
+      "lastPushedHead": "0123456789abcdef0123456789abcdef01234567",
+      "summaryCommentUrl": "https://github.com/mento-protocol/frontend-monorepo/pull/872#issuecomment-1"
+    },
+    "releaseOutcome": "completed"
+  },
+  "refName": "refs/mento-claims/v1/pr/872",
+  "runId": "claude-code-mac-20260909T095812Z-7c1a9e4213b0",
+  "token": "claim-commit-2",
+  "bootstrap": {
+    "oid": "claim-commit-1",
+    "message": "{\"kind\":\"mento-claim\",\"version\":1,\"state\":\"UNLOCK\",\"scope\":{\"repo\":\"mento-protocol/frontend-monorepo\",\"pr\":872},\"operation\":\"initialize\",\"operationId\":\"lock-3c7f1b90-5a24-4e11-9c63-8ad0f2e17b45\",\"agent\":null,\"claimId\":null,\"lastPushedHead\":null,\"reviewRequestedHead\":null,\"summaryCommentUrl\":null,\"parentLock\":null,\"completedAt\":\"2026-09-09T09:58:12.004Z\",\"outcome\":\"initialized\",\"releasedByRunId\":null}"
+  },
+  "acquire": {
+    "oid": "claim-commit-2",
+    "message": "{\"kind\":\"mento-claim\",\"version\":1,\"state\":\"LOCK\",\"scope\":{\"repo\":\"mento-protocol/frontend-monorepo\",\"pr\":872},\"operation\":\"acquire\",\"operationId\":\"lock-3c7f1b90-5a24-4e11-9c63-8ad0f2e17b45\",\"agent\":\"dependabot-prep\",\"claimId\":\"claude-code-mac-20260909T095812Z-7c1a9e4213b0\",\"lastPushedHead\":\"0123456789abcdef0123456789abcdef01234567\",\"reviewRequestedHead\":null,\"summaryCommentUrl\":\"https://github.com/mento-protocol/frontend-monorepo/pull/872#issuecomment-1\",\"parentUnlock\":\"claim-commit-1\",\"startedAt\":\"2026-09-09T09:58:12.004Z\",\"claimedAt\":\"2026-09-09T09:58:12.004Z\",\"expiresAt\":\"2026-09-09T10:28:12.004Z\",\"renewAfter\":\"2026-09-09T10:08:12.004Z\",\"ttlSeconds\":1800,\"graceSeconds\":300,\"renewCount\":0,\"ownerRunId\":\"claude-code-mac-20260909T095812Z-7c1a9e4213b0\",\"ownerHost\":\"chapati-mbp\",\"ownerRuntime\":\"claude-code\",\"ownerLogin\":\"chapati23\"}"
+  },
+  "release": {
+    "status": "released",
+    "oid": "claim-commit-3",
+    "message": "{\"kind\":\"mento-claim\",\"version\":1,\"state\":\"UNLOCK\",\"scope\":{\"repo\":\"mento-protocol/frontend-monorepo\",\"pr\":872},\"operation\":\"complete\",\"operationId\":\"unlock-9e2d4a01-7b38-4cf6-a512-6d09c4b3ef28\",\"agent\":\"dependabot-prep\",\"claimId\":\"claude-code-mac-20260909T095812Z-7c1a9e4213b0\",\"lastPushedHead\":\"0123456789abcdef0123456789abcdef01234567\",\"reviewRequestedHead\":null,\"summaryCommentUrl\":\"https://github.com/mento-protocol/frontend-monorepo/pull/872#issuecomment-1\",\"parentLock\":\"claim-commit-2\",\"completedAt\":\"2026-09-09T10:00:12.004Z\",\"outcome\":\"completed\",\"releasedByRunId\":\"claude-code-mac-20260909T095812Z-7c1a9e4213b0\"}"
+  }
+}
