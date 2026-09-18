@@ -9,9 +9,9 @@
 # LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS.
 # Writes: LOCK_PROBLEM (read by runtime.sh and unlink.sh), LOCK_HELD.
 #
-# take_lock is reached through 'run_link || true' and 'if ! cmd_unlink', and
-# release_lock runs from the EXIT trap the entry point sets, so errexit is off
-# in this whole subtree.
+# lock_take is reached through '_runtime_run_link || true' and 'if !
+# unlink_cmd', and lock_release runs from the EXIT trap the entry point sets,
+# so errexit is off in this whole subtree.
 
 # Every run that writes the assembly takes one lock directory. mkdir is atomic
 # on every filesystem in use here, so two runs that start at the same moment
@@ -23,7 +23,7 @@
 # there is not a lock at all: mkdir can never succeed against it, so a run must
 # stop instead of going on unlocked. The reason is recorded, not printed: the
 # session hook steps aside in silence, the other commands report it.
-lock_path_usable() {
+_lock_path_usable() {
 	local parent
 	LOCK_PROBLEM=""
 	# mkdir fails on a missing parent for a reason that is neither contention
@@ -65,7 +65,7 @@ lock_path_usable() {
 # then disagree about one live process, and the second would clear a lock its
 # owner still holds. 'ps' is given TZ=UTC and LC_ALL=C for that one command,
 # so every run reads the same text for the same process.
-proc_start_time() {
+_lock_proc_start_time() {
 	TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null |
 		tr -s '[:space:]' ' ' |
 		sed -e 's/^ //' -e 's/ $//'
@@ -78,7 +78,7 @@ proc_start_time() {
 # A field that is not entirely decimal digits is answered with nothing, so a
 # malformed record is judged like an empty one and ages out at
 # LOCK_STALE_MINUTES. Every caller reads the empty answer as "no pid".
-lock_recorded_pid() {
+_lock_recorded_pid() {
 	local field
 	field=$(head -n 1 "$1" 2>/dev/null | cut -f1)
 	# A leading zero is refused with the rest: no shell writes its pid that
@@ -94,7 +94,7 @@ lock_recorded_pid() {
 # The start time a pid file records, or nothing when it holds only a pid. A
 # file with no tab is the format an older version wrote; 'cut -s' answers with
 # nothing for it, and the caller then judges by pid alone.
-lock_recorded_start() {
+_lock_recorded_start() {
 	head -n 1 "$1" 2>/dev/null | cut -s -f2-
 }
 
@@ -103,7 +103,7 @@ lock_recorded_start() {
 # was given the same number, so the lock it seems to hold is stale. A pid the
 # process table will not describe is left alone: the process is there, and a
 # reading that cannot be made is no reason to take a lock away.
-lock_owner_alive() {
+_lock_owner_alive() {
 	local pid start now
 	pid=$1
 	start=$2
@@ -116,14 +116,14 @@ lock_owner_alive() {
 	if [ -z "$start" ]; then
 		return 0
 	fi
-	now=$(proc_start_time "$pid")
+	now=$(_lock_proc_start_time "$pid")
 	if [ -z "$now" ] || [ "$now" = "$start" ]; then
 		return 0
 	fi
 	return 1
 }
 
-release_lock() {
+lock_release() {
 	local pid
 	if [ "$LOCK_HELD" -ne 1 ] || [ -z "$LOCK_DIR" ]; then
 		return 0
@@ -135,7 +135,7 @@ release_lock() {
 	fi
 	pid=""
 	if [ -f "$LOCK_DIR/pid" ]; then
-		pid=$(lock_recorded_pid "$LOCK_DIR/pid")
+		pid=$(_lock_recorded_pid "$LOCK_DIR/pid")
 	fi
 	# The lock this run took can have been cleared as stale and taken again by
 	# another run while this one worked. Removing it then would strand that
@@ -168,20 +168,20 @@ release_lock() {
 #
 # Nothing below the lock path is read or removed unless that path is a real
 # directory: a symlink there names someone else's files.
-clear_stale_lock() {
+_lock_clear_stale() {
 	local pid start
 	if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ]; then
 		return 0
 	fi
 	if [ -f "$LOCK_DIR/pid" ]; then
-		pid=$(lock_recorded_pid "$LOCK_DIR/pid")
-		start=$(lock_recorded_start "$LOCK_DIR/pid")
+		pid=$(_lock_recorded_pid "$LOCK_DIR/pid")
+		start=$(_lock_recorded_start "$LOCK_DIR/pid")
 		# An empty or unparsable record names no owner to ask about, so it
 		# falls through to the age below. The file is created before its line
 		# is written, and a run that read it in that moment would otherwise
 		# clear the lock of a run that had just taken it.
 		if [ -n "$pid" ]; then
-			if lock_owner_alive "$pid" "$start"; then
+			if _lock_owner_alive "$pid" "$start"; then
 				return 0
 			fi
 			rm -f "$LOCK_DIR/pid" 2>/dev/null || true
@@ -206,7 +206,7 @@ clear_stale_lock() {
 #
 # Status: 0 the lock is held, or the assembly cannot be written at all; 1
 # another run holds it; 2 the lock path is not usable and LOCK_PROBLEM says why.
-take_lock() {
+lock_take() {
 	local mode waited limit vanished
 	mode=$1
 	if [ "$LOCK_HELD" -eq 1 ]; then
@@ -220,7 +220,7 @@ take_lock() {
 	limit=$((LOCK_WAIT_SECONDS * 5))
 	while [ "$waited" -le "$limit" ]; do
 		waited=$((waited + 1))
-		if ! lock_path_usable; then
+		if ! _lock_path_usable; then
 			return 2
 		fi
 		if _lock_claim; then
@@ -228,7 +228,7 @@ take_lock() {
 		fi
 		# mkdir lost to something. A symlink or a file that appeared between
 		# the two tests is refused here rather than read as contention.
-		if ! lock_path_usable; then
+		if ! _lock_path_usable; then
 			return 2
 		fi
 		if [ ! -d "$LOCK_DIR" ]; then
@@ -243,7 +243,7 @@ take_lock() {
 			fi
 			continue
 		fi
-		clear_stale_lock
+		_lock_clear_stale
 		if [ ! -d "$LOCK_DIR" ]; then
 			continue
 		fi
@@ -256,7 +256,7 @@ take_lock() {
 }
 
 # Make the lock directory and record this run as its owner. Status 1 says
-# mkdir lost to whatever is at the lock path, which take_lock examines. This
+# mkdir lost to whatever is at the lock path, which lock_take examines. This
 # writes LOCK_HELD, and it is never run in a substitution: a subshell would
 # make the directory and lose the write that says this run holds it.
 _lock_claim() {
@@ -264,7 +264,7 @@ _lock_claim() {
 		return 1
 	fi
 	LOCK_HELD=1
-	printf '%s\t%s\n' "$$" "$(proc_start_time "$$")" \
+	printf '%s\t%s\n' "$$" "$(_lock_proc_start_time "$$")" \
 		>"$LOCK_DIR/pid" 2>/dev/null || true
 	# Test hook: hold the lock this long, 1 to 999 seconds, before the
 	# work starts, so a test can read the pid file while its owner runs.

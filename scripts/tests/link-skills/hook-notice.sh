@@ -60,7 +60,7 @@ hook_reports_unusable_manifest() {
 }
 
 # A stored hook command can name a sources file whose path runs through a
-# regular file. canonical_path prints nothing of its own, so a session start
+# regular file. paths_canonical prints nothing of its own, so a session start
 # gets the one line the hook owes it, and that line names the path the command
 # stored. Hook mode reports a refused configuration through the same notice and
 # exits 0, which is what a session start needs from a path this script cannot

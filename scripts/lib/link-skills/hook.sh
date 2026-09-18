@@ -11,13 +11,13 @@
 # Writes: QUIET, SECONDS. It creates the assembly directory and the fetch
 # stamps under it, and writes nothing else.
 #
-# main calls run_hook_bounded bare from its dispatch, so errexit is LIVE in
-# run_hook_bounded, _hook_start_body and _hook_await: both helpers are called
+# main calls hook_run_bounded bare from its dispatch, so errexit is LIVE in
+# hook_run_bounded, _hook_start_body and _hook_await: both helpers are called
 # bare there, because '|| true' or 'if !' would exempt the bare sleep, cat and
-# rm -f inside them. cmd_hook itself runs as 'cmd_hook || true' inside the
+# rm -f inside them. _hook_cmd itself runs as '_hook_cmd || true' inside the
 # background job, so errexit is off in its own subtree.
 
-cmd_hook() {
+_hook_cmd() {
 	if [ ! -f "$SOURCES_FILE" ]; then
 		return 0
 	fi
@@ -29,47 +29,47 @@ cmd_hook() {
 	# link is created, no manifest is written, and no lock is taken: a run that
 	# holds the lock is writing the assembly, and this run only reads it.
 	if ! mkdir -p "$ASSEMBLY_DIR"; then
-		hook_say "could not create the assembly directory $ASSEMBLY_DIR"
+		output_hook_say "could not create the assembly directory $ASSEMBLY_DIR"
 		return 0
 	fi
-	# load_manifest reads a path that is not a regular file as an empty list,
+	# manifest_load reads a path that is not a regular file as an empty list,
 	# and the hook would then call every skill unlinked and recommend a 'link'
 	# run that refuses that very path. Say what is in the way instead. The
 	# refusal names 'link' in its own words, which is not a session start's
 	# voice, so only this line is printed.
 	if ! manifest_path_usable 2>/dev/null; then
-		hook_say "the manifest $MANIFEST is not a regular file; move it aside, then run: $(script_command_prefix) link"
+		output_hook_say "the manifest $MANIFEST is not a regular file; move it aside, then run: $(paths_script_command_prefix) link"
 		return 0
 	fi
 	SECONDS=0
-	detect_case_insensitive
+	names_detect_case_insensitive
 	# A session start never fails and never shouts. A manifest it cannot read
 	# is left to the next 'link' run, which says so in its own words.
-	if ! load_manifest; then
+	if ! manifest_load; then
 		return 0
 	fi
-	load_sources
+	sources_load
 	if [ "$SRC_COUNT" -eq 0 ]; then
 		return 0
 	fi
-	collect_candidates
+	candidates_collect
 
-	hook_report_sources
+	_hook_report_sources
 
-	hook_report_drift
+	_hook_report_drift
 	return 0
 }
 
 # One notice per source clone that is behind its default branch, inside the
 # fetch budget SECONDS is measured against.
-hook_report_sources() {
+_hook_report_sources() {
 	local i src root behind branch state rem
 	i=0
 	while [ "$i" -lt "$SRC_COUNT" ]; do
 		src=${SRC_PATH[$i]}
 		i=$((i + 1))
 		if [ ! -d "$src" ]; then
-			hook_say "source directory is missing: $src"
+			output_hook_say "source directory is missing: $src"
 			continue
 		fi
 		if ! root=$(git_root "$src"); then
@@ -81,7 +81,7 @@ hook_report_sources() {
 		# leaves behind, and nothing else: the work tree is never touched.
 		rem=$((HOOK_FETCH_BUDGET_SECONDS - SECONDS))
 		if [ "$rem" -gt 1 ]; then
-			maybe_fetch "$root" "$rem" >/dev/null
+			git_maybe_fetch "$root" "$rem" >/dev/null
 		fi
 		behind=$(git_behind_count "$root")
 		case "$behind" in
@@ -100,7 +100,7 @@ hook_report_sources() {
 		else
 			state="clean"
 		fi
-		hook_say "$root is $behind commit(s) behind on branch $branch ($state); run: cd $(shell_quote "$root") && $(git_pull_command "$root") && $(script_command_prefix) link"
+		output_hook_say "$root is $behind commit(s) behind on branch $branch ($state); run: cd $(paths_shell_quote "$root") && $(git_pull_command "$root") && $(paths_script_command_prefix) link"
 	done
 }
 
@@ -110,7 +110,7 @@ hook_report_sources() {
 # notice sends the person to 'check', which names the entry. An orphan is
 # a prune the next 'link' run makes by itself, so it is not a session
 # start's business.
-hook_report_drift() {
+_hook_report_drift() {
 	local i name target entry cur oldspell missing stale collided
 	missing=0
 	stale=0
@@ -122,15 +122,15 @@ hook_report_drift() {
 		i=$((i + 1))
 		entry="$ASSEMBLY_DIR/$name"
 		if [ -L "$entry" ]; then
-			cur=$(link_target_abs "$entry")
-			if same_path "$cur" "$target"; then
+			cur=$(paths_link_target_abs "$entry")
+			if paths_same "$cur" "$target"; then
 				continue
 			fi
-			if entry_is_recorded_link "$name" "$entry"; then
+			if manifest_entry_is_recorded_link "$name" "$entry"; then
 				# A recorded link whose own source cannot be read this run
 				# is one 'link' keeps, so it is not stale.
 				oldspell=$(manifest_src_of "$name") || oldspell=""
-				if ! target_source_unavailable "$cur" "$oldspell"; then
+				if ! candidates_target_source_unavailable "$cur" "$oldspell"; then
 					stale=$((stale + 1))
 				fi
 			else
@@ -145,13 +145,13 @@ hook_report_drift() {
 		missing=$((missing + 1))
 	done
 	if [ "$missing" -gt 0 ]; then
-		hook_say "$missing skill(s) are not linked; run: $(script_command_prefix) link"
+		output_hook_say "$missing skill(s) are not linked; run: $(paths_script_command_prefix) link"
 	fi
 	if [ "$stale" -gt 0 ]; then
-		hook_say "$stale link(s) are stale; run: $(script_command_prefix) link"
+		output_hook_say "$stale link(s) are stale; run: $(paths_script_command_prefix) link"
 	fi
 	if [ "$collided" -gt 0 ]; then
-		hook_say "$collided skill(s) collide with entries this script did not create; run: $(script_command_prefix) check"
+		output_hook_say "$collided skill(s) collide with entries this script did not create; run: $(paths_script_command_prefix) check"
 	fi
 	return 0
 }
@@ -162,7 +162,7 @@ hook_report_drift() {
 # costs one process however deep the tree is. A process that starts after
 # the snapshot is missed; the deadline path below tolerates that because the
 # job's output never touches the caller's descriptors.
-descendants_of() {
+_hook_descendants_of() {
 	ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
 		{ pid[NR] = $1; ppid[NR] = $2 }
 		END {
@@ -191,11 +191,11 @@ descendants_of() {
 # the chain. In monitor mode the job also leads a process group of its own,
 # so the group takes the signal too; a host without job control still gets
 # every descendant through the ps walk.
-kill_job() {
+_hook_kill_job() {
 	local sig pid kids kid
 	sig=$1
 	pid=$2
-	kids=$(descendants_of "$pid")
+	kids=$(_hook_descendants_of "$pid")
 	kill -"$sig" -- "-$pid" 2>/dev/null || true
 	kill -"$sig" "$pid" 2>/dev/null || true
 	for kid in $kids; do
@@ -220,7 +220,7 @@ kill_job() {
 # the body keeps the caller's descriptors, and the deadline still bounds it.
 #
 # The session always starts: an expired deadline prints one line and exits 0.
-run_hook_bounded() {
+hook_run_bounded() {
 	local pid out="" errs="" tmpdir
 	tmpdir=${TMPDIR:-/tmp}
 	out=$(mktemp "$tmpdir/link-skills-hook-out.XXXXXX" 2>/dev/null) || out=""
@@ -264,7 +264,7 @@ _hook_start_body() {
 	if [ -n "$out" ]; then
 		{ (
 			trap 'exit 0' EXIT TERM
-			cmd_hook || true
+			_hook_cmd || true
 		) >"$out" 2>"$errs" & } 2>/dev/null
 	else
 		# No capture. fd 3 carries the caller's real stderr into the job,
@@ -272,7 +272,7 @@ _hook_start_body() {
 		# setpgid report and nothing else.
 		{ (
 			trap 'exit 0' EXIT TERM
-			cmd_hook || true
+			_hook_cmd || true
 		) 2>&3 & } 3>&2 2>/dev/null
 	fi
 	pid=$!
@@ -294,24 +294,24 @@ _hook_await() {
 	deadline=$((SECONDS + HOOK_DEADLINE_SECONDS))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$SECONDS" -ge "$deadline" ]; then
-			kill_job TERM "$pid"
+			_hook_kill_job TERM "$pid"
 			sleep 1
-			kill_job KILL "$pid"
+			_hook_kill_job KILL "$pid"
 			wait "$pid" 2>/dev/null || true
-			replay_hook_output "$out" "$errs"
-			hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(script_command_prefix) check'"
+			_hook_replay_output "$out" "$errs"
+			output_hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(paths_script_command_prefix) check'"
 			return 0
 		fi
 		sleep 0.2
 	done
 	wait "$pid" 2>/dev/null || true
-	replay_hook_output "$out" "$errs"
+	_hook_replay_output "$out" "$errs"
 	return 0
 }
 
 # Copy the hook body's captured stdout and stderr to the real ones, then
 # remove the two files.
-replay_hook_output() {
+_hook_replay_output() {
 	local out errs
 	out=$1
 	errs=$2

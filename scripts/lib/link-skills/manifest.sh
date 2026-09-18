@@ -14,16 +14,16 @@
 # REPOINT_NAME, REPOINT_OLD, PRUNEBACK_COUNT, PRUNEBACK_NAME,
 # PRUNEBACK_TARGET.
 #
-# remove_link lives in link.sh: manifest, link and unlink all call it. Every
-# function here is reached through 'run_link || true', 'if ! cmd_check',
-# 'if ! cmd_unlink' or 'cmd_hook || true', so errexit is off in its whole
-# subtree.
+# link_remove lives in link.sh: manifest, link and unlink all call it. Every
+# function here is reached through '_runtime_run_link || true', 'if !
+# check_cmd', 'if ! unlink_cmd' or '_hook_cmd || true', so errexit is off in
+# its whole subtree.
 
 # Read the recorded links. Status 1 says the manifest is there but could not be
 # opened, which is not the same as an empty record: the caller must abort the
 # command rather than act on a list it could not read. The message is left to
 # the caller, so that the session hook can step aside without a word.
-load_manifest() {
+manifest_load() {
 	local n t src
 	MAN_COUNT=0
 	if [ ! -f "$MANIFEST" ]; then
@@ -49,8 +49,8 @@ load_manifest() {
 		fi
 		# A name that is not one plain basename could reach outside the assembly
 		# directory. Such a line is ignored, never acted on.
-		if ! name_is_safe "$n"; then
-			warn "ignored a manifest line in $MANIFEST whose name is not a plain entry name: $n"
+		if ! names_is_safe "$n"; then
+			output_warn "ignored a manifest line in $MANIFEST whose name is not a plain entry name: $n"
 			continue
 		fi
 		MAN_NAME[MAN_COUNT]="$n"
@@ -92,7 +92,7 @@ manifest_target_of() {
 
 # True when the assembly entry is a link this script recorded, still pointing
 # at the target the manifest holds.
-entry_is_recorded_link() {
+manifest_entry_is_recorded_link() {
 	local name entry rec cur
 	name=$1
 	entry=$2
@@ -102,11 +102,11 @@ entry_is_recorded_link() {
 	if [ -z "$rec" ]; then
 		return 1
 	fi
-	cur=$(link_target_abs "$entry")
+	cur=$(paths_link_target_abs "$entry")
 	if [ "$cur" = "$rec" ]; then
 		return 0
 	fi
-	same_path "$cur" "$rec"
+	paths_same "$cur" "$rec"
 }
 
 # The manifest is the only record of what this script may remove later, so it
@@ -115,11 +115,11 @@ entry_is_recorded_link() {
 # refused before a single link is created.
 manifest_path_usable() {
 	if [ -L "$MANIFEST" ]; then
-		err "the manifest path $MANIFEST is a symlink, not a regular file; move it aside, then run '$PROG link' again"
+		output_err "the manifest path $MANIFEST is a symlink, not a regular file; move it aside, then run '$PROG link' again"
 		return 1
 	fi
 	if [ -e "$MANIFEST" ] && [ ! -f "$MANIFEST" ]; then
-		err "the manifest path $MANIFEST is not a regular file; move it aside, then run '$PROG link' again"
+		output_err "the manifest path $MANIFEST is not a regular file; move it aside, then run '$PROG link' again"
 		return 1
 	fi
 	return 0
@@ -132,13 +132,13 @@ manifest_path_usable() {
 # A write that fails halfway must never be renamed over the manifest: the old
 # manifest is the only record of what this script may remove later, so a
 # truncated one would strand links it could no longer prune.
-write_manifest() {
+manifest_write() {
 	local tmp i body
 	if ! manifest_path_usable; then
 		return 1
 	fi
 	if ! tmp=$(mktemp "$ASSEMBLY_DIR/.skill-links.tmp.XXXXXX" 2>/dev/null); then
-		err "could not write the manifest $MANIFEST"
+		output_err "could not write the manifest $MANIFEST"
 		return 1
 	fi
 	body=""
@@ -149,12 +149,12 @@ write_manifest() {
 	done
 	if ! printf '%s' "$body" >"$tmp" 2>/dev/null; then
 		rm -f "$tmp" 2>/dev/null || true
-		err "could not write the manifest $MANIFEST; kept the one that was there"
+		output_err "could not write the manifest $MANIFEST; kept the one that was there"
 		return 1
 	fi
 	if ! mv -f "$tmp" "$MANIFEST"; then
 		rm -f "$tmp"
-		err "could not replace the manifest $MANIFEST"
+		output_err "could not replace the manifest $MANIFEST"
 		return 1
 	fi
 	return 0
@@ -163,7 +163,7 @@ write_manifest() {
 # The third argument is the spelling of the source the target came from, empty
 # when this run has none for it: a line read from an older manifest, or an
 # entry this run only kept.
-record_output() {
+manifest_record_output() {
 	OUT_NAME[OUT_COUNT]="$1"
 	OUT_TARGET[OUT_COUNT]="$2"
 	OUT_SRC_SPELLING[OUT_COUNT]="${3-}"
@@ -173,7 +173,7 @@ record_output() {
 # A name this run created a link for where no entry stood before. A link that
 # was already there and was only re-pointed or re-recorded is not one of these:
 # it survived the run before this one and it survives a failure here too.
-record_new_link() {
+manifest_record_new_link() {
 	NEW_NAME[NEW_COUNT]="$1"
 	NEW_COUNT=$((NEW_COUNT + 1))
 }
@@ -181,7 +181,7 @@ record_new_link() {
 # A link that stood before this run and that this run pointed somewhere else,
 # with the target it carried before. The old manifest still names that target,
 # so a run whose manifest write fails must put it back.
-record_repointed_link() {
+manifest_record_repointed_link() {
 	REPOINT_NAME[REPOINT_COUNT]="$1"
 	REPOINT_OLD[REPOINT_COUNT]="$2"
 	REPOINT_COUNT=$((REPOINT_COUNT + 1))
@@ -191,7 +191,7 @@ record_repointed_link() {
 # the target the manifest recorded for it. The old manifest still names it, so
 # a run whose manifest write fails must put that link back: a manifest entry
 # whose link is gone describes an assembly that no longer exists.
-record_pruned_link() {
+manifest_record_pruned_link() {
 	PRUNEBACK_NAME[PRUNEBACK_COUNT]="$1"
 	PRUNEBACK_TARGET[PRUNEBACK_COUNT]="$2"
 	PRUNEBACK_COUNT=$((PRUNEBACK_COUNT + 1))
@@ -201,7 +201,7 @@ record_pruned_link() {
 # script may remove later, so a link no manifest covers is a link no later run
 # could prune. When the manifest cannot be written, the links this run created
 # are removed instead of being left behind unrecorded.
-rollback_new_links() {
+manifest_rollback_new_links() {
 	local i name entry removed
 	removed=0
 	i=0
@@ -212,15 +212,15 @@ rollback_new_links() {
 		if [ ! -L "$entry" ]; then
 			continue
 		fi
-		if remove_link "$entry"; then
+		if link_remove "$entry"; then
 			removed=$((removed + 1))
 		else
-			err "could not remove $entry, the link this run created for $name"
+			output_err "could not remove $entry, the link this run created for $name"
 		fi
 	done
 	NEW_COUNT=0
 	if [ "$removed" -gt 0 ]; then
-		err "the manifest was not written, so the $removed link(s) this run created were removed"
+		output_err "the manifest was not written, so the $removed link(s) this run created were removed"
 	fi
 	return 0
 }
@@ -228,7 +228,7 @@ rollback_new_links() {
 # Undo this run's own repointing. The manifest that survives a failed write
 # names the target each of these links carried before, so the link must carry
 # it again: a link and a manifest that disagree is a link no later run prunes.
-restore_repointed_links() {
+manifest_restore_repointed_links() {
 	local i name old entry restored
 	restored=0
 	i=0
@@ -239,22 +239,22 @@ restore_repointed_links() {
 		entry="$ASSEMBLY_DIR/$name"
 		# Only a link is replaced. Anything else there now is not this run's.
 		if [ -e "$entry" ] && [ ! -L "$entry" ]; then
-			err "could not restore $entry to $old: something else is there now"
+			output_err "could not restore $entry to $old: something else is there now"
 			continue
 		fi
-		if [ -L "$entry" ] && ! remove_link "$entry"; then
-			err "could not restore $entry to $old"
+		if [ -L "$entry" ] && ! link_remove "$entry"; then
+			output_err "could not restore $entry to $old"
 			continue
 		fi
 		if ! ln -s "$old" "$entry"; then
-			err "could not restore $entry to $old; $name is now unlinked"
+			output_err "could not restore $entry to $old; $name is now unlinked"
 			continue
 		fi
 		restored=$((restored + 1))
 	done
 	REPOINT_COUNT=0
 	if [ "$restored" -gt 0 ]; then
-		err "the manifest was not written, so the $restored link(s) this run repointed were restored to their previous target"
+		output_err "the manifest was not written, so the $restored link(s) this run repointed were restored to their previous target"
 	fi
 	return 0
 }
@@ -263,7 +263,7 @@ restore_repointed_links() {
 # records every one of these names, so each link is created again at the target
 # that manifest holds: otherwise the record would claim links the assembly no
 # longer has, and the skills they carried would be gone from every runtime.
-restore_pruned_links() {
+manifest_restore_pruned_links() {
 	local i name target entry restored
 	restored=0
 	i=0
@@ -275,23 +275,23 @@ restore_pruned_links() {
 		# The entry was removed by this run. Anything at that name now is
 		# someone else's, and replacing it is not this script's to do.
 		if [ -e "$entry" ] || [ -L "$entry" ]; then
-			err "could not restore $entry to $target: something else is there now"
+			output_err "could not restore $entry to $target: something else is there now"
 			continue
 		fi
 		if ! ln -s "$target" "$entry"; then
-			err "could not restore $entry to $target; $name is now unlinked"
+			output_err "could not restore $entry to $target; $name is now unlinked"
 			continue
 		fi
 		restored=$((restored + 1))
 	done
 	PRUNEBACK_COUNT=0
 	if [ "$restored" -gt 0 ]; then
-		err "the manifest was not written, so the $restored link(s) this run pruned were created again at their recorded target"
+		output_err "the manifest was not written, so the $restored link(s) this run pruned were created again at their recorded target"
 	fi
 	return 0
 }
 
-output_has() {
+manifest_output_has() {
 	local i
 	i=0
 	while [ "$i" -lt "$OUT_COUNT" ]; do

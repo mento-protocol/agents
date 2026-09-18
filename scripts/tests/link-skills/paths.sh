@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 #
 # paths.sh - the cases for the "paths" section of scripts/link-skills.sh:
-# abs_path, phys_dir, phys_prefix_path, normalize_lexical, canonical_path,
-# same_path, spell_source, expand_home, script_abs_path and
-# resolve_symlink_path.
+# paths_abs, paths_phys_dir, paths_phys_prefix, paths_normalize_lexical,
+# paths_canonical, paths_same, paths_spell_source, paths_expand_home,
+# script_abs_path and resolve_symlink_path.
 #
 # The cases cover an assembly inside a runtime home, an assembly at or aliased
 # to the filesystem root, a '..' that must be normalized before the filesystem
@@ -102,7 +102,7 @@ candidate_containing_assembly_refused() {
 }
 
 # A candidate that resolves to a runtime home is a loop waiting to be walked:
-# the assembly would hold alpha -> $HOME/.claude while ensure_runtime_links
+# the assembly would hold alpha -> $HOME/.claude while _runtime_ensure_links
 # points $HOME/.claude/skills back at the assembly.
 candidate_containing_runtime_path_refused() {
 	mkdir -p "$HOME/.claude" "$CASE_DIR/src"
@@ -231,7 +231,7 @@ symlink_then_parent_resolves_physically() {
 # A path segment that exists and is not a directory ends the path. A '..' after
 # it must not pop through it into a directory the spelling never names. The
 # refusal is the caller's alone and names the path it was given, because
-# canonical_path reports nothing of its own.
+# paths_canonical reports nothing of its own.
 parent_traversal_through_file_refused() {
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources

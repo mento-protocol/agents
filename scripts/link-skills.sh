@@ -66,7 +66,7 @@ LOCK_WAIT_SECONDS=10
 case ${LINK_SKILLS_TEST_LOCK_WAIT_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) LOCK_WAIT_SECONDS=$LINK_SKILLS_TEST_LOCK_WAIT_SECONDS ;; esac
 LOCK_STALE_MINUTES=2
 LOCK_HELD=0
-# What is wrong with the lock path, set when take_lock returns 2. The caller
+# What is wrong with the lock path, set when lock_take returns 2. The caller
 # decides whether to print it. The session hook never asks: it writes no link,
 # so it takes no lock and a lock another run holds does not silence it.
 LOCK_PROBLEM=""
@@ -169,8 +169,8 @@ resolve_symlink_path() {
 
 # Report the module that would not load, and stop. Every other reporting
 # function lives in a module, so this one prints for itself. A session start
-# must end well, so a hook run gets the bracketed line hook_say prints and
-# exit 0; every other command gets the line die prints and exit 2.
+# must end well, so a hook run gets the bracketed line output_hook_say prints
+# and exit 0; every other command gets the line output_die prints and exit 2.
 #
 # The option parser has not run yet, so the command is read here by main's own
 # rule: the first argument that is neither an option nor the operand of
@@ -267,7 +267,7 @@ main() {
 
 	# The lock is released however the run ends. bash 3.2 runs one EXIT trap, so
 	# it is registered once, here, for every command below.
-	trap release_lock EXIT
+	trap lock_release EXIT
 
 	main_dispatch "$cmd"
 }
@@ -284,7 +284,7 @@ main_parse_options() {
 		--sources)
 			shift
 			if [ $# -eq 0 ]; then
-				die "--sources needs a file path"
+				output_die "--sources needs a file path"
 			fi
 			SOURCES_OPT=$1
 			SOURCES_SET=1
@@ -296,7 +296,7 @@ main_parse_options() {
 		--assembly)
 			shift
 			if [ $# -eq 0 ]; then
-				die "--assembly needs a directory path"
+				output_die "--assembly needs a directory path"
 			fi
 			ASSEMBLY_OPT=$1
 			ASSEMBLY_SET=1
@@ -308,12 +308,12 @@ main_parse_options() {
 		--quiet | -q) QUIET=1 ;;
 		-h | --help) cmd="help" ;;
 		--) ;;
-		-*) die "unknown option $arg" ;;
+		-*) output_die "unknown option $arg" ;;
 		*)
 			if [ -z "$cmd" ]; then
 				cmd=$arg
 			else
-				die "unexpected argument $arg"
+				output_die "unexpected argument $arg"
 			fi
 			;;
 		esac
@@ -338,7 +338,7 @@ main_select_command() {
 	# The help text needs no paths, so it prints before anything is derived from
 	# HOME and works in an environment that has none.
 	if [ "$cmd" = "help" ]; then
-		usage
+		output_usage
 		# main is called once, bare, as the last line of this file, and the
 		# EXIT trap is registered after this point, so leaving the process here
 		# is exactly what returning 0 from main did.
@@ -355,13 +355,13 @@ main_require_home() {
 	/*) ;;
 	*)
 		if [ "$cmd" = "hook" ]; then
-			hook_say "HOME is not set"
+			output_hook_say "HOME is not set"
 			# main is called once, bare, as the last line of this file, and the
 			# EXIT trap is registered after this point, so leaving the process
 			# here is exactly what returning 0 from main did.
 			exit 0
 		fi
-		die "HOME is not set to an absolute path; set HOME before running $PROG"
+		output_die "HOME is not set to an absolute path; set HOME before running $PROG"
 		;;
 	esac
 }
@@ -375,24 +375,24 @@ main_dispatch() {
 	rc=0
 	case "$cmd" in
 	link)
-		if ! cmd_link; then rc=1; fi
+		if ! runtime_cmd_link; then rc=1; fi
 		;;
 	check)
-		if ! cmd_check; then rc=1; fi
+		if ! check_cmd; then rc=1; fi
 		;;
 	hook)
-		run_hook_bounded
+		hook_run_bounded
 		rc=0
 		;;
 	install-hooks)
-		if ! cmd_install_hooks; then rc=1; fi
+		if ! install_hooks_cmd; then rc=1; fi
 		;;
 	unlink)
-		if ! cmd_unlink; then rc=1; fi
+		if ! unlink_cmd; then rc=1; fi
 		;;
 	*)
 		printf '%s: unknown command %s\n' "$PROG" "$cmd" >&2
-		usage >&2
+		output_usage >&2
 		rc=2
 		;;
 	esac

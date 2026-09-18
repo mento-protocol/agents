@@ -4,26 +4,26 @@
 # that stops a run, the line a session hook prints, and the help text. It
 # holds the "output" section of the single-file script.
 #
-# Reads: QUIET (info, warn), PROG (err, warn, die, hook_say), HOOK_MODE
-# (die).
-# Writes: ERRORS (err).
+# Reads: QUIET (output_info, output_warn), PROG (output_err, output_warn,
+# output_die, output_hook_say), HOOK_MODE (output_die).
+# Writes: ERRORS (output_err).
 #
-# die ends the process. In hook mode it prints one bracketed line and exits
-# 0, because a session start must end well whatever this script finds.
+# output_die ends the process. In hook mode it prints one bracketed line and
+# exits 0, because a session start must end well whatever this script finds.
 
-info() {
+output_info() {
 	if [ "$QUIET" -eq 0 ]; then
 		printf '%s\n' "$*"
 	fi
 }
 
-err() {
+output_err() {
 	printf '%s: %s\n' "$PROG" "$*" >&2
 	ERRORS=$((ERRORS + 1))
 }
 
 # A problem worth naming that must not change the exit code.
-warn() {
+output_warn() {
 	if [ "$QUIET" -eq 0 ]; then
 		printf '%s: warning: %s\n' "$PROG" "$*" >&2
 	fi
@@ -32,29 +32,29 @@ warn() {
 # A refusal that stops the run. The session hook is the exception: a session
 # must start whatever this script finds, so in hook mode the same refusal is
 # one '[link-skills]' line and exit 0. Every other command keeps exit 2.
-die() {
+output_die() {
 	if [ "$HOOK_MODE" -eq 1 ]; then
-		hook_say "$*"
+		output_hook_say "$*"
 		exit 0
 	fi
 	printf '%s: %s\n' "$PROG" "$*" >&2
 	exit 2
 }
 
-hook_say() {
+output_hook_say() {
 	printf '[%s] %s\n' "$PROG" "$*"
 }
 
 # No here documents anywhere in this script: bash 3.2 writes every here
 # document to a temporary file, which fails on hosts with a locked-down /tmp.
 # The help text names $HOME literally; it is documentation, not an expansion.
-usage() {
-	usage_head
-	usage_options
-	usage_notes
+output_usage() {
+	_output_usage_head
+	_output_usage_options
+	_output_usage_notes
 }
 
-usage_head() {
+_output_usage_head() {
 	printf '%s\n' \
 		'Usage: link-skills.sh [options] [command]' \
 		'' \
@@ -83,7 +83,7 @@ usage_head() {
 		''
 }
 
-usage_options() {
+_output_usage_options() {
 	# shellcheck disable=SC2016 # literal $HOME in the help text
 	printf '%s\n' \
 		'Options:' \
@@ -107,7 +107,7 @@ usage_options() {
 		'  1  at least one problem was reported'
 }
 
-usage_notes() {
+_output_usage_notes() {
 	printf '%s\n' \
 		'  2  wrong usage, or no source to work from: no sources file, a' \
 		'     sources file that is not a regular file, names one of the' \
