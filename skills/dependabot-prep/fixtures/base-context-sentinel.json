@@ -1,0 +1,161 @@
+{
+  "schema": "dependabot-prep-base-context-sentinel:v1",
+  "bases": [
+    {
+      "oid": "1111111111111111111111111111111111111111",
+      "policySentinel": "BASE_POLICY_ALPHA_DO_NOT_REUSE"
+    },
+    {
+      "oid": "2222222222222222222222222222222222222222",
+      "policySentinel": "BASE_POLICY_BETA_REQUIRES_REBIND"
+    }
+  ],
+  "transitionCases": [
+    {
+      "name": "instruction-free-stable",
+      "context": {
+        "mode": "instruction-free",
+        "launchBaseOid": null
+      },
+      "target": {
+        "pullRequest": 101,
+        "boundBaseOid": "1111111111111111111111111111111111111111",
+        "liveBaseOid": "1111111111111111111111111111111111111111"
+      },
+      "expected": {
+        "action": "continue",
+        "writesAllowedNow": true,
+        "requiresRelaunch": false,
+        "nextPolicySentinel": "BASE_POLICY_ALPHA_DO_NOT_REUSE"
+      }
+    },
+    {
+      "name": "instruction-free-moved",
+      "context": {
+        "mode": "instruction-free",
+        "launchBaseOid": null
+      },
+      "target": {
+        "pullRequest": 101,
+        "boundBaseOid": "1111111111111111111111111111111111111111",
+        "liveBaseOid": "2222222222222222222222222222222222222222"
+      },
+      "expected": {
+        "action": "rebind-policy-in-process",
+        "writesAllowedNow": false,
+        "requiresRelaunch": false,
+        "nextPolicySentinel": "BASE_POLICY_BETA_REQUIRES_REBIND"
+      }
+    },
+    {
+      "name": "exact-base-stable",
+      "context": {
+        "mode": "exact-base",
+        "launchBaseOid": "1111111111111111111111111111111111111111"
+      },
+      "target": {
+        "pullRequest": 101,
+        "boundBaseOid": "1111111111111111111111111111111111111111",
+        "liveBaseOid": "1111111111111111111111111111111111111111"
+      },
+      "expected": {
+        "action": "continue",
+        "writesAllowedNow": true,
+        "requiresRelaunch": false,
+        "nextPolicySentinel": "BASE_POLICY_ALPHA_DO_NOT_REUSE"
+      }
+    },
+    {
+      "name": "exact-base-moved",
+      "context": {
+        "mode": "exact-base",
+        "launchBaseOid": "1111111111111111111111111111111111111111"
+      },
+      "target": {
+        "pullRequest": 101,
+        "boundBaseOid": "1111111111111111111111111111111111111111",
+        "liveBaseOid": "2222222222222222222222222222222222222222"
+      },
+      "expected": {
+        "action": "stop-all-writes-and-relaunch",
+        "writesAllowedNow": false,
+        "requiresRelaunch": true,
+        "nextPolicySentinel": null
+      }
+    }
+  ],
+  "allPlans": [
+    {
+      "name": "instruction-free-multi-base",
+      "targets": [
+        {
+          "pullRequest": 101,
+          "liveBaseOid": "1111111111111111111111111111111111111111"
+        },
+        {
+          "pullRequest": 202,
+          "liveBaseOid": "2222222222222222222222222222222222222222"
+        }
+      ],
+      "processes": [
+        {
+          "processId": "instruction-free-1",
+          "mode": "instruction-free",
+          "launchBaseOid": null,
+          "pullRequests": [101, 202]
+        }
+      ],
+      "expectedAllowed": true
+    },
+    {
+      "name": "one-exact-base-process-spans-two-bases",
+      "targets": [
+        {
+          "pullRequest": 101,
+          "liveBaseOid": "1111111111111111111111111111111111111111"
+        },
+        {
+          "pullRequest": 202,
+          "liveBaseOid": "2222222222222222222222222222222222222222"
+        }
+      ],
+      "processes": [
+        {
+          "processId": "exact-alpha",
+          "mode": "exact-base",
+          "launchBaseOid": "1111111111111111111111111111111111111111",
+          "pullRequests": [101, 202]
+        }
+      ],
+      "expectedAllowed": false
+    },
+    {
+      "name": "one-exact-base-process-per-distinct-base",
+      "targets": [
+        {
+          "pullRequest": 101,
+          "liveBaseOid": "1111111111111111111111111111111111111111"
+        },
+        {
+          "pullRequest": 202,
+          "liveBaseOid": "2222222222222222222222222222222222222222"
+        }
+      ],
+      "processes": [
+        {
+          "processId": "exact-alpha",
+          "mode": "exact-base",
+          "launchBaseOid": "1111111111111111111111111111111111111111",
+          "pullRequests": [101]
+        },
+        {
+          "processId": "exact-beta",
+          "mode": "exact-base",
+          "launchBaseOid": "2222222222222222222222222222222222222222",
+          "pullRequests": [202]
+        }
+      ],
+      "expectedAllowed": true
+    }
+  ]
+}

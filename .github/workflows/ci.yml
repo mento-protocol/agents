@@ -97,6 +97,20 @@ jobs:
       - name: Test the validator
         run: node --test scripts/tests/validate-skills/*.test.mjs
 
+      # The push wrapper suite inspects the Node executable that runs it and
+      # needs a scratch root; both must sit on a path whose components are not
+      # group- or other-writable. The runner's /tmp is 1777 and its
+      # hostedtoolcache node is not sealed either, so the suites run from a
+      # copy of node inside a sealed directory under the runner's temp path.
+      - name: Test the skill scripts
+        env:
+          DEPENDABOT_PREP_TEST_SEALED_ROOT: ${{ runner.temp }}/sealed
+        run: |
+          mkdir -p -m 0700 "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin"
+          chmod 0700 "$DEPENDABOT_PREP_TEST_SEALED_ROOT"
+          install -m 0700 "$(command -v node)" "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin/node"
+          "$DEPENDABOT_PREP_TEST_SEALED_ROOT/bin/node" --test skills/*/scripts/*.test.mjs
+
       - name: Test link-skills.sh
         run: bash scripts/test-link-skills.sh
 

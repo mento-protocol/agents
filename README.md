@@ -341,12 +341,19 @@ run still recognises it, and makes the command exit 1.
 pnpm install
 pnpm test                        # pnpm -r test — every package's test suite
 pnpm validate:skills             # node scripts/validate-skills.mjs
+node --test skills/*/scripts/*.test.mjs  # every skill's own suite; see below
 bash scripts/test-link-skills.sh # the link-skills.sh harness
 trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
 ```
 
-CI runs the last two skill checks on Ubuntu and macOS. On macOS also run
+The dependabot-prep push suite refuses a scratch root or a Node binary on a path
+with a group- or world-writable component. Where `/tmp` or the Node install is
+such a path, do what CI does: create a mode-0700 directory, copy `node` into a
+`bin/` below it, set `DEPENDABOT_PREP_TEST_SEALED_ROOT` to that directory, and
+run the suites with the copied `node`.
+
+CI runs the skill validation, the skill suites and the link harness on Ubuntu and macOS. On macOS also run
 `BASH_BIN=/bin/bash bash scripts/test-link-skills.sh`, which exercises the
 bash 3.2 that `link-skills.sh` must keep working with.
 

@@ -1,7 +1,7 @@
 // @mento-protocol/issues/markers — public API.
 //
 // The executable form of the portable procedural-marker byte contract
-// (`~/.agents/skills/dependabot-prep/references/feedback.md`), plus its v2
+// (`skills/dependabot-prep/references/procedural-markers.md`), plus its v2
 // extension: a `claim` field appended after `decision` for the
 // comment/reply markers (required on a v2 schema, forbidden on a v1
 // schema), and the two-line PR summary-comment marker (AMENDMENTS K).

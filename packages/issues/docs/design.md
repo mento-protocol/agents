@@ -1319,8 +1319,8 @@ fine-grained token with repository **Contents: Read and write** both suffice.
 
 ## Markers
 
-The byte contract in the `dependabot-prep` skill's `references/feedback.md` is
-the v1 law; this module is its executable form plus the v2 extension.
+The byte contract in `skills/dependabot-prep/references/procedural-markers.md`
+is the law; this module is its executable form, v1 and the v2 extension.
 
 ```text
 v1: <!-- <schema> root-id-sha256=<64hex> root-body-sha256=<64hex> head=<40hex>
@@ -1344,13 +1344,9 @@ whitespace; `encodeVisibleBody` additionally forbids `\r` and trailing
 whitespace before a newline or end of string; `encodeClaimToken` requires 40
 lowercase hex.
 
-Two of those are **stricter than the referenced v1 contract**, deliberately,
-and are the two most likely first-use surprises:
+One of those is **stricter than a live `gh api user` response**, deliberately,
+and is the most likely first-use surprise:
 
-- `references/feedback.md` says the visible body carries "LF line endings, and
-  no trailing spaces". `encodeVisibleBody` also rejects a trailing **tab**. A
-  trailing tab is invisible in every review surface and changes the digest, so
-  it is refused rather than hashed.
 - `encodeOperator` requires the object's keys to be exactly `id`, `login` and
   `type` — no more. Pasting a live `gh api user` response verbatim fails with
   `MARKER_OPERATOR_INVALID`; pick those three fields out of it. The digest

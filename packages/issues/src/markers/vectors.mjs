@@ -96,7 +96,7 @@ export const SUMMARY_VECTOR_INPUTS = Object.freeze([
     name: "summary-takeover",
     pr: 872,
     claim: "fedcba9876543210fedcba9876543210fedcba98",
-    ownerRunId: "openclaw-giskard-20260909T104403Z-3ad10ff591be",
+    ownerRunId: "openclaw-linux-20260909T104403Z-3ad10ff591be",
     operator: Object.freeze({ id: 99, login: "openclaw-bot", type: "User" }),
     supersedes: "0123456789abcdef0123456789abcdef01234567",
   }),
@@ -174,8 +174,8 @@ function buildSummaryVector(input) {
 }
 
 // The default `generatedBy` records the package NAME and no version. The
-// serialized fixture is byte-compared by `markers vectors --check`, and a
-// separate skill repository copies the file verbatim, so a version in this
+// serialized fixture is byte-compared by `markers vectors --check`, and the
+// bundled skill under skills/dependabot-prep carries a verbatim copy, so a version in this
 // field would make every release rewrite the fixture and fail that check until
 // someone regenerated it. The name answers the only question the field is
 // asked — which tool wrote these bytes — and it does not move on a release.
