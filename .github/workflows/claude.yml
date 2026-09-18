@@ -84,7 +84,7 @@ jobs:
 
       - name: Run Claude
         if: steps.scope.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
+        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         with:
           github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -140,7 +140,7 @@ jobs:
           persist-credentials: false
 
       - name: Review the pull request
-        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
+        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         with:
           # Keep review mutation inside this workflow-scoped token. The action
           # does not need OIDC authority to obtain a broader installation token.
