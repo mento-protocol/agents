@@ -16,10 +16,22 @@ BASH_BIN=${BASH_BIN:-bash}
 
 PASS=0
 FAIL=0
+SKIPPED=0
+CASE_NUM=0
 CURRENT=""
 CASE_FAILS=0
+# The next case to report, and the number of cases that run at once. case.sh
+# resolves the worker count from HARNESS_JOBS on the first case.
+NEXT_REPORT=1
+CASE_JOBS=0
+
+# The PATH this run started with. case_setup restores it before every case,
+# so a shim a case installed is gone whatever that case did with it.
+HARNESS_PATH=$PATH
+
 ROOT=""
 CASE_DIR=""
+SKIP_NOTE=""
 BARE=""
 SEED=""
 COMPANY=""
@@ -44,6 +56,20 @@ SAVED_PATH=""
 . "$HERE/tests/lib/shims.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/shims.sh >&2 && exit 2; }
 # shellcheck source=tests/lib/probe.sh
 . "$HERE/tests/lib/probe.sh" || { printf 'test-link-skills: cannot source %s\n' tests/lib/probe.sh >&2 && exit 2; }
+
+# The cases of a topic that has moved out of this file live in
+# tests/link-skills/, one file per topic, and are sourced from their own
+# ordered list, by absolute path, the same way.
+# shellcheck source=tests/link-skills/harness.sh
+. "$HERE/tests/link-skills/harness.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/harness.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/hook-deadline.sh
+. "$HERE/tests/link-skills/hook-deadline.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/hook-deadline.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/names-and-casing.sh
+. "$HERE/tests/link-skills/names-and-casing.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/names-and-casing.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/output.sh
+. "$HERE/tests/link-skills/output.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/output.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/unlink.sh
+. "$HERE/tests/link-skills/unlink.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/unlink.sh >&2 && exit 2; }
 
 # ------------------------------------------------------------------ cases ---
 
@@ -868,8 +894,7 @@ sources_missing_path_with_space_is_missing() {
 install_hooks_missing_file() {
 	local backups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -891,8 +916,7 @@ install_hooks_missing_file() {
 install_hooks_existing_groups_preserved() {
 	local groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -930,8 +954,7 @@ install_hooks_existing_groups_preserved() {
 install_hooks_idempotent() {
 	local n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -962,8 +985,7 @@ install_hooks_idempotent() {
 install_hooks_embeds_custom_paths() {
 	local sources assembly command rc
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	sources="$CASE_DIR/custom-sources"
@@ -1082,27 +1104,6 @@ sources_symlink_to_manifest_refused() {
 	assert_out_has "must not be an assembly control file" "the refusal is named"
 	assert_same_bytes "$manifest" "$CASE_DIR/manifest.before" "the manifest is still untouched"
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link still kept"
-}
-
-unlink_leaves_foreign_entries() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	mkdir -p "$CASE_DIR/other/kept"
-	printf 'kept\n' >"$CASE_DIR/other/kept/SKILL.md"
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$HOME/.claude"
-	case_run_script link
-	assert_rc 0 "link"
-	mkdir -p "$HOME/.agents/skills/mine"
-	printf 'mine\n' >"$HOME/.agents/skills/mine/SKILL.md"
-	ln -s "$CASE_DIR/other/kept" "$HOME/.agents/skills/kept"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "recorded link removed"
-	fs_assert_absent "$HOME/.agents/skills/.skill-links" "manifest removed"
-	assert_file_has "$HOME/.agents/skills/mine/SKILL.md" "mine" "foreign directory kept"
-	fs_assert_link "$HOME/.agents/skills/kept" "$CASE_DIR/other/kept" "foreign symlink kept"
-	fs_assert_link "$HOME/.claude/skills" "$HOME/.agents/skills" "runtime link kept"
 }
 
 personal_skill_untouched() {
@@ -1248,22 +1249,6 @@ foreign_dangling_not_pruned() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "alpha link"
 }
 
-foreign_dangling_not_unlinked() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_skill "$CASE_DIR/one" beta
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "link"
-	rm -f "$HOME/.agents/skills/beta"
-	ln -s "$CASE_DIR/wip/beta-under-construction" "$HOME/.agents/skills/beta"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_out_has "foreign dangling link" "foreign message"
-	fs_assert_absent "$HOME/.agents/skills/alpha" "recorded link removed"
-	fs_assert_link "$HOME/.agents/skills/beta" "$CASE_DIR/wip/beta-under-construction" "foreign dangling link kept"
-}
-
 # A manifest name is one plain entry name. A line naming a path must never be
 # followed out of the assembly directory.
 manifest_traversal_line_ignored() {
@@ -1362,24 +1347,6 @@ fetch_stamp_symlink_refused() {
 	fi
 }
 
-# unlink removes the stamp directory it owns, and nothing else in the assembly
-# root that merely looks like a stamp.
-unlink_leaves_foreign_fetch_file() {
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	case_run_script check
-	assert_rc 0 "check"
-	fs_assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
-	printf 'not mine\n' >"$HOME/.agents/skills/.skill-links.fetch-foreign"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_file_has "$HOME/.agents/skills/.skill-links.fetch-foreign" "not mine" "unrelated file left alone"
-	fs_assert_absent "$HOME/.agents/skills/.skill-links.d" "stamp directory removed"
-}
-
 # Two spellings of one directory are one source, however they are written.
 source_listed_twice_by_symlink_alias() {
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -1458,50 +1425,6 @@ assembly_dir_refused_as_source() {
 	case_run_script hook
 	assert_rc 0 "hook with the assembly listed as a source"
 	assert_out_lacks "[link-skills]" "the hook says nothing about it"
-}
-
-# A case-only rename of a skill directory must relink in one run, not report a
-# collision and drop the skill.
-case_only_rename_relinks() {
-	if ! fs_case_insensitive "$CASE_DIR"; then
-		printf '    (skipped: case-sensitive filesystem)\n'
-		return
-	fi
-	fixtures_skill "$CASE_DIR/one" foo
-	fixtures_skill "$CASE_DIR/one" keep
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "first link"
-	mv "$CASE_DIR/one/foo" "$CASE_DIR/one/tmpname"
-	mv "$CASE_DIR/one/tmpname" "$CASE_DIR/one/Foo"
-	case_run_script link
-	assert_rc 0 "second link"
-	assert_out_lacks "collision" "no false collision"
-	assert_out_has "relinked Foo" "relink message"
-	assert_out_has "pruned 0" "nothing pruned"
-	fs_assert_exists "$HOME/.agents/skills/Foo/SKILL.md" "the skill is reachable after one run"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "Foo" "manifest holds the new spelling"
-}
-
-# Two names the filesystem cannot tell apart are a duplicate, reported as one.
-case_variant_names_are_duplicates() {
-	if ! fs_case_insensitive "$CASE_DIR"; then
-		printf '    (skipped: case-sensitive filesystem)\n'
-		return
-	fi
-	fixtures_skill "$CASE_DIR/one" Bar
-	fixtures_skill "$CASE_DIR/one" keep
-	fixtures_skill "$CASE_DIR/two" bar
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	fixtures_add_source "$CASE_DIR/two"
-	case_run_script link
-	assert_rc 1 "link"
-	assert_out_has "duplicate skill name 'Bar'" "duplicate message"
-	assert_out_has "$CASE_DIR/two/bar" "both paths named"
-	fs_assert_absent "$HOME/.agents/skills/Bar" "neither copy linked"
-	fs_assert_link "$HOME/.agents/skills/keep" "$CASE_DIR/one/keep" "the other skill still links"
 }
 
 # A sources file that names no source is not permission to empty the assembly.
@@ -1623,18 +1546,6 @@ recorded_target_mismatch_not_replaced() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/precious/alpha" "user link kept"
 }
 
-link_names_its_sources() {
-	fixtures_company
-	fixtures_skill "$CASE_DIR/personal" mine
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/personal"
-	case_run_script link
-	assert_rc 0 "link"
-	assert_out_has "sources: $CASE_DIR/personal" "sources line"
-	assert_out_has "$COMPANY/skills is not listed" "clone not a source warning"
-	fs_assert_link "$HOME/.agents/skills/mine" "$CASE_DIR/personal/mine" "personal skill linked"
-}
-
 # A ~/.claude/skills holding only Finder noise counts as empty.
 ds_store_only_claude_skills_replaced() {
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -1652,8 +1563,7 @@ ds_store_only_claude_skills_replaced() {
 # A failed ln or manifest write must be counted, never reported as success.
 unwritable_assembly_reports_failure() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1701,8 +1611,7 @@ script_reached_through_a_symlink() {
 install_hooks_path_with_space() {
 	local clone cmd
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	clone="$CASE_DIR/my repos/agents"
 	mkdir -p "$clone/scripts"
@@ -1726,8 +1635,7 @@ install_hooks_path_with_space() {
 install_hooks_symlinked_settings() {
 	local n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1755,8 +1663,7 @@ install_hooks_symlinked_settings() {
 # A dangling settings symlink must be reported, never written through.
 install_hooks_dangling_symlink_refused() {
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1777,8 +1684,7 @@ install_hooks_dangling_symlink_refused() {
 install_hooks_apostrophe_path_idempotent() {
 	local clone n cmd
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	clone="$CASE_DIR/it's tools/agents"
 	mkdir -p "$clone/scripts"
@@ -1810,8 +1716,7 @@ install_hooks_apostrophe_path_idempotent() {
 settings_mode_preserved() {
 	local mode n old_umask
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1854,8 +1759,7 @@ settings_mode_preserved() {
 install_hooks_backups_never_overwritten() {
 	local n base
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1886,8 +1790,7 @@ install_hooks_backups_never_overwritten() {
 install_hooks_leaves_minified_file_unchanged() {
 	local file before n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1919,8 +1822,7 @@ install_hooks_leaves_minified_file_unchanged() {
 install_hooks_replaces_dead_script_path() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -1969,8 +1871,7 @@ install_hooks_replaces_dead_script_path() {
 install_hooks_rewrites_relative_script_path() {
 	local clone file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2075,8 +1976,7 @@ check_without_sources_file_exits_2() {
 # belongs in the assembly, so its links stay.
 unreadable_source_keeps_links() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" other
@@ -2153,8 +2053,7 @@ check_reports_unlistable_source_as_unreadable() {
 recorded_link_not_repointed_while_source_unavailable() {
 	local manifest
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	manifest="$HOME/.agents/skills/.skill-links"
 	fixtures_skill "$CASE_DIR/one" alpha
@@ -2418,8 +2317,7 @@ aged_lock_with_live_owner_is_kept() {
 lock_owner_survives_timezone_change() {
 	local lock start other
 	if ! probe_ps_reports_start_time; then
-		printf '    (skipped: ps does not report process start times here)\n'
-		return
+		case_skip "ps does not report process start times here"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2434,8 +2332,7 @@ lock_owner_survives_timezone_change() {
 	other=$(TZ=America/New_York LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null |
 		tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
 	if [ -z "$start" ] || [ "$start" = "$other" ]; then
-		printf '    (skipped: ps start times do not follow TZ here)\n'
-		return
+		case_skip "ps start times do not follow TZ here"
 	fi
 	mkdir "$lock"
 	printf '%s\t%s\n' "$$" "$start" >"$lock/pid"
@@ -2636,8 +2533,7 @@ parent_traversal_through_file_refused() {
 unreadable_manifest_aborts() {
 	local manifest
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2683,8 +2579,7 @@ fifo_at_sources_path_refused() {
 	fixtures_company
 	mkdir -p "$HOME/.agents"
 	if ! mkfifo "$HOME/.agents/skill-sources" 2>/dev/null; then
-		printf '    (skipped: mkfifo is not available)\n'
-		return
+		case_skip "mkfifo is not available"
 	fi
 	out="$CASE_DIR/fifo-run.out"
 
@@ -2724,26 +2619,6 @@ fifo_at_sources_path_refused() {
 	fs_assert_absent "$HOME/.agents/skills" "nothing was created"
 }
 
-# A removal that fails is reported, keeps its manifest entry, and fails the run.
-unlink_reports_deletion_failure() {
-	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
-	fi
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	case_run_script link
-	assert_rc 0 "link"
-	chmod 500 "$HOME/.agents/skills"
-	case_run_script unlink
-	chmod 700 "$HOME/.agents/skills"
-	assert_rc 1 "unlink"
-	assert_out_has "could not remove" "failure reported"
-	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link is still there"
-	assert_file_has "$HOME/.agents/skills/.skill-links" "alpha" "the manifest entry is kept"
-}
-
 # A throttle written as '08' is eight hours, never an octal literal.
 interval_with_leading_zero_accepted() {
 	fixtures_company
@@ -2762,51 +2637,6 @@ interval_with_leading_zero_accepted() {
 	assert_rc 0 "second hook"
 	assert_out_lacks "value too great for base" "the interval parses as decimal"
 	assert_out_empty "the stamp is fresh, so the throttle holds"
-}
-
-# This harness must refuse to run when mktemp -d cannot create the temporary
-# root, and it must register no case_cleanup trap before that check. The failing
-# run starts from a throwaway working directory that holds a sentinel file and
-# a nested file: a case_cleanup trap armed against an unverified ROOT would put
-# those at risk, so their survival is the assertion.
-mktemp_failure_arms_no_cleanup() {
-	local work out rc
-	work="$CASE_DIR/work"
-	mkdir -p "$work/subdir"
-	printf 'sentinel-contents\n' >"$work/sentinel.txt"
-	printf 'nested\n' >"$work/subdir/nested.txt"
-	out=$(cd "$work" && TMPDIR="$CASE_DIR/no-such-tmpdir" "$BASH_BIN" "$HERE/test-link-skills.sh" 2>&1)
-	rc=$?
-	if [ "$rc" -ne 1 ]; then
-		case_fail "harness exit code $rc, expected 1"
-		printf '      output: %s\n' "$out"
-	fi
-	case "$out" in
-	*"mktemp -d failed to create a directory"*) ;;
-	*)
-		case_fail "the harness does not report the mktemp failure"
-		printf '      output: %s\n' "$out"
-		;;
-	esac
-	case "$out" in
-	*"interpreter:"*)
-		case_fail "the harness kept running after the mktemp failure"
-		printf '      output: %s\n' "$out"
-		;;
-	*) ;;
-	esac
-	if [ ! -d "$work" ]; then
-		case_fail "the working directory was removed"
-		return
-	fi
-	if [ ! -f "$work/sentinel.txt" ]; then
-		case_fail "the sentinel file was removed"
-	elif [ "$(cat "$work/sentinel.txt")" != "sentinel-contents" ]; then
-		case_fail "the sentinel file content changed"
-	fi
-	if [ ! -f "$work/subdir/nested.txt" ]; then
-		case_fail "the nested file was removed"
-	fi
 }
 
 # A '..' segment must be normalized by text, before the filesystem is asked
@@ -2898,8 +2728,7 @@ check_keeps_duplicate_link_not_orphan() {
 manifest_write_failure_keeps_old_manifest() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -2932,42 +2761,6 @@ manifest_write_failure_keeps_old_manifest() {
 	fs_assert_link "$HOME/.agents/skills/alpha" "$CASE_DIR/one/alpha" "the link recorded before this run survives"
 }
 
-# A manifest that is a symlink is someone else's list of links. Following it
-# would let a foreign file name the entries unlink removes, so every command
-# that reads the manifest refuses the path instead.
-unlink_refuses_symlinked_manifest() {
-	fixtures_skill "$CASE_DIR/one" alpha
-	fixtures_write_sources
-	fixtures_add_source "$CASE_DIR/one"
-	mkdir -p "$HOME/.agents/skills"
-	ln -s "$CASE_DIR/one/alpha" "$HOME/.agents/skills/foreign"
-	printf 'foreign\t%s\n' "$CASE_DIR/one/alpha" >"$CASE_DIR/planted"
-	ln -s "$CASE_DIR/planted" "$HOME/.agents/skills/.skill-links"
-
-	case_run_script unlink
-	assert_rc 1 "unlink with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "refusal message"
-	assert_out_lacks "removed foreign" "nothing claims the foreign link was removed"
-	fs_assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link survives"
-	fs_assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is left alone"
-	assert_file_has "$CASE_DIR/planted" "foreign" "the file the symlink names is left alone"
-
-	case_run_script link
-	assert_rc 1 "link with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "link refusal message"
-
-	case_run_script check
-	assert_rc 1 "check with a symlinked manifest"
-	assert_out_has "is a symlink, not a regular file" "check refusal message"
-
-	# The hook never fails a session, and it changes nothing either.
-	case_run_script hook
-	assert_rc 0 "hook with a symlinked manifest"
-	fs_assert_link "$HOME/.agents/skills/foreign" "$CASE_DIR/one/alpha" "the foreign link still survives"
-	fs_assert_link "$HOME/.agents/skills/.skill-links" "$CASE_DIR/planted" "the manifest symlink is still there"
-	assert_file_has "$CASE_DIR/planted" "foreign" "the planted file is still there"
-}
-
 # A '..' after a symlinked directory belongs to the directory that link really
 # points at. Collapsing the text first would answer the directory that holds
 # the symlink, and every link would land there.
@@ -2987,38 +2780,11 @@ symlink_then_parent_resolves_physically() {
 	fs_assert_absent "$HOME/.agents/skills" "the default assembly was never touched"
 }
 
-# unlink removes only the fetch-<digits> stamps it writes. Any other name in
-# the stamp directory belongs to someone else, and keeps the directory too.
-unlink_leaves_foreign_file_in_stamp_dir() {
-	local left
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	case_run_script check
-	assert_rc 0 "check"
-	fs_assert_exists "$HOME/.agents/skills/.skill-links.d" "stamp directory"
-	printf 'notes\n' >"$HOME/.agents/skills/.skill-links.d/notes.txt"
-	printf 'not a stamp\n' >"$HOME/.agents/skills/.skill-links.d/fetch-abc"
-	case_run_script unlink
-	assert_rc 0 "unlink"
-	assert_out_has "kept $HOME/.agents/skills/.skill-links.d" "the directory is kept"
-	fs_assert_is_dir_not_link "$HOME/.agents/skills/.skill-links.d" "the stamp directory survives"
-	assert_file_has "$HOME/.agents/skills/.skill-links.d/notes.txt" "notes" "the foreign file survives"
-	assert_file_has "$HOME/.agents/skills/.skill-links.d/fetch-abc" "not a stamp" "a non-numeric fetch name survives"
-	left=$(find "$HOME/.agents/skills/.skill-links.d" -maxdepth 1 -type f -name 'fetch-*' 2>/dev/null | wc -l | tr -d ' ')
-	if [ "$left" != "1" ]; then
-		case_fail "expected only fetch-abc to remain, found $left fetch entries"
-	fi
-}
-
 # A prune that the filesystem refuses must keep the link's manifest entry, so
 # that a later run can still remove it, and must count as an error.
 prune_failure_keeps_manifest_entry() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" beta
@@ -3048,8 +2814,7 @@ prune_failure_keeps_manifest_entry() {
 manifest_write_failure_restores_repointed_link() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3090,8 +2855,7 @@ manifest_write_failure_restores_repointed_link() {
 manifest_write_failure_restores_pruned_links() {
 	local shims before
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" beta
@@ -3153,42 +2917,6 @@ hardlinked_stamp_not_truncated() {
 	assert_file_has "$stamp" "KEEP ME" "the stamp path was not truncated"
 }
 
-# The hook must end the session start it runs in, whatever it started. A git
-# subcommand that outlasts the deadline is stopped with everything below it.
-hook_bounded_by_deadline() {
-	local started elapsed childpid
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	fixtures_push_beta
-	# SKILL_SOURCES_FETCH_INTERVAL_HOURS is 0 for every case, so the hook does
-	# fetch here; the shim hangs on the behind count that follows the fetch.
-	shims_hanging_git "$CASE_DIR/bin"
-	shims_use "$CASE_DIR/bin"
-	LS_TEST_SLEEP_PID="$CASE_DIR/sleep.pid"
-	export LS_TEST_SLEEP_PID
-	started=$(date +%s)
-	case_run_script hook
-	elapsed=$(($(date +%s) - started))
-	unset LS_TEST_SLEEP_PID
-	shims_drop
-	assert_rc 0 "hook"
-	assert_out_has "hook timed out after 25s" "the deadline is reported"
-	if [ "$elapsed" -gt 30 ]; then
-		case_fail "the hook took ${elapsed}s, expected it to return inside 30s"
-	fi
-	childpid=$(cat "$CASE_DIR/sleep.pid" 2>/dev/null || printf '')
-	if [ -z "$childpid" ]; then
-		case_fail "the git shim did not record the pid of its sleep"
-	elif probe_pid_is_live "$childpid"; then
-		case_fail "the sleep the hook started outlived the deadline"
-		kill -9 "$childpid" 2>/dev/null || true
-	fi
-	fs_assert_absent "$HOME/.agents/skills/beta" "the hook links nothing"
-}
-
 # A path the script cannot use fails every other command with exit 2 and ends
 # the session hook with one line and exit 0.
 hook_exits_zero_on_init_failure() {
@@ -3224,8 +2952,7 @@ hook_exits_zero_on_init_failure() {
 install_hooks_ignores_similar_named_script() {
 	local custom
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3263,8 +2990,7 @@ install_hooks_ignores_similar_named_script() {
 install_hooks_leaves_unrelated_command_alone() {
 	local file got groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3315,8 +3041,7 @@ install_hooks_leaves_unrelated_command_alone() {
 install_hooks_recognizes_shell_options_before_script() {
 	local file n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3371,8 +3096,7 @@ install_hooks_recognizes_shell_options_before_script() {
 install_hooks_replaces_operand_option_command() {
 	local file opt n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3439,8 +3163,7 @@ install_hooks_replaces_operand_option_command() {
 install_hooks_replaces_terminal_option_command() {
 	local file opt n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3482,8 +3205,7 @@ install_hooks_replaces_terminal_option_command() {
 # the old target directory, where nothing ever finds it again.
 relink_failure_keeps_old_link_and_entry() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/two" alpha
@@ -3516,8 +3238,7 @@ relink_failure_keeps_old_link_and_entry() {
 # test with 'absent', which reads exactly like a skill that was deleted.
 unreadable_skill_directory_keeps_link() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/one" beta
@@ -3563,8 +3284,7 @@ unreadable_skill_directory_keeps_link() {
 # deleted skill either, so a recorded link survives the permission problem.
 unreadable_skill_file_keeps_link() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_skill "$CASE_DIR/one" beta
@@ -3712,8 +3432,7 @@ lock_vanish_is_retried() {
 # repoint a name at a different skill.
 unreadable_name_not_repointed() {
 	if [ "$(id -u)" = "0" ]; then
-		printf '    (skipped: running as root)\n'
-		return
+		case_skip "running as root"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3801,8 +3520,7 @@ relink_creation_failure_restores_old_link() {
 install_hooks_replaces_other_installation() {
 	local file sources assembly n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3879,8 +3597,7 @@ check_malformed_hook_command() {
 install_hooks_replaces_malformed_option_command() {
 	local file
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -3918,8 +3635,7 @@ install_hooks_replaces_malformed_option_command() {
 install_hooks_replaces_unbalanced_quote_command() {
 	local file n groups other spaced
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4020,8 +3736,7 @@ write_two_hook_groups() {
 install_hooks_removes_bad_duplicate_beside_valid_entry() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4079,8 +3794,7 @@ install_hooks_removes_bad_duplicate_beside_valid_entry() {
 install_hooks_repairs_one_and_removes_other_bad_entries() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4156,8 +3870,7 @@ print(entry.get(sys.argv[2], "<missing>"))' "$1" "$2" 2>/dev/null
 install_hooks_replacement_resets_timeout() {
 	local file sources assembly got
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4341,8 +4054,7 @@ dangling_symlink_component_refused() {
 stale_lock_with_reused_pid_is_cleared() {
 	local lock pid start
 	if ! probe_ps_reports_start_time; then
-		printf '    (skipped: ps does not report process start times here)\n'
-		return
+		case_skip "ps does not report process start times here"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4433,42 +4145,6 @@ candidate_containing_runtime_path_refused() {
 	fs_assert_link "$HOME/.claude/skills" "$CASE_DIR/assembly" "the runtime link is created again"
 }
 
-# A host that gives the hook no temporary file loses the output capture and
-# nothing else: the body still runs as a bounded job, so a git subcommand that
-# outlasts the deadline is still stopped and the session still starts.
-hook_bounded_without_tmpdir() {
-	local started elapsed saved
-	fixtures_company
-	fixtures_write_sources
-	fixtures_add_source "$COMPANY/skills"
-	case_run_script link
-	assert_rc 0 "link"
-	fixtures_push_beta
-	shims_hanging_git "$CASE_DIR/bin"
-	shims_use "$CASE_DIR/bin"
-
-	saved=${TMPDIR-}
-	TMPDIR="$CASE_DIR/no-such-tmp/"
-	export TMPDIR
-	started=$(date +%s)
-	case_run_script hook
-	elapsed=$(($(date +%s) - started))
-	if [ -n "$saved" ]; then
-		TMPDIR=$saved
-		export TMPDIR
-	else
-		unset TMPDIR
-	fi
-	shims_drop
-
-	assert_rc 0 "hook with no temporary directory"
-	assert_out_has "hook timed out" "the deadline is reported"
-	if [ "$elapsed" -gt 30 ]; then
-		case_fail "the hook took ${elapsed}s, expected it to return inside 30s"
-	fi
-	fs_assert_absent "$CASE_DIR/no-such-tmp" "no temporary directory is created"
-}
-
 # An entry that already carries this exact command still runs under the type
 # and the timeout it was written with. A type that is not "command" never runs
 # at all, and another timeout is another budget, so the entry is normalized,
@@ -4476,8 +4152,7 @@ hook_bounded_without_tmpdir() {
 install_hooks_normalizes_exact_command_entry() {
 	local file got n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4559,8 +4234,7 @@ write_session_hook_settings() {
 install_hooks_replaces_sh_invocation() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4619,8 +4293,7 @@ install_hooks_replaces_sh_invocation() {
 install_hooks_replaces_missing_interpreter() {
 	local file n groups
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4688,8 +4361,7 @@ write_installed_hook_settings() {
 install_hooks_replaces_non_executable_direct_script() {
 	local copy file n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -4802,8 +4474,7 @@ make_meddling_cp() {
 install_hooks_refuses_when_settings_changed_underneath() {
 	local file shims n
 	if ! probe_have_python3; then
-		printf '    (skipped: no python3)\n'
-		return
+		case_skip "no python3"
 	fi
 	fixtures_skill "$CASE_DIR/one" alpha
 	fixtures_write_sources
@@ -5009,8 +4680,6 @@ manifest_two_column_lines_still_parse() {
 # ------------------------------------------------------------------- main ---
 
 main() {
-	local version
-
 	if [ ! -f "$SOURCE_SCRIPT" ]; then
 		printf 'test-link-skills: cannot find %s\n' "$SOURCE_SCRIPT" >&2
 		exit 2
@@ -5031,14 +4700,11 @@ main() {
 		exit 1
 	fi
 	# Only now is ROOT known to be a fresh directory this run created: arm the
-	# case_cleanup trap so a failed mktemp above never runs case_cleanup against an empty
+	# traps, so a failed mktemp above never runs case_cleanup against an empty
 	# or unverified ROOT.
-	trap case_cleanup EXIT INT TERM
+	case_arm_traps
 
-	# BASH_VERSION must be read by the interpreter under test, not by this one.
-	# shellcheck disable=SC2016
-	version=$("$BASH_BIN" -c 'printf "%s" "$BASH_VERSION"')
-	printf 'interpreter: %s (bash %s)\n\n' "$BASH_BIN" "$version"
+	case_tap_header
 
 	case_run fresh_install_auto_init
 	case_run idempotent_rerun
@@ -5096,7 +4762,7 @@ main() {
 	case_run hook_bounded_without_tmpdir
 	case_run install_hooks_normalizes_exact_command_entry
 	case_run relink_creation_failure_restores_old_link
-	case_run unlink_leaves_foreign_entries
+	cases_unlink
 	case_run personal_skill_untouched
 	case_run source_listed_twice
 	case_run duplicate_keeps_existing_link
@@ -5107,15 +4773,12 @@ main() {
 	case_run emptied_source_prunes_links
 	case_run foreign_matching_link_not_adopted
 	case_run foreign_dangling_not_pruned
-	case_run foreign_dangling_not_unlinked
 	case_run manifest_traversal_line_ignored
 	case_run manifest_temp_name_not_guessable
 	case_run fetch_stamp_symlink_refused
-	case_run unlink_leaves_foreign_fetch_file
 	case_run source_listed_twice_by_symlink_alias
 	case_run assembly_dir_refused_as_source
-	case_run case_only_rename_relinks
-	case_run case_variant_names_are_duplicates
+	cases_names_and_casing
 	case_run empty_sources_file_does_not_prune
 	case_run empty_home_refused
 	case_run unset_home_hook_exits_zero
@@ -5128,8 +4791,6 @@ main() {
 	case_run manifest_write_failure_keeps_old_manifest
 	case_run manifest_write_failure_restores_repointed_link
 	case_run manifest_write_failure_restores_pruned_links
-	case_run unlink_refuses_symlinked_manifest
-	case_run unlink_leaves_foreign_file_in_stamp_dir
 	case_run prune_failure_keeps_manifest_entry
 	case_run directory_at_manifest_path_refused
 	case_run link_refuses_while_locked
@@ -5150,12 +4811,11 @@ main() {
 	case_run parent_traversal_through_file_refused
 	case_run unreadable_manifest_aborts
 	case_run fifo_at_sources_path_refused
-	case_run unlink_reports_deletion_failure
 	case_run interval_with_leading_zero_accepted
 	case_run missing_runtime_home_reported
 	case_run nameonly_manifest_line_ignored
 	case_run recorded_target_mismatch_not_replaced
-	case_run link_names_its_sources
+	cases_output
 	case_run ds_store_only_claude_skills_replaced
 	case_run unwritable_assembly_reports_failure
 	case_run script_reached_through_a_symlink
@@ -5182,13 +4842,9 @@ main() {
 	case_run source_dotdot_after_symlink_resolves_physically
 	case_run source_dotdot_alias_missing_keeps_links
 	case_run manifest_two_column_lines_still_parse
-	case_run mktemp_failure_arms_no_cleanup
+	cases_harness
 
-	printf '\n%d passed, %d failed (interpreter %s)\n' "$PASS" "$FAIL" "$BASH_BIN"
-	if [ "$FAIL" -gt 0 ]; then
-		return 1
-	fi
-	return 0
+	case_tap_summary
 }
 
 main "$@"

@@ -88,6 +88,38 @@ bash scripts/test-link-skills.sh
 BASH_BIN=/bin/bash bash scripts/test-link-skills.sh  # macOS: the bash 3.2 pass
 ```
 
+The harness reports in TAP 13: one `ok` or `not ok` line per case, the
+detail of a failure as `#` comment lines, a `1..N` plan, and a last comment
+line with the passed, failed and skipped counts. A case whose capability is
+missing on this machine, such as `python3`, calls `case_skip` and is reported
+as `ok N - name # SKIP reason`, which is a verdict of its own and never a
+pass.
+
+The harness runs four cases at a time. Every case has a subshell, a `HOME` and
+a case directory of its own, so the cases do not reach each other, and the TAP
+lines still come out in registration order. `HARNESS_JOBS` sets the number of
+workers, and `HARNESS_JOBS=1` runs one case at a time:
+
+```bash
+HARNESS_JOBS=1 bash scripts/test-link-skills.sh
+```
+
+Most of what a run waits for is a lock or a deadline inside
+`link-skills.sh`. Three `LINK_SKILLS_TEST_*` variables shorten those waits for
+the harness alone, and none of them acts in normal use:
+
+- `LINK_SKILLS_TEST_LOCK_WAIT_SECONDS`: the seconds a run waits for a lock
+  another run holds. The harness sets 2 for every case, in place of 10.
+- `LINK_SKILLS_TEST_HOOK_DEADLINE_SECONDS`: the wall-clock budget of the
+  session hook. The two deadline cases set 3, in place of 25.
+- `LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS`: how long a run holds the lock it took
+  before it starts work. One case sets it; there is no default pause.
+
+Each takes 1 to 999 seconds, and any other value keeps the default. Nothing
+under test is skipped by them: the retry loop, the stale-lock clearing, the
+refusal, the deadline, the TERM then KILL sequence and the exit codes all run
+as they do in normal use.
+
 ## Shell scripts
 
 Bash gets the same modularity rules as JavaScript. A script is a set of
@@ -124,7 +156,12 @@ The tests for `scripts/validate-skills.mjs` live under
 `scripts/tests/validate-skills/`: one file per YAML topic, plus
 `cli.test.mjs` and `layout.test.mjs` for the command's own behaviour, and a
 `helpers/` directory with the shared fixtures and builders. Run them with
-`pnpm test:scripts`.
+`pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` that have
+moved out of the runner live under `scripts/tests/link-skills/`, one file per
+topic, sourced from an explicit ordered list the way the modules are. Each
+topic file ends with a `cases_<topic>` function that calls `case_run` for its
+cases in order, and the runner's `main` calls that function in place of the
+lines it replaced.
 
 Rules for a module file:
 

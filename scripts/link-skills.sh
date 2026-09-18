@@ -8,6 +8,10 @@
 # create are reported and left alone.
 #
 # Written for bash 3.2, the default /bin/bash on macOS.
+#
+# Three LINK_SKILLS_TEST_* variables, named where they are read below, shorten
+# this script's waits for the test harness: each takes 1 to 999 seconds, any
+# other value keeps the default, and none of them acts in normal use.
 
 set -euo pipefail
 
@@ -18,10 +22,11 @@ FETCH_TIMEOUT_SECONDS=15
 HOOK_FETCH_BUDGET_SECONDS=20
 HOOK_TIMEOUT_SECONDS=60
 # The whole hook, not just its fetches: the behind count and the candidate
-# scan happen inside this budget too. It stays well below the timeout the
-# installed hook entry carries, so a session start ends on this script's own
-# terms and with its own message.
+# scan happen inside this budget too. It stays well below the installed hook
+# entry's timeout, so a session start ends on this script's own terms and
+# with its own message.
 HOOK_DEADLINE_SECONDS=25
+case ${LINK_SKILLS_TEST_HOOK_DEADLINE_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) HOOK_DEADLINE_SECONDS=$LINK_SKILLS_TEST_HOOK_DEADLINE_SECONDS ;; esac
 
 # A stalled HTTP transfer must give up inside the fetch timeout, so that the
 # bash-native timeout below is a second line of defence, not the only one.
@@ -52,6 +57,7 @@ HOOK_MODE=0
 # Serialisation of the runs that write the assembly. A run waits this long for a
 # lock another run holds, and treats a lock older than this as left behind.
 LOCK_WAIT_SECONDS=10
+case ${LINK_SKILLS_TEST_LOCK_WAIT_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) LOCK_WAIT_SECONDS=$LINK_SKILLS_TEST_LOCK_WAIT_SECONDS ;; esac
 LOCK_STALE_MINUTES=2
 LOCK_HELD=0
 # What is wrong with the lock path, set when take_lock returns 2. The caller
@@ -1670,12 +1676,9 @@ take_lock() {
 			LOCK_HELD=1
 			printf '%s\t%s\n' "$$" "$(proc_start_time "$$")" \
 				>"$LOCK_DIR/pid" 2>/dev/null || true
-			# Test hook, never set outside the harness: hold the lock this
-			# long before the work starts, so that a test can read the pid
-			# file while the run that took it is still running.
-			if [ -n "${LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS-}" ]; then
-				sleep "$LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS" 2>/dev/null || true
-			fi
+			# Test hook: hold the lock this long, 1 to 999 seconds, before the
+			# work starts, so a test can read the pid file while its owner runs.
+			case ${LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) sleep "$LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS" 2>/dev/null || true ;; esac
 			return 0
 		fi
 		# mkdir lost to something. A symlink or a file that appeared between
@@ -2824,12 +2827,11 @@ kill_job() {
 
 # The session hook, bounded by HOOK_DEADLINE_SECONDS of wall clock. The fetch
 # budget covers the fetches only; a slow git status, the behind counts and the
-# scan afterwards all count against this one. The body
-# runs as one background job, in a process group of its own where the host
-# allows it, so nothing it started outlives the deadline. bash 3.2 gives a
-# background job its own process group only in monitor mode, and macOS has no
-# setsid(1) to do it instead, so the deadline path also walks the process
-# tree.
+# scan afterwards all count against this one. The body runs as one background
+# job, in a process group of its own where the host allows it, so nothing it
+# started outlives the deadline. bash 3.2 gives a background job its own
+# process group only in monitor mode, and macOS has no setsid(1) to do it
+# instead, so the deadline path also walks the process tree.
 #
 # The body writes to two temporary files, not to the caller's descriptors:
 # a process the deadline missed cannot hold the session's pipe open past the
@@ -4026,9 +4028,7 @@ main() {
 	refuse_auto_update_token
 
 	FETCH_INTERVAL_HOURS=${SKILL_SOURCES_FETCH_INTERVAL_HOURS:-6}
-	case "$FETCH_INTERVAL_HOURS" in
-	'' | *[!0-9]*) FETCH_INTERVAL_HOURS=6 ;;
-	esac
+	case "$FETCH_INTERVAL_HOURS" in '' | *[!0-9]*) FETCH_INTERVAL_HOURS=6 ;; esac
 	# '08' is a number of hours, never an octal literal, so the base is stated.
 	FETCH_INTERVAL_HOURS=$((10#$FETCH_INTERVAL_HOURS))
 
