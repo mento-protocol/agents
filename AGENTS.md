@@ -52,10 +52,12 @@ directly to `main`. A PR needs a green CI run before it is ready. Do not
 merge, or enable auto-merge, without the explicit approval of whoever
 requested the change, given for that specific PR.
 
-`.github/workflows/claude.yml` reviews a PR once, when it opens or when a
-draft becomes ready. It skips fork PRs and bot-authored PRs. An organization
-member gets a later review with an `@claude review` comment. The workflow
-needs the `CLAUDE_CODE_OAUTH_TOKEN` repository secret.
+`.github/workflows/claude.yml` reviews a PR when it opens and when a draft
+becomes ready, not on later pushes. That automatic review skips fork PRs and
+bot-authored PRs. An organization member with write access gets a later
+review with an `@claude review` comment; the workflow refuses that comment
+on a fork PR. The workflow needs the `CLAUDE_CODE_OAUTH_TOKEN` repository
+secret.
 
 ## Promoting a skill from a personal library
 
