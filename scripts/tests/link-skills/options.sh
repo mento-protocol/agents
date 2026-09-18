@@ -64,7 +64,7 @@ short_quiet_accepted() {
 # command, and it does not stop the parser reading options, so an option after
 # it is still an option. Both halves are asserted, because the second is the
 # part a reader would guess wrong.
-double_dash_ends_options() {
+double_dash_is_accepted_and_ignored() {
 	_options_fixture
 	case_run_script -- link
 	assert_rc 0 "-- link"
@@ -82,5 +82,5 @@ cases_options() {
 	case_run second_positional_exits_2
 	case_run sources_equals_form_accepted
 	case_run short_quiet_accepted
-	case_run double_dash_ends_options
+	case_run double_dash_is_accepted_and_ignored
 }
