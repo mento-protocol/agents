@@ -48,9 +48,14 @@ Use generic examples instead, for example `~/code/agents` or
 ## Pull request rule
 
 Make every tracked change on a branch and open a pull request. Do not push
-directly to `main`. A PR needs a green CI run before it is ready. Do not
-merge, or enable auto-merge, without the explicit approval of whoever
-requested the change, given for that specific PR.
+directly to `main`. Fill in `.github/PULL_REQUEST_TEMPLATE.md` as written:
+the body opens with `## tl;dr`, then `## The Problem`, `## The Solution`,
+`## Validation`, and `## Deferrals`, in that order, in about 250 words. A
+PR needs a green CI run before it is ready. Do not merge, or enable
+auto-merge, without the explicit approval of whoever requested the change,
+given for that specific PR. In a stack of PRs, merge from the bottom up and
+delete each head branch on merge, so GitHub retargets the next PR to `main`;
+check that a PR's base is `main` before merging it.
 
 ## Promoting a skill from a personal library
 
