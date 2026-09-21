@@ -232,25 +232,15 @@ _git_set_fetch_env() {
 	export GIT_TERMINAL_PROMPT=0
 }
 
-# Signal the fetch on expiry. git starts its own ssh or curl child, and
-# process_kill_tree sends both signals that can reach it: the process group,
-# which carries the signal to the whole fetch where setsid gave it a group of
-# its own, and every descendant the ps walk finds. The group signal alone is
-# not enough on a host without setsid, such as macOS: the fetch then runs in
-# this shell's own group, that signal reaches nothing, and only the walk
-# reaches the transport child.
-_git_kill_fetch() {
-	process_kill_tree "$1" "$2"
-}
-
 # git fetch with a bash-native timeout. macOS has no timeout(1).
 #
 # git runs as the background job itself, with no wrapper subshell, so that the
 # signal on expiry reaches git and its ssh child instead of a shell that would
 # leave them running and holding the .git locks. bash 3.2 starts no process
 # group for a background job without job control, so setsid provides one when
-# the host has it; without setsid the pid and every descendant the ps walk
-# finds are signalled one by one.
+# the host has it, and the group signal process_kill_tree sends carries to the
+# whole fetch. Without setsid the fetch runs in this shell's own group, that
+# signal reaches nothing, and only the ps walk reaches the transport child.
 _git_run_fetch() {
 	local root tmo pid waited limit rc
 	root=$1
@@ -269,9 +259,9 @@ _git_run_fetch() {
 	limit=$((tmo * 5))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$waited" -ge "$limit" ]; then
-			_git_kill_fetch TERM "$pid"
+			process_kill_tree TERM "$pid"
 			sleep 1
-			_git_kill_fetch KILL "$pid"
+			process_kill_tree KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			return 1
 		fi
