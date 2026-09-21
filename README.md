@@ -361,7 +361,7 @@ run still recognises it, and makes the command exit 1.
 ```bash
 pnpm install
 pnpm test                        # pnpm -r test — every package's test suite
-pnpm test:scripts                # node:test cases for scripts/validate-skills.mjs
+pnpm test:scripts                # node:test cases for the scripts/ commands
 pnpm validate:skills             # node scripts/validate-skills.mjs
 pnpm check:shell                 # .sh file and function size limits
 node --test skills/*/scripts/*.test.mjs  # every skill's own suite; see below
@@ -390,8 +390,10 @@ The harness prints TAP 13 and ends with a
 modules from `scripts/tests/lib/` and one file per topic from
 `scripts/tests/link-skills/`, where the shared `install-hooks-common.sh` comes
 before the install-hooks topics that call it. The cases for
-`scripts/validate-skills.mjs` are
-`node:test` files under `scripts/tests/validate-skills/`.
+`scripts/validate-skills.mjs` are `node:test` files under
+`scripts/tests/validate-skills/`, and the cases for
+`scripts/check-shell-size.mjs` are `node:test` files under
+`scripts/tests/check-shell-size/`. `pnpm test:scripts` runs both directories.
 
 `scripts/link-skills.sh` is an entry point as well: it sources its topic
 modules from `scripts/lib/link-skills/` by absolute path from an explicit
@@ -402,6 +404,39 @@ directory into every fixture.
 
 Each package's own README documents its usage; run its suite directly with
 `pnpm --filter <package-name> test` during development.
+
+## Using the shell size checker in another repository
+
+`scripts/check-shell-size.mjs` holds no constant of this repository, so
+another repository adopts it by copying the file:
+
+1. Copy it byte-identical, at any depth below the repository root. Change it
+   here first, then copy it again, so every copy stays identical.
+2. Add `mvdan-sh` at exactly `0.10.1` as a dev dependency, and a `check:shell`
+   package script that runs the copy with node.
+3. Create `shell-size-baseline.txt` beside the copy, with the header comment
+   and the rows that repository needs today. A file row is `<path> <count>`; a
+   function row is `<path> <function> <count>`.
+4. Run the check in a CI job that triggers on every pull request, whatever
+   paths changed: a repository-wide check needs a repository-wide trigger.
+5. Make the base ref available before the check, and set `SHELL_SIZE_BASE` on
+   pull requests only, so the baseline can only ratchet down:
+
+```yaml
+- name: Fetch the base branch for the shell size ratchet
+  if: github.base_ref
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: git fetch --no-tags --depth=1 origin "$BASE_REF"
+
+- name: Check shell file and function sizes
+  env:
+    SHELL_SIZE_BASE: ${{ github.base_ref && format('origin/{0}', github.base_ref) || '' }}
+  run: pnpm check:shell
+```
+
+The fetch is what a shallow checkout needs to resolve the base ref. The
+checker's tests live in this repository; a copy needs none of its own.
 
 ## Publishing a package
 
