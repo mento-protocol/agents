@@ -76,13 +76,8 @@ export function git(root, args) {
   });
 }
 
-/**
- * A fresh repository with the checker at `<scriptDir>/check-shell-size.mjs`.
- * The caller removes it with `removeRepo`.
- */
-export function makeRepo({ scriptDir = "scripts" } = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "check-shell-size-")));
-  const repo = { root, scriptDir };
+/** Fills an empty directory with the fixture repository. */
+function buildRepo(root, scriptDir) {
   git(root, ["init", "-q", "-b", "main"]);
   mkdirSync(join(root, scriptDir), { recursive: true });
   copyFileSync(CHECKER, join(root, scriptDir, "check-shell-size.mjs"));
@@ -93,7 +88,23 @@ export function makeRepo({ scriptDir = "scripts" } = {}) {
     root,
     "the fixture is not its own repository",
   );
-  return repo;
+  return { root, scriptDir };
+}
+
+/**
+ * A fresh repository with the checker at `<scriptDir>/check-shell-size.mjs`.
+ * The caller removes it with `removeRepo`. A failure here throws before the
+ * caller can register that removal, so this function removes the directory
+ * itself and leaves nothing behind.
+ */
+export function makeRepo({ scriptDir = "scripts" } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "check-shell-size-")));
+  try {
+    return buildRepo(root, scriptDir);
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export function removeRepo(repo) {
@@ -128,6 +139,11 @@ export function writeBaseline(repo, rows, path = baselinePath(repo)) {
 /** Removes a tracked path from the fixture. */
 export function remove(repo, path) {
   git(repo.root, ["rm", "-q", "--", path]);
+}
+
+/** Deletes `path` from the working tree and leaves it tracked. */
+export function deleteFromWorktree(repo, path) {
+  rmSync(join(repo.root, path), { force: true });
 }
 
 /** Commits everything staged, and returns nothing. */

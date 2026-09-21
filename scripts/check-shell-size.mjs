@@ -48,9 +48,10 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sh from "mvdan-sh";
 
-// Bracket access on purpose: a consumer repository lints every .mjs with
-// turbo/no-undeclared-env-vars, which flags process.env.NAME and accepts
-// process.env["NAME"]. This file must pass that linter unchanged.
+// Bracket access on purpose, so every copy of this file reads these names
+// the same way. A consumer repository lints every .mjs with
+// turbo/no-undeclared-env-vars, which reports both the dot and the bracket
+// form; neither form silences it, and there the rule only warns.
 const MAX_FILE_LINES = Number(process.env["MAX_FILE_LINES"] ?? 500);
 const MAX_FUNCTION_LINES = Number(process.env["MAX_FUNCTION_LINES"] ?? 50);
 const BASE_REF = process.env["SHELL_SIZE_BASE"] ?? "";
@@ -293,7 +294,14 @@ function checkLength(file, lines, allowed) {
 }
 
 function checkFile(file, baseline) {
-  const text = readFileSync(join(ROOT, file), "utf8");
+  let text;
+  try {
+    text = readFileSync(join(ROOT, file), "utf8");
+  } catch (error) {
+    // A tracked path the working tree lacks, or one this user cannot read.
+    problem(`${file}: cannot read: ${error?.code ?? String(error)}`);
+    return;
+  }
   checkLength(file, countLines(text), baseline.files.get(file));
   checkFunctions(file, text, baseline.functions.get(file) ?? new Map());
 }

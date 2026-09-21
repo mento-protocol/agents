@@ -13,6 +13,7 @@ import test from "node:test";
 import {
   FILE_LIMIT,
   FUNCTION_LIMIT,
+  deleteFromWorktree,
   fileOfLines,
   functionOfLines,
   makeRepo,
@@ -81,6 +82,18 @@ test("a file the parser rejects fails the check", (t) => {
   const { status, output } = runChecker(repo);
   assert.equal(status, 1);
   assert.match(output, /a\.sh: cannot parse:/);
+});
+
+test("a tracked path missing from the working tree is reported", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", fileOfLines(2));
+  deleteFromWorktree(repo, "a.sh");
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 1);
+  assert.match(output, /a\.sh: cannot read: ENOENT/);
+  assert.doesNotMatch(output, /at checkFile/);
 });
 
 test("an untracked shell file is not measured", (t) => {
