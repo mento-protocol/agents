@@ -16,6 +16,7 @@ import {
   deleteFromWorktree,
   fileOfLines,
   functionOfLines,
+  makeNonRepo,
   makeRepo,
   removeRepo,
   runChecker,
@@ -156,6 +157,21 @@ test("a baseline row is named by the path of the baseline in use", (t) => {
     output,
     /scripts\/repo-health\/shell-size-baseline\.txt: a\.sh fits the 10-line limit/,
   );
+});
+
+test("a directory outside a git repository is reported, not thrown", (t) => {
+  const dir = makeNonRepo();
+  t.after(() => removeRepo(dir));
+
+  const { status, stderr } = runChecker(dir, {
+    GIT_CEILING_DIRECTORIES: dir.ceiling,
+  });
+  assert.equal(status, 1);
+  assert.match(
+    stderr,
+    /is not inside a git repository; run the checker from a checkout/,
+  );
+  assert.doesNotMatch(stderr, /at ChildProcess/);
 });
 
 test("a tracked path that holds whitespace is reported", (t) => {

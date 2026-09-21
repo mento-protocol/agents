@@ -107,6 +107,24 @@ export function makeRepo({ scriptDir = "scripts" } = {}) {
   }
 }
 
+/**
+ * The same layout without `git init`, for the case where git answers nothing.
+ * `removeRepo` removes it too. The caller passes `ceiling` to `runChecker`, so
+ * git cannot discover a repository above the directory.
+ */
+export function makeNonRepo({ scriptDir = "scripts" } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "check-shell-size-")));
+  try {
+    mkdirSync(join(root, scriptDir), { recursive: true });
+    copyFileSync(CHECKER, join(root, scriptDir, "check-shell-size.mjs"));
+    symlinkSync(NODE_MODULES, join(root, "node_modules"));
+    return { root, scriptDir, ceiling: dirname(root) };
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export function removeRepo(repo) {
   rmSync(repo.root, { recursive: true, force: true });
 }

@@ -59,12 +59,22 @@ const BASE_REF = process.env["SHELL_SIZE_BASE"] ?? "";
 const BASELINE_NAME = "shell-size-baseline.txt";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASELINE = join(HERE, BASELINE_NAME);
-// The repository root, so the checker works at any depth below it.
-const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-  cwd: HERE,
-  encoding: "utf8",
-  stdio: ["ignore", "pipe", "ignore"],
-}).trim();
+// The repository root, so the checker works at any depth below it, or "" when
+// git answers nothing: outside a checkout, or with GIT_DIR pointing elsewhere.
+// main() reports that as a problem of its own, so the run never dies with a
+// stack trace.
+function repositoryRoot() {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: HERE,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+const ROOT = repositoryRoot();
 const BASELINE_REL = relative(ROOT, BASELINE).split(sep).join("/");
 
 const problems = [];
@@ -397,6 +407,13 @@ function report() {
 }
 
 function main() {
+  if (ROOT === "") {
+    problem(
+      `${HERE} is not inside a git repository; run the checker from a checkout`,
+    );
+    report();
+    return;
+  }
   if (BASELINE_REL.startsWith("..")) {
     problem(
       `${BASELINE} is outside the repository at ${ROOT}; keep ${BASELINE_NAME} beside the checker`,
