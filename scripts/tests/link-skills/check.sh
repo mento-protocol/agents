@@ -91,9 +91,11 @@ check_fetches_despite_fresh_stamp() {
 # A fetch that never returns is stopped on its timeout, and so is the child it
 # started. macOS has no setsid, so the fetch runs in the shell's own process
 # group and the group signal reaches nothing: only the process walk reaches a
-# transport child such as ssh. The timeout is shortened to three seconds
-# through the knob the script under test reads; everything else is the fetch
-# timeout as it runs in normal use.
+# transport child such as ssh. The shim's child ignores TERM, so the KILL that
+# follows is the signal that ends it, and the case fails unless that KILL goes
+# to the closure collected before the TERM. The timeout is shortened to three
+# seconds through the knob the script under test reads; everything else is the
+# fetch timeout as it runs in normal use.
 check_fetch_deadline_stops_the_transport_child() {
 	local childpid
 	if ! ps -Ao pid=,ppid= >/dev/null 2>&1; then

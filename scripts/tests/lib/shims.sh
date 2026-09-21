@@ -48,7 +48,11 @@ shims_hanging_git() {
 # that child's pid in the file named by LS_TEST_SLEEP_PID and then waits well
 # past the fetch timeout; every other subcommand is the real git. The child
 # stands in for the ssh or curl transport git starts, so a case can see
-# whether the signal on the deadline reached it and not the fetch alone.
+# whether the signal on the deadline reached it and not the fetch alone. The
+# child ignores TERM, so only the KILL that follows can end it, and the
+# ignored disposition survives the exec a shell may make of the last command.
+# A case that asserts the child is gone therefore asserts that the closure
+# collected before the TERM is still the list the KILL is sent to.
 # shellcheck disable=SC2016
 shims_hanging_fetch_git() {
 	local dir real
@@ -59,7 +63,7 @@ shims_hanging_fetch_git() {
 		'#!/bin/sh' \
 		'for a in "$@"; do' \
 		'	if [ "$a" = "fetch" ]; then' \
-		'		sleep 60 &' \
+		'		sh -c '"'"'trap "" TERM; sleep 60'"'"' &' \
 		'		if [ -n "${LS_TEST_SLEEP_PID:-}" ]; then' \
 		'			echo "$!" >"$LS_TEST_SLEEP_PID"' \
 		'		fi' \

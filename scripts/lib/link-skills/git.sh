@@ -259,9 +259,7 @@ _git_run_fetch() {
 	limit=$((tmo * 5))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$waited" -ge "$limit" ]; then
-			process_kill_tree TERM "$pid"
-			sleep 1
-			process_kill_tree KILL "$pid"
+			process_kill_tree "$pid"
 			wait "$pid" 2>/dev/null || true
 			return 1
 		fi

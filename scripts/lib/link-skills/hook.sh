@@ -247,9 +247,7 @@ _hook_await() {
 	deadline=$((SECONDS + HOOK_DEADLINE_SECONDS))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$SECONDS" -ge "$deadline" ]; then
-			process_kill_tree TERM "$pid"
-			sleep 1
-			process_kill_tree KILL "$pid"
+			process_kill_tree "$pid"
 			wait "$pid" 2>/dev/null || true
 			_hook_replay_output "$out" "$errs"
 			output_hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(paths_script_command_prefix) check'"
