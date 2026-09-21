@@ -9,7 +9,7 @@
 # first one wrote, an installation on a custom sources file and assembly
 # directory, a clone path with a space, and a clone path with an apostrophe.
 #
-# Reads: CASE_DIR, HOME, LS, SOURCE_SCRIPT.
+# Reads: CASE_DIR, HOME, LS.
 # Writes: LS, the script path the run under test uses, LS_OUT and LS_RC, which
 # assert.sh reads, and nothing outside the case's own throwaway HOME and
 # CASE_DIR.
@@ -152,7 +152,7 @@ install_hooks_path_with_space() {
 	fi
 	clone="$CASE_DIR/my repos/agents"
 	mkdir -p "$clone/scripts"
-	cp "$SOURCE_SCRIPT" "$clone/scripts/link-skills.sh"
+	fixtures_install_script "$clone/scripts/link-skills.sh"
 	fixtures_skill "$clone/skills" alpha
 	fixtures_write_sources
 	fixtures_add_source "$clone/skills"
@@ -176,7 +176,7 @@ install_hooks_apostrophe_path_idempotent() {
 	fi
 	clone="$CASE_DIR/it's tools/agents"
 	mkdir -p "$clone/scripts"
-	cp "$SOURCE_SCRIPT" "$clone/scripts/link-skills.sh"
+	fixtures_install_script "$clone/scripts/link-skills.sh"
 	fixtures_skill "$clone/skills" alpha
 	fixtures_write_sources
 	fixtures_add_source "$clone/skills"

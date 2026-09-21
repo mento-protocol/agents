@@ -86,7 +86,14 @@ into this repository:
 
 `scripts/link-skills.sh` is the only supported way to install these skills
 into `~/.agents/skills`. It must stay compatible with bash 3.2 (the default
-`/bin/bash` on macOS) and pass `shellcheck` clean.
+`/bin/bash` on macOS) and pass `shellcheck` clean. The entry point sources its
+topic modules from `scripts/lib/link-skills/` by absolute path from an explicit
+ordered list, so it needs that directory next to it; the harness copies the
+script and the directory into every fixture through
+`fixtures_install_script`. That directory also holds `merge-hook.py`, the
+program `install-hooks.sh` runs with `python3` to merge the SessionStart hook
+into a settings file. It is data to the shell, not a module: nothing sources
+it and it carries no execute bit.
 
 After changing it, or after changing any file of its harness, run the harness,
 which CI runs on Ubuntu and macOS:
@@ -165,6 +172,7 @@ Layout for a script that outgrows one file:
 ```text
 scripts/<tool>.sh              entry point: option parsing, sources lib/, calls main
 scripts/lib/<tool>/<topic>.sh  one topic per file; defines functions, runs nothing at load
+scripts/lib/<tool>/<name>.<ext> a program in another language a module runs; never sourced
 scripts/test-<tool>.sh         runner: sources tests/lib/, runs each tests/<tool>/<topic>.sh from an explicit ordered list
 scripts/tests/lib/<name>.sh    shared assertions, fixtures, and shims
 scripts/tests/<tool>/<topic>.sh cases for one topic, in the same order as lib/
@@ -209,22 +217,17 @@ Rules for a module file:
   file-level directive silences the rest of the file as well, including code
   written later.
 
-`scripts/link-skills.sh` predates these limits and is listed in
-`scripts/shell-size-baseline.txt` with its current line count. It is the only
-entry left, and the only path the baseline may name:
-`scripts/test-link-skills.sh` was listed too, and its entry went once the
-runner held no case and fit both limits, so the runner is checked like any
-other file now. The check refuses any other path, and the ratchet refuses the
-runner's entry if it returns. A change may not grow a listed file. Add a case or a function by first splitting the topic
-it belongs to out of the monolith, then lower the baseline entry to the new
-count: the check fails while the entry is above the file's real length, and
-on a pull request CI also compares the change with the base branch, so
-the allowance only ratchets down: an entry may not rise, a removed entry
-may not return, the baseline file itself may not be removed, and a
-function over 50 lines in a legacy file passes only when the base branch
-already has that function at that length or longer. Remove an entry once
-its file fits the limit; the check refuses an entry at or below 500 lines.
-Keep the baseline file even once it holds no entries.
+`scripts/shell-size-baseline.txt` holds no entries. Both legacy monoliths
+have been split: `scripts/test-link-skills.sh` left the list once the runner
+held no case, and `scripts/link-skills.sh` left it once its topics moved to
+`scripts/lib/link-skills/`. Every `.sh` file is now checked at the full
+limits. The checker names no legacy file any more, so it refuses any path the
+baseline lists, and it refuses an entry at or below 500 lines. On a pull
+request CI also compares the change with the base branch, so the allowance
+only ratchets down: an entry may not rise, a removed entry may not return,
+and the baseline file itself may not be removed. Keep the file with
+its header comment even though it holds no entries. A script that outgrows a
+limit is split by topic; it does not get an exemption.
 
 Run the check locally before opening a pull request, after `pnpm install`:
 

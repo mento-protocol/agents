@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 #
 # check.sh - the cases for the "check" section of scripts/link-skills.sh:
-# cmd_check, which reports whether the assembly matches the sources without
+# check_cmd, which reports whether the assembly matches the sources without
 # changing anything, and the fetch stamps it writes under .skill-links.d.
 #
 # The cases cover an offline check, a clone that is behind its remote, a fetch

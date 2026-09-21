@@ -2,9 +2,9 @@
 #
 # sources-file.sh - the cases for the "sources" section of
 # scripts/link-skills.sh that are about the skill-sources file itself:
-# sources_path_usable, control_path_matches, sources_is_control_path,
-# refuse_auto_update_token, the line parsing in load_sources, and
-# report_empty_sources.
+# sources_path_usable, _sources_control_path_matches, sources_is_control_path,
+# sources_refuse_auto_update_token, the line parsing in sources_load, and
+# candidates_report_empty_sources.
 #
 # The cases cover the auto-update token, a word after the path that belongs to
 # the path, a missing path that holds a space, a sources path at or below an

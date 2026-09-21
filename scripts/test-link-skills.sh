@@ -12,6 +12,9 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 SOURCE_SCRIPT="$HERE/link-skills.sh"
+# The topic modules the entry point sources. A fixture needs both, so every
+# copy of the script goes through fixtures_install_script.
+SOURCE_LIB="$HERE/lib/link-skills"
 BASH_BIN=${BASH_BIN:-bash}
 
 PASS=0
@@ -98,6 +101,8 @@ SAVED_PATH=""
 . "$HERE/tests/link-skills/manifest.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/manifest.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/names-and-casing.sh
 . "$HERE/tests/link-skills/names-and-casing.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/names-and-casing.sh >&2 && exit 2; }
+# shellcheck source=tests/link-skills/options.sh
+. "$HERE/tests/link-skills/options.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/options.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/output.sh
 . "$HERE/tests/link-skills/output.sh" || { printf 'test-link-skills: cannot source %s\n' tests/link-skills/output.sh >&2 && exit 2; }
 # shellcheck source=tests/link-skills/paths.sh
@@ -111,11 +116,15 @@ SAVED_PATH=""
 
 # ------------------------------------------------------------------- main ---
 
-# The run needs the script under test and git. Either one missing ends the run
-# with exit 2, before anything is created.
+# The run needs the script under test, its modules and git. Any one missing
+# ends the run with exit 2, before anything is created.
 harness_require_subject() {
 	if [ ! -f "$SOURCE_SCRIPT" ]; then
 		printf 'test-link-skills: cannot find %s\n' "$SOURCE_SCRIPT" >&2
+		exit 2
+	fi
+	if [ ! -d "$SOURCE_LIB" ]; then
+		printf 'test-link-skills: cannot find %s\n' "$SOURCE_LIB" >&2
 		exit 2
 	fi
 	if ! command -v git >/dev/null 2>&1; then
@@ -170,6 +179,7 @@ main() {
 	cases_names_and_casing
 	cases_lock_take
 	cases_output
+	cases_options
 	cases_harness
 
 	case_tap_summary
