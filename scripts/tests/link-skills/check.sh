@@ -5,15 +5,18 @@
 # changing anything, and the fetch stamps it writes under .skill-links.d.
 #
 # The cases cover an offline check, a clone that is behind its remote, a fetch
-# that runs despite a fresh stamp, a stale or orphaned link reported as an
-# error, a duplicate link that is not an orphan, a source that cannot be
-# listed, a missing sources file, and the two stamp cases: a symlinked stamp
-# or stamp directory is refused, and a hardlinked stamp is not truncated.
+# that runs despite a fresh stamp, a fetch that hangs until its timeout stops
+# it and the child it started, a stale or orphaned link reported as an error, a
+# duplicate link that is not an orphan, a source that cannot be listed, a
+# missing sources file, and the two stamp cases: a symlinked stamp or stamp
+# directory is refused, and a hardlinked stamp is not truncated.
 #
-# The unlistable-ls shim comes from tests/lib/shims.sh.
+# The unlistable-ls and hanging-fetch shims come from tests/lib/shims.sh.
 #
 # Reads: CASE_DIR, COMPANY, HOME, LS_OUT.
-# Writes: nothing outside the case's own throwaway HOME and CASE_DIR.
+# Writes: LS_TEST_SLEEP_PID and LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS, the
+# two variables the hanging-fetch run reads, and nothing outside the case's own
+# throwaway HOME and CASE_DIR.
 
 check_offline_does_not_fail() {
 	fixtures_company
@@ -83,6 +86,56 @@ check_fetches_despite_fresh_stamp() {
 	assert_rc 0 "second check"
 	assert_out_has "fetch: ok" "the fresh stamp does not stop the fetch"
 	assert_out_has "behind 1" "the new commit is seen"
+}
+
+# A fetch that never returns is stopped on its timeout, and so is the child it
+# started. macOS has no setsid, so the fetch runs in the shell's own process
+# group and the group signal reaches nothing: only the process walk reaches a
+# transport child such as ssh. The shim's child ignores TERM, so the KILL that
+# follows is the signal that ends it, and the case fails unless that KILL goes
+# to the closure collected before the TERM. The timeout is shortened to three
+# seconds through the knob the script under test reads; everything else is the
+# fetch timeout as it runs in normal use.
+check_fetch_deadline_stops_the_transport_child() {
+	local childpid
+	if ! ps -Ao pid=,ppid= >/dev/null 2>&1; then
+		case_skip "ps cannot list processes here"
+	fi
+	fixtures_company
+	fixtures_write_sources
+	fixtures_add_source "$COMPANY/skills"
+	case_run_script link
+	assert_rc 0 "link"
+	shims_hanging_fetch_git "$CASE_DIR/bin"
+	shims_use "$CASE_DIR/bin"
+	LS_TEST_SLEEP_PID="$CASE_DIR/fetch-child.pid"
+	LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS=3
+	export LS_TEST_SLEEP_PID LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS
+	case_run_script check
+	unset LS_TEST_SLEEP_PID LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS
+	shims_drop
+	assert_rc 0 "check with a fetch that hangs"
+	assert_out_has "fetch: failed" "the stopped fetch is reported"
+	childpid=$(cat "$CASE_DIR/fetch-child.pid" 2>/dev/null || printf '')
+	_check_assert_fetch_child_gone "$childpid"
+}
+
+# The child the shimmed fetch started, once the timeout has fired: a process
+# the signal reached is gone within a few seconds, a survivor is not.
+_check_assert_fetch_child_gone() {
+	local tries
+	if [ -z "$1" ]; then
+		case_fail "the git shim did not record the pid of its fetch child"
+		return
+	fi
+	tries=0
+	while [ "$tries" -lt 60 ]; do
+		probe_pid_is_live "$1" || return 0
+		sleep 0.05
+		tries=$((tries + 1))
+	done
+	case_fail "the child of the stalled fetch outlived the timeout"
+	kill -9 "$1" 2>/dev/null || true
 }
 
 # A link that still points where the manifest recorded, while the sources now
@@ -269,6 +322,7 @@ cases_check() {
 	case_run check_offline_does_not_fail
 	case_run check_reports_behind
 	case_run check_fetches_despite_fresh_stamp
+	case_run check_fetch_deadline_stops_the_transport_child
 	case_run check_reports_stale_link_as_error
 	case_run check_without_sources_file_exits_2
 	case_run hardlinked_stamp_not_truncated

@@ -132,7 +132,7 @@ HARNESS_JOBS=1 bash scripts/test-link-skills.sh
 ```
 
 Most of what a run waits for is a lock or a deadline inside
-`link-skills.sh`. Three `LINK_SKILLS_TEST_*` variables shorten those waits for
+`link-skills.sh`. Four `LINK_SKILLS_TEST_*` variables shorten those waits for
 the harness alone, and none of them acts in normal use:
 
 - `LINK_SKILLS_TEST_LOCK_WAIT_SECONDS`: the seconds a run waits for a lock
@@ -141,6 +141,8 @@ the harness alone, and none of them acts in normal use:
   session hook. The two deadline cases set 3, in place of 25.
 - `LINK_SKILLS_TEST_LOCK_PAUSE_SECONDS`: how long a run holds the lock it took
   before it starts work. One case sets it; there is no default pause.
+- `LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS`: the bash-native timeout of a
+  `git fetch`. The case for a fetch that hangs sets 3, in place of 15.
 
 Each takes 1 to 999 seconds, and any other value keeps the default. Nothing
 under test is skipped by them: the retry loop, the stale-lock clearing, the
