@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 #
 # lock-stale.sh - the cases for the owner record of the lock in
-# scripts/link-skills.sh: lock_owner_is_live, the pid and start time the record
-# holds, and the age at which a record the script cannot read is cleared.
+# scripts/link-skills.sh: _lock_owner_alive in scripts/lib/link-skills/lock.sh,
+# the pid and start time the record holds, and the age at which a record the
+# script cannot read is cleared.
 #
 # The cases cover a lock whose owner is gone, a lock whose pid another process
 # now carries, an aged lock whose owner still runs, a record written in another
