@@ -1,4 +1,8 @@
-# Legacy shell files that predate the size limits in AGENTS.md.
-# Format: <path> <line count>. A file may not grow past its count.
-# Lower the count as the file shrinks; delete the line once it fits, and
-# keep this file even when it holds no entries.
+# Shell files and functions that predate the size limits in AGENTS.md.
+# A file row is "<path> <count>" and allows that file <count> lines.
+# A function row is "<path> <function> <count>" and allows the longest
+# declaration of that function <count> lines.
+# A row is an upper bound: the subject may sit at or below its count, and a
+# subject below it prints an advisory line that asks for the lower count.
+# Delete a row once its subject fits the limit, and keep this file even when
+# it holds no rows.

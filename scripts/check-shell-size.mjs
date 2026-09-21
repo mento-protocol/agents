@@ -8,45 +8,69 @@
 // `module::name` are all read the way bash reads them. A file the parser
 // rejects fails the check rather than passing unmeasured.
 //
-// shell-size-baseline.txt held the legacy monoliths that predate the limits.
-// It now holds no entries, and LEGACY_FILES is empty, so every entry is
-// refused and no file can buy an exemption. The file stays in the tree: the
-// ratchet below refuses its removal, and refuses an entry that returns.
+// shell-size-baseline.txt, beside this file, exempts what predates the
+// limits. It holds two kinds of row:
+// - a file row, `<path> <count>`, allows that file <count> lines;
+// - a function row, `<path> <function> <count>`, allows the longest
+//   declaration of that function in that file <count> lines.
+// Blank rows and rows that start with # are skipped. A file row exempts the
+// length of the file only: its functions are checked like any other. A
+// second declaration of an exempt name is checked like any other function.
+// A row is keyed by path, and a function row also by name, so a renamed or
+// moved function is a new function.
+//
+// A row is an upper bound, not an exact count. The subject may sit at or
+// below its row: below it the run prints one advisory line and still passes,
+// so two changes that each shrink one baselined subject merge without
+// leaving the default branch red. Above it the run fails.
 //
 // When SHELL_SIZE_BASE names a git ref (CI sets it to the pull request's
-// base branch), the change is also compared with that ref:
-// - a baseline entry higher than the base's, or one the base no longer has,
-//   is refused, so a change cannot grow a legacy file and raise its entry;
-// - the baseline file may not be removed once the base has it, so a removed
-//   exemption cannot return later.
-// The legacy-function comparison still runs for any file the baseline lists;
-// with no entries left, nothing reaches it.
+// base branch), the baseline is compared with that ref as well, so it can
+// only ratchet down. A row the base's baseline lacks is refused, a count
+// above the base's is refused, and the baseline file may not be removed.
+// Removing a row is always allowed. When the base holds no baseline file at
+// all, every row is accepted as new, which is what an adoption pull request
+// needs.
+//
+// This file is maintained in github.com/mento-protocol/agents at
+// scripts/check-shell-size.mjs. Copies in other repositories stay
+// byte-identical: change it there first, then copy it.
+//
+// mvdan-sh is pinned to the exact version 0.10.1 on purpose. Upstream
+// deprecated it (https://github.com/mvdan/sh/issues/1145), and it is still
+// the only npm binding of the shfmt parser that exposes syntax.Walk and
+// syntax.NodeType. Its successor sh-syntax returns an AST without node types
+// or function names, so it cannot measure functions.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sh from "mvdan-sh";
 
-const MAX_FILE_LINES = Number(process.env.MAX_FILE_LINES ?? 500);
-const MAX_FUNCTION_LINES = Number(process.env.MAX_FUNCTION_LINES ?? 50);
+// Bracket access on purpose: a consumer repository lints every .mjs with
+// turbo/no-undeclared-env-vars, which flags process.env.NAME and accepts
+// process.env["NAME"]. This file must pass that linter unchanged.
+const MAX_FILE_LINES = Number(process.env["MAX_FILE_LINES"] ?? 500);
+const MAX_FUNCTION_LINES = Number(process.env["MAX_FUNCTION_LINES"] ?? 50);
+const BASE_REF = process.env["SHELL_SIZE_BASE"] ?? "";
 
-// The files the baseline may name. It is empty: every legacy monolith has
-// been split, so no path may be listed any more. A new script never joins
-// this list, because it is written within the limits from the start.
-// scripts/test-link-skills.sh and scripts/link-skills.sh were listed and left
-// once each fit both limits; the ratchet refuses a removed entry that
-// returns, so neither can come back.
-const LEGACY_FILES = [];
-
+const BASELINE_NAME = "shell-size-baseline.txt";
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(HERE, "..");
-const BASELINE = join(HERE, "shell-size-baseline.txt");
-const BASELINE_REL = "scripts/shell-size-baseline.txt";
-const BASE_REF = process.env.SHELL_SIZE_BASE ?? "";
+const BASELINE = join(HERE, BASELINE_NAME);
+// The repository root, so the checker works at any depth below it.
+const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+  cwd: HERE,
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "ignore"],
+}).trim();
+const BASELINE_REL = relative(ROOT, BASELINE).split(sep).join("/");
 
 const problems = [];
 const problem = (message) => problems.push(message);
+// An advisory passes the run. It says a row allows more than the subject
+// needs, which the next change to that subject can lower.
+const advise = (message) => console.log(message);
 
 const git = (args) =>
   execFileSync("git", args, {
@@ -77,63 +101,110 @@ function countLines(text) {
   return parts.length;
 }
 
-// Parses baseline text into a map of path to count, ignoring malformed rows;
-// the current baseline gets full validation in readBaseline.
+// Splits a baseline row into fields, or returns null for a blank row or a
+// comment row.
+function fieldsOf(raw) {
+  const row = raw.trim();
+  if (row === "" || row.startsWith("#")) return null;
+  return row.split(/\s+/);
+}
+
+// Reads the fields of a row. A file row has two fields and an empty name; a
+// function row has three. Any other field count returns null. The count is
+// still text here; validateRow checks it.
+function rowOf(fields) {
+  const [path, second, third] = fields;
+  if (fields.length === 2) return { path, name: "", key: path, count: second };
+  if (fields.length === 3)
+    return { path, name: second, key: `${path} ${second}`, count: third };
+  return null;
+}
+
+// Returns the count a valid row allows, or null after reporting why the row
+// is refused.
+function validateRow(row, tracked) {
+  const limit = row.name === "" ? MAX_FILE_LINES : MAX_FUNCTION_LINES;
+  if (!tracked.includes(row.path)) {
+    problem(
+      `${BASELINE_REL} names ${row.path}, which is not tracked; remove the entry`,
+    );
+    return null;
+  }
+  if (!/^[0-9]+$/.test(row.count ?? "")) {
+    problem(`${BASELINE_REL}: ${row.key} needs a numeric line count`);
+    return null;
+  }
+  const count = Number(row.count);
+  if (count <= limit) {
+    problem(
+      `${BASELINE_REL}: ${row.key} fits the ${limit}-line limit; remove the entry`,
+    );
+    return null;
+  }
+  return count;
+}
+
+// Files the baseline may exempt by length, functions it may exempt by name,
+// and every row by key for the ratchet.
+function emptyBaseline() {
+  return { files: new Map(), functions: new Map(), rows: new Map() };
+}
+
+function storeRow(baseline, row, count) {
+  if (baseline.rows.has(row.key)) {
+    problem(`${BASELINE_REL} names ${row.key} twice; keep one entry`);
+    return;
+  }
+  baseline.rows.set(row.key, count);
+  if (row.name === "") {
+    baseline.files.set(row.path, count);
+    return;
+  }
+  if (!baseline.functions.has(row.path))
+    baseline.functions.set(row.path, new Map());
+  baseline.functions.get(row.path).set(row.name, count);
+}
+
+// Reads the baseline, reporting every row the checker refuses.
+function readBaseline(tracked) {
+  const baseline = emptyBaseline();
+  if (!existsSync(BASELINE)) return baseline;
+  const lines = readFileSync(BASELINE, "utf8").split("\n");
+  lines.forEach((raw, index) => {
+    const fields = fieldsOf(raw);
+    if (fields === null) return;
+    const row = rowOf(fields);
+    if (row === null) {
+      problem(
+        `${BASELINE_REL}:${index + 1}: a row is "<path> <count>" or "<path> <function> <count>"`,
+      );
+      return;
+    }
+    const count = validateRow(row, tracked);
+    if (count !== null) storeRow(baseline, row, count);
+  });
+  return baseline;
+}
+
+// The rows of a baseline text as a map of key to count. It reads the base's
+// copy, which this change cannot fix, so a row this checker would refuse is
+// skipped instead of reported.
 function parseRows(text) {
   const rows = new Map();
   for (const raw of text.split("\n")) {
-    const row = raw.trim();
-    if (row === "" || row.startsWith("#")) continue;
-    const [file, count] = row.split(/\s+/);
-    if (/^[0-9]+$/.test(count ?? "")) rows.set(file, Number(count));
+    const fields = fieldsOf(raw);
+    if (fields === null) continue;
+    const row = rowOf(fields);
+    if (row !== null && /^[0-9]+$/.test(row.count))
+      rows.set(row.key, Number(row.count));
   }
   return rows;
 }
 
-// Reads the baseline into a map of path to line count, reporting every
-// malformed row. A row is `<path> <count>`; blank rows and # comments are
-// skipped.
-function readBaseline(tracked) {
-  const limits = new Map();
-  if (!existsSync(BASELINE)) return limits;
-  for (const raw of readFileSync(BASELINE, "utf8").split("\n")) {
-    const row = raw.trim();
-    if (row === "" || row.startsWith("#")) continue;
-    const [file, count, ...rest] = row.split(/\s+/);
-    if (limits.has(file))
-      problem(`${BASELINE_REL} names ${file} twice; keep one entry`);
-    if (!LEGACY_FILES.includes(file)) {
-      const allowed =
-        LEGACY_FILES.length === 0
-          ? "no file may be listed any more"
-          : `only ${LEGACY_FILES.join(" ")} may be listed`;
-      problem(
-        `${BASELINE_REL} names ${file}, which is not a legacy file; ${allowed}`,
-      );
-    }
-    if (!tracked.includes(file))
-      problem(
-        `${BASELINE_REL} names ${file}, which is not tracked; remove the entry`,
-      );
-    if (rest.length > 0 || !/^[0-9]+$/.test(count ?? "")) {
-      problem(`${BASELINE_REL}: ${file} needs a numeric line count`);
-      continue;
-    }
-    const limit = Number(count);
-    if (limit <= MAX_FILE_LINES) {
-      problem(
-        `${BASELINE_REL}: ${file} fits the ${MAX_FILE_LINES}-line limit; remove the entry`,
-      );
-      continue;
-    }
-    limits.set(file, limit);
-  }
-  return limits;
-}
-
 // Returns a map of function name to every declaration of it, each as
-// {start, length}, or null after reporting a parse failure. Every
-// declaration is kept: a second one under a known name is its own function.
+// {start, length}, or null after reporting a parse failure. A nested
+// declaration is reported by the parser on its own and inside its parent, so
+// both lengths are measured.
 function parseFunctions(file, text) {
   const { syntax } = sh;
   let tree;
@@ -162,78 +233,69 @@ function parseFunctions(file, text) {
   return functions;
 }
 
-// Reports every function longer than MAX_FUNCTION_LINES.
-function checkFunctions(file, text) {
+// A function row covers the longest declaration of the name. Every other
+// declaration is held to MAX_FUNCTION_LINES.
+function checkDeclarations(file, name, declarations, allowed) {
+  const sorted = [...declarations].sort((a, b) => b.length - a.length);
+  const rest = allowed === undefined ? sorted : sorted.slice(1);
+  if (allowed !== undefined) {
+    const { start, length } = sorted[0];
+    if (length > allowed) {
+      problem(
+        `${file}:${start}: function ${name} is ${length} lines, grew past its baseline of ${allowed}; split it instead of growing it`,
+      );
+    } else if (length < allowed) {
+      advise(
+        `${file}: function ${name} is ${length} lines, its baseline allows ${allowed}; lower the entry to ${length}`,
+      );
+    }
+  }
+  for (const { start, length } of rest) {
+    if (length > MAX_FUNCTION_LINES)
+      problem(
+        `${file}:${start}: function ${name} is ${length} lines, the limit is ${MAX_FUNCTION_LINES}`,
+      );
+  }
+}
+
+// Reports every function over its allowance, and every function row that
+// names a function the file does not declare.
+function checkFunctions(file, text, rows) {
   const functions = parseFunctions(file, text);
   if (!functions) return;
-  for (const [name, declarations] of functions) {
-    for (const { start, length } of declarations) {
-      if (length > MAX_FUNCTION_LINES) {
-        problem(
-          `${file}:${start}: function ${name} is ${length} lines, the limit is ${MAX_FUNCTION_LINES}`,
-        );
-      }
-    }
+  for (const [name, declarations] of functions)
+    checkDeclarations(file, name, declarations, rows.get(name));
+  for (const name of rows.keys()) {
+    if (!functions.has(name))
+      problem(
+        `${BASELINE_REL}: ${file} declares no function ${name}; remove the entry`,
+      );
   }
 }
 
-// In a legacy file, each declaration over the limit passes only when the
-// base has a declaration of that name at that length or longer to pair it
-// with. Declarations are paired longest to longest, so a second declaration
-// under a known name needs its own counterpart in the base.
-function checkLegacyFunctions(file, text) {
-  if (BASE_REF === "") return;
-  const baseText = atBase(file);
-  if (baseText === null) {
-    problem(`${file}: not present at ${BASE_REF}; a legacy file cannot be new`);
+function checkLength(file, lines, allowed) {
+  if (allowed === undefined) {
+    if (lines > MAX_FILE_LINES)
+      problem(
+        `${file}: ${lines} lines, the limit is ${MAX_FILE_LINES}; split it by topic`,
+      );
     return;
   }
-  const current = parseFunctions(file, text);
-  const base = parseFunctions(`${BASE_REF}:${file}`, baseText);
-  if (!current || !base) return;
-  const byLength = (a, b) => b.length - a.length;
-  for (const [name, declarations] of current) {
-    const long = declarations
-      .filter(({ length }) => length > MAX_FUNCTION_LINES)
-      .sort(byLength);
-    const before = (base.get(name) ?? []).slice().sort(byLength);
-    long.forEach(({ start, length }, i) => {
-      if (!before[i]) {
-        problem(
-          `${file}:${start}: function ${name} is ${length} lines and has no counterpart in ${BASE_REF}; a new function may not exceed ${MAX_FUNCTION_LINES}`,
-        );
-      } else if (length > before[i].length) {
-        problem(
-          `${file}:${start}: function ${name} grew from ${before[i].length} to ${length} lines; a function over ${MAX_FUNCTION_LINES} may only shrink`,
-        );
-      }
-    });
-  }
-}
-
-function checkFile(file, limits) {
-  const text = readFileSync(join(ROOT, file), "utf8");
-  const lines = countLines(text);
-  const limit = limits.get(file);
-  if (limit !== undefined) {
-    if (lines > limit) {
-      problem(
-        `${file}: ${lines} lines, grew past its baseline of ${limit}; split it instead of growing it`,
-      );
-    } else if (lines < limit) {
-      problem(
-        `${file}: ${lines} lines, below its baseline of ${limit}; lower the entry in ${BASELINE_REL} to ${lines}`,
-      );
-    }
-    checkLegacyFunctions(file, text);
-    return;
-  }
-  if (lines > MAX_FILE_LINES) {
+  if (lines > allowed) {
     problem(
-      `${file}: ${lines} lines, the limit is ${MAX_FILE_LINES}; split it by topic`,
+      `${file}: ${lines} lines, grew past its baseline of ${allowed}; split it instead of growing it`,
+    );
+  } else if (lines < allowed) {
+    advise(
+      `${file}: ${lines} lines, its baseline allows ${allowed}; lower the entry to ${lines}`,
     );
   }
-  checkFunctions(file, text);
+}
+
+function checkFile(file, baseline) {
+  const text = readFileSync(join(ROOT, file), "utf8");
+  checkLength(file, countLines(text), baseline.files.get(file));
+  checkFunctions(file, text, baseline.functions.get(file) ?? new Map());
 }
 
 // Confirms BASE_REF resolves, and reports whether comparison is possible.
@@ -253,13 +315,34 @@ function checkBaseRef() {
   }
 }
 
-// Refuses removal of the baseline file once the base has it, and any entry
-// that is higher than, or missing from, the base's copy.
-function checkRatchet(limits) {
-  const baseText = atBase(BASELINE_REL);
-  if (baseText === null) {
+// The base's baseline as {text}, or {missing: true} when the base holds no
+// baseline file anywhere, or null after reporting a problem. The checker and
+// its baseline may have moved, so a base that lacks BASELINE_REL is searched
+// by file name.
+function baseBaseline() {
+  const here = atBase(BASELINE_REL);
+  if (here !== null) return { text: here };
+  const paths = git(["ls-tree", "-r", "--name-only", BASE_REF])
+    .split("\n")
+    .filter((path) => path.split("/").pop() === BASELINE_NAME);
+  if (paths.length > 1) {
+    problem(
+      `${BASE_REF} holds more than one ${BASELINE_NAME} (${paths.join(" ")}); keep one`,
+    );
+    return null;
+  }
+  if (paths.length === 0) return { missing: true };
+  return { text: atBase(paths[0]) ?? "" };
+}
+
+// Refuses removal of the baseline file once the base has one, any row the
+// base's baseline lacks, and any count above the base's.
+function checkRatchet(rows) {
+  const base = baseBaseline();
+  if (base === null) return;
+  if (base.missing) {
     console.log(
-      `check-shell-size: ${BASE_REF} has no ${BASELINE_REL}; entries accepted as new`,
+      `check-shell-size: ${BASE_REF} has no ${BASELINE_NAME}; entries accepted as new`,
     );
     return;
   }
@@ -267,34 +350,58 @@ function checkRatchet(limits) {
     problem(`${BASELINE_REL} was removed; keep the file, even with no entries`);
     return;
   }
-  const base = parseRows(baseText);
-  for (const [file, limit] of limits) {
-    const before = base.get(file);
-    if (before === undefined) {
+  const before = parseRows(base.text);
+  for (const [key, count] of rows) {
+    const was = before.get(key);
+    if (was === undefined) {
       problem(
-        `${BASELINE_REL}: ${file} is not listed in ${BASE_REF}; a removed entry may not return`,
+        `${BASELINE_REL}: ${key} is not listed in ${BASE_REF}; a removed entry may not return`,
       );
-    } else if (limit > before) {
+    } else if (count > was) {
       problem(
-        `${BASELINE_REL}: ${file} rose from ${before} to ${limit}; an entry may only go down`,
+        `${BASELINE_REL}: ${key} allows ${count} here and ${was} in ${BASE_REF}; an entry may only go down; merge or rebase on ${BASE_REF} if you did not raise it`,
       );
     }
   }
 }
 
-function main() {
-  const tracked = trackedShellFiles();
-  const limits = readBaseline(tracked);
-  if (checkBaseRef()) checkRatchet(limits);
-  for (const file of tracked) checkFile(file, limits);
-  if (problems.length > 0) {
-    for (const message of problems) console.error(message);
-    console.error(
-      `check-shell-size: ${problems.length} problem(s); see the shell rules in AGENTS.md`,
-    );
-    process.exit(1);
+// The baseline format separates its fields with whitespace, so it cannot
+// name a path that holds any.
+function checkPaths(tracked) {
+  for (const file of tracked) {
+    if (/\s/.test(file))
+      problem(
+        `${file} holds whitespace; the baseline format cannot name it; rename the file`,
+      );
   }
-  console.log("check-shell-size: ok");
+}
+
+function report() {
+  if (problems.length === 0) {
+    console.log("check-shell-size: ok");
+    return;
+  }
+  for (const message of problems) console.error(message);
+  console.error(
+    `check-shell-size: ${problems.length} problem(s); see the shell rules in AGENTS.md`,
+  );
+  process.exit(1);
+}
+
+function main() {
+  if (BASELINE_REL.startsWith("..")) {
+    problem(
+      `${BASELINE} is outside the repository at ${ROOT}; keep ${BASELINE_NAME} beside the checker`,
+    );
+    report();
+    return;
+  }
+  const tracked = trackedShellFiles();
+  checkPaths(tracked);
+  const baseline = readBaseline(tracked);
+  if (checkBaseRef()) checkRatchet(baseline.rows);
+  for (const file of tracked) checkFile(file, baseline);
+  report();
 }
 
 main();
