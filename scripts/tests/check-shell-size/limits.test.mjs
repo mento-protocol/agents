@@ -38,6 +38,16 @@ test("a file over the limit is reported", (t) => {
   );
 });
 
+test("a file of exactly the limit passes", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", fileOfLines(FILE_LIMIT));
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
+});
+
 test("a function over the limit is reported with its line", (t) => {
   const repo = makeRepo();
   t.after(() => removeRepo(repo));
@@ -51,6 +61,16 @@ test("a function over the limit is reported with its line", (t) => {
       `a\\.sh:1: function wide is 7 lines, the limit is ${FUNCTION_LIMIT}`,
     ),
   );
+});
+
+test("a function of exactly the limit passes", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", functionOfLines("wide", FUNCTION_LIMIT));
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
 });
 
 test("a file the parser rejects fails the check", (t) => {
