@@ -1,9 +1,10 @@
 # shellcheck shell=bash
 #
 # link-prune.sh - the cases for the prune and rollback half of the "link"
-# command in scripts/link-skills.sh: prune_missing, relink_one, the rollback
-# that restores the old link when a new one cannot be created, and the manifest
-# entries each keeps.
+# command in scripts/link-skills.sh: link_prune_manifest in
+# scripts/lib/link-skills/link.sh, the rollback in _link_repoint that restores
+# the old link when a new one cannot be created, and the manifest entries each
+# keeps.
 #
 # The cases cover a source that goes away, a recorded link whose target is
 # gone, a foreign dangling link the run leaves alone, a prune that fails, a

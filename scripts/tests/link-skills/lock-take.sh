@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 #
 # lock-take.sh - the cases that take the lock in scripts/link-skills.sh:
-# lock_take, lock_give_back and the lock path checks they make.
+# lock_take, lock_release and the lock path checks they make, all in
+# scripts/lib/link-skills/lock.sh.
 #
 # The cases cover the first run on a machine, which creates the assembly before
 # it takes the lock, a run refused while another holds the lock, a lock given
