@@ -83,10 +83,24 @@ const problem = (message) => problems.push(message);
 // needs, which the next change to that subject can lower.
 const advise = (message) => console.log(message);
 
+// What to do with a row whose subject is now shorter than the row allows.
+// Below the ordinary limit the row can no longer be lowered, because a count
+// at or below the limit is refused, so the row goes away instead.
+function lowerOrRemove(actual, allowed, limit) {
+  if (actual <= limit)
+    return `its baseline allows ${allowed}; it fits the ${limit}-line limit now, so remove the entry`;
+  return `its baseline allows ${allowed}; lower the entry to ${actual}`;
+}
+
+// The tree listing of a large repository passes Node's 1 MiB default, so this
+// raises the ceiling rather than letting git output end the run.
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
 const git = (args) =>
   execFileSync("git", args, {
     cwd: ROOT,
     encoding: "utf8",
+    maxBuffer: GIT_MAX_BUFFER,
     stdio: ["ignore", "pipe", "ignore"],
   });
 
@@ -257,7 +271,7 @@ function checkDeclarations(file, name, declarations, allowed) {
       );
     } else if (length < allowed) {
       advise(
-        `${file}: function ${name} is ${length} lines, its baseline allows ${allowed}; lower the entry to ${length}`,
+        `${file}: function ${name} is ${length} lines, ${lowerOrRemove(length, allowed, MAX_FUNCTION_LINES)}`,
       );
     }
   }
@@ -298,7 +312,7 @@ function checkLength(file, lines, allowed) {
     );
   } else if (lines < allowed) {
     advise(
-      `${file}: ${lines} lines, its baseline allows ${allowed}; lower the entry to ${lines}`,
+      `${file}: ${lines} lines, ${lowerOrRemove(lines, allowed, MAX_FILE_LINES)}`,
     );
   }
 }
@@ -340,8 +354,11 @@ function checkBaseRef() {
 function baseBaseline() {
   const here = atBase(BASELINE_REL);
   if (here !== null) return { text: here };
-  const paths = git(["ls-tree", "-r", "--name-only", BASE_REF])
-    .split("\n")
+  // -z, so a path holding a non-ASCII or unusual byte arrives raw. Without it
+  // git quotes such a path, the name no longer matches, and the run would
+  // treat a base that has a baseline as one that has none.
+  const paths = git(["ls-tree", "-r", "--name-only", "-z", BASE_REF])
+    .split("\0")
     .filter((path) => path.split("/").pop() === BASELINE_NAME);
   if (paths.length > 1) {
     problem(
@@ -414,7 +431,9 @@ function main() {
     report();
     return;
   }
-  if (BASELINE_REL.startsWith("..")) {
+  // The ".." segment, not the two characters: a directory may be named
+  // "..tools", and the checker works at any depth below the root.
+  if (BASELINE_REL === ".." || BASELINE_REL.startsWith("../")) {
     problem(
       `${BASELINE} is outside the repository at ${ROOT}; keep ${BASELINE_NAME} beside the checker`,
     );

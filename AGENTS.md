@@ -236,10 +236,11 @@ on its own and as part of the function that holds it, so both lengths have to
 pass.
 
 A row is an upper bound, not an exact count. The file or function may sit at
-or below its count. Below it the run prints one advisory line that asks for
-the lower count, and still passes, so two changes that each shrink one exempt
-subject merge without leaving `main` red. Above it the run fails. A count at
-or below the limit is refused: remove the row instead.
+or below its count. Below it the run prints one advisory line and still
+passes, so two changes that each shrink one exempt subject merge without
+leaving `main` red. That line asks for the lower count, or for the row to go
+away once the subject fits the ordinary limit. Above it the run fails. A count
+at or below the limit is refused: remove the row instead.
 
 On a pull request CI sets `SHELL_SIZE_BASE` to the base branch, and the
 baseline may then only ratchet down. A row may fall, and a row may go away. A

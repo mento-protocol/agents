@@ -117,6 +117,20 @@ test("a file below its row passes and asks for the lower count", (t) => {
   );
 });
 
+test("a file back inside the limit is told to remove its row", (t) => {
+  const repo = repoWithFile(t, FILE_LIMIT, ["a.sh 12"]);
+
+  const { status, stdout } = runChecker(repo);
+  assert.equal(status, 0);
+  assert.match(
+    stdout,
+    new RegExp(
+      `a\\.sh: ${FILE_LIMIT} lines, its baseline allows 12; it fits the ${FILE_LIMIT}-line limit now, so remove the entry`,
+    ),
+  );
+  assert.doesNotMatch(stdout, /lower the entry/);
+});
+
 test("a file row exempts the length only, not the functions", (t) => {
   const repo = makeRepo();
   t.after(() => removeRepo(repo));
@@ -209,6 +223,20 @@ test("a function below its row passes and asks for the lower count", (t) => {
     stdout,
     /a\.sh: function wide is 6 lines, its baseline allows 7; lower the entry to 6/,
   );
+});
+
+test("a function back inside the limit is told to remove its row", (t) => {
+  const repo = repoWithFunction(t, FUNCTION_LIMIT, ["a.sh wide 7"]);
+
+  const { status, stdout } = runChecker(repo);
+  assert.equal(status, 0);
+  assert.match(
+    stdout,
+    new RegExp(
+      `a\\.sh: function wide is ${FUNCTION_LIMIT} lines, its baseline allows 7; it fits the ${FUNCTION_LIMIT}-line limit now, so remove the entry`,
+    ),
+  );
+  assert.doesNotMatch(stdout, /lower the entry/);
 });
 
 test("a function row covers the longest declaration of the name", (t) => {

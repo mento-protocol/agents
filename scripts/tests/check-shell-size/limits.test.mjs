@@ -159,6 +159,17 @@ test("a baseline row is named by the path of the baseline in use", (t) => {
   );
 });
 
+test("a directory whose name starts with two dots is inside the repository", (t) => {
+  const repo = makeRepo({ scriptDir: "..tools" });
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", fileOfLines(2));
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
+  assert.doesNotMatch(output, /outside the repository/);
+});
+
 test("a directory outside a git repository is reported, not thrown", (t) => {
   const dir = makeNonRepo();
   t.after(() => removeRepo(dir));

@@ -14,6 +14,7 @@ import {
   baselinePath,
   commitAs,
   fileOfLines,
+  git,
   makeRepo,
   remove,
   removeRepo,
@@ -129,6 +130,20 @@ test("a baseline moved with the checker is still compared", (t) => {
   assert.equal(status, 1);
   assert.match(output, /b\.sh is not listed in base/);
   assert.doesNotMatch(output, /a\.sh is not listed in base/);
+});
+
+// core.quotePath is set on purpose: it is git's default, and a machine whose
+// global config turns it off would otherwise hide the defect this case covers.
+test("a moved baseline under a non-ASCII directory is still found", (t) => {
+  const repo = repoWithMovedChecker(t, ["pré/shell-size-baseline.txt"]);
+  git(repo.root, ["config", "core.quotePath", "true"]);
+  write(repo, "b.sh", fileOfLines(12));
+  writeBaseline(repo, ["a.sh 12", "b.sh 12"]);
+
+  const { status, output } = runChecker(repo, AT_BASE);
+  assert.equal(status, 1);
+  assert.match(output, /b\.sh is not listed in base/);
+  assert.doesNotMatch(output, /entries accepted as new/);
 });
 
 test("two baseline files in the base are reported", (t) => {
