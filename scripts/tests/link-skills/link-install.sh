@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 #
-# link-install.sh - the cases for the install half of the "link" command in
-# scripts/link-skills.sh: link_one, link_all, ensure_assembly, adopt_runtime,
-# _runtime_link and the summary line they report.
+# link-install.sh - the cases for the install half of the "link" command:
+# link_candidates in scripts/lib/link-skills/link.sh, which builds the assembly
+# links, runtime_cmd_link in scripts/lib/link-skills/runtime.sh, which builds
+# the runtime links, and the summary line they report.
 #
 # The cases cover the first run on a machine, a second run that changes
 # nothing, a skill that arrives with a pull, a name two sources offer, a name a

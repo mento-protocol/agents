@@ -221,9 +221,9 @@ _candidates_collect_dedupe() {
 			DUP_COUNT=$((DUP_COUNT + 1))
 		else
 			CAND_NAME[CAND_COUNT]="$name"
-			# shellcheck disable=SC2034 # read by the link, check and hook sections of link-skills.sh
+			# shellcheck disable=SC2034 # read by link.sh, check.sh and hook.sh
 			CAND_TARGET[CAND_COUNT]="${RAW_TARGET[$i]}"
-			# shellcheck disable=SC2034 # read by the link section of link-skills.sh
+			# shellcheck disable=SC2034 # read by link.sh
 			CAND_SRC_SPELLING[CAND_COUNT]="${RAW_SRC_SPELLING[$i]}"
 			CAND_COUNT=$((CAND_COUNT + 1))
 		fi
