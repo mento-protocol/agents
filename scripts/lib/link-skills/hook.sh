@@ -156,61 +156,14 @@ _hook_report_drift() {
 	return 0
 }
 
-# Print the pid of every process below the given one, one per line, from a
-# single ps snapshot. ps -A with pid and ppid columns is common to macOS and
-# Linux, and awk computes the closure over that one listing, so the walk
-# costs one process however deep the tree is. A process that starts after
-# the snapshot is missed; the deadline path below tolerates that because the
-# job's output never touches the caller's descriptors.
-_hook_descendants_of() {
-	ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
-		{ pid[NR] = $1; ppid[NR] = $2 }
-		END {
-			want[root] = 1
-			changed = 1
-			while (changed) {
-				changed = 0
-				for (i = 1; i <= NR; i++) {
-					if (!(pid[i] in want) && (ppid[i] in want)) {
-						want[pid[i]] = 1
-						changed = 1
-					}
-				}
-			}
-			for (p in want) {
-				if (p != root) {
-					print p
-				}
-			}
-		}'
-	return 0
-}
-
-# Signal a background job and everything it started. The descendants are
-# collected first, because killing the job reparents its children and breaks
-# the chain. In monitor mode the job also leads a process group of its own,
-# so the group takes the signal too; a host without job control still gets
-# every descendant through the ps walk.
-_hook_kill_job() {
-	local sig pid kids kid
-	sig=$1
-	pid=$2
-	kids=$(_hook_descendants_of "$pid")
-	kill -"$sig" -- "-$pid" 2>/dev/null || true
-	kill -"$sig" "$pid" 2>/dev/null || true
-	for kid in $kids; do
-		kill -"$sig" "$kid" 2>/dev/null || true
-	done
-	return 0
-}
-
 # The session hook, bounded by HOOK_DEADLINE_SECONDS of wall clock. The fetch
 # budget covers the fetches only; a slow git status, the behind counts and the
 # scan afterwards all count against this one. The body runs as one background
 # job, in a process group of its own where the host allows it, so nothing it
 # started outlives the deadline. bash 3.2 gives a background job its own
 # process group only in monitor mode, and macOS has no setsid(1) to do it
-# instead, so the deadline path also walks the process tree.
+# instead, so the deadline path also walks the process tree, through
+# process_kill_tree in process.sh.
 #
 # The body writes to two temporary files, not to the caller's descriptors:
 # a process the deadline missed cannot hold the session's pipe open past the
@@ -294,9 +247,9 @@ _hook_await() {
 	deadline=$((SECONDS + HOOK_DEADLINE_SECONDS))
 	while kill -0 "$pid" 2>/dev/null; do
 		if [ "$SECONDS" -ge "$deadline" ]; then
-			_hook_kill_job TERM "$pid"
+			process_kill_tree TERM "$pid"
 			sleep 1
-			_hook_kill_job KILL "$pid"
+			process_kill_tree KILL "$pid"
 			wait "$pid" 2>/dev/null || true
 			_hook_replay_output "$out" "$errs"
 			output_hook_say "hook timed out after ${HOOK_DEADLINE_SECONDS}s; run '$(paths_script_command_prefix) check'"

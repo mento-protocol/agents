@@ -9,7 +9,7 @@
 #
 # Written for bash 3.2, the default /bin/bash on macOS.
 #
-# Three LINK_SKILLS_TEST_* variables, named where they are read here and in
+# Four LINK_SKILLS_TEST_* variables, named where they are read here and in
 # lib/link-skills/lock.sh, shorten this script's waits for the test harness:
 # each takes 1 to 999 seconds, any other value keeps the default, and none of
 # them acts in normal use.
@@ -20,6 +20,7 @@ export GIT_TERMINAL_PROMPT=0
 
 PROG="link-skills"
 FETCH_TIMEOUT_SECONDS=15
+case ${LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS-} in [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) FETCH_TIMEOUT_SECONDS=$LINK_SKILLS_TEST_FETCH_TIMEOUT_SECONDS ;; esac
 HOOK_FETCH_BUDGET_SECONDS=20
 HOOK_TIMEOUT_SECONDS=60
 # The whole hook, not just its fetches: the behind count and the candidate
@@ -229,6 +230,9 @@ LIB_DIR="${SCRIPT_PATH%/*}/lib/link-skills"
 [ -r "$LIB_DIR/runtime.sh" ] || boot_fail runtime.sh
 # shellcheck source=lib/link-skills/runtime.sh
 . "$LIB_DIR/runtime.sh" || boot_fail runtime.sh
+[ -r "$LIB_DIR/process.sh" ] || boot_fail process.sh
+# shellcheck source=lib/link-skills/process.sh
+. "$LIB_DIR/process.sh" || boot_fail process.sh
 [ -r "$LIB_DIR/git.sh" ] || boot_fail git.sh
 # shellcheck source=lib/link-skills/git.sh
 . "$LIB_DIR/git.sh" || boot_fail git.sh

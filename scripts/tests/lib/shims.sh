@@ -44,6 +44,33 @@ shims_hanging_git() {
 	chmod +x "$dir/git"
 }
 
+# A git whose fetch never returns: 'fetch' starts a sleeping child, records
+# that child's pid in the file named by LS_TEST_SLEEP_PID and then waits well
+# past the fetch timeout; every other subcommand is the real git. The child
+# stands in for the ssh or curl transport git starts, so a case can see
+# whether the signal on the deadline reached it and not the fetch alone.
+# shellcheck disable=SC2016
+shims_hanging_fetch_git() {
+	local dir real
+	dir=$1
+	real=$(command -v git)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'for a in "$@"; do' \
+		'	if [ "$a" = "fetch" ]; then' \
+		'		sleep 60 &' \
+		'		if [ -n "${LS_TEST_SLEEP_PID:-}" ]; then' \
+		'			echo "$!" >"$LS_TEST_SLEEP_PID"' \
+		'		fi' \
+		'		wait' \
+		'		exit 0' \
+		'	fi' \
+		'done' \
+		"exec \"$real\" \"\$@\"" >"$dir/git"
+	chmod +x "$dir/git"
+}
+
 # A date shim with one fixed timestamp, so that two installs collide on the
 # backup name whatever the clock does.
 # shellcheck disable=SC2016
