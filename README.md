@@ -448,9 +448,9 @@ set, so git 2.24 or newer is needed wherever the ratchet runs, which is the
 pull request job above. A run with `SHELL_SIZE_BASE` unset builds no such
 argument and works on an older git.
 
-On an older git the ratchet fails closed, and the message names the tree, not
-the ref: `git rev-parse` ignores the unknown option, so the base ref still
-resolves, and the later `git ls-tree` refuses it. The run prints
+On an older git the ratchet fails closed, and the run reports the tree, not the
+ref, as the problem: `git rev-parse` ignores the unknown option, so the base ref
+still resolves, and the later `git ls-tree` refuses it. The run prints
 `cannot list the tree of <ref>; the baseline is uncompared` and exits 1.
 
 ## Publishing a package
