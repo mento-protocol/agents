@@ -417,8 +417,13 @@ another repository adopts it by copying the file:
 3. Create `shell-size-baseline.txt` beside the copy, with the header comment
    and the rows that repository needs today. A file row is `<path> <count>`; a
    function row is `<path> <function> <count>`.
-4. Run the check in a CI job that triggers on every pull request, whatever
-   paths changed: a repository-wide check needs a repository-wide trigger.
+4. Required: the check runs on every pull request that can change a tracked
+   `*.sh` file, with the base ref available there. Recommended: a job with no
+   path filter, which is the simplest way to meet that, because the check
+   measures the whole repository. An adopter that gates the step instead, for
+   example to skip documentation-only pull requests, has to keep every
+   tracked `*.sh` path inside the gate; a `*.sh` file under `docs/` is the
+   case that is easy to miss.
 5. Make the base ref available before the check, and set `SHELL_SIZE_BASE` on
    pull requests only, so the baseline can only ratchet down:
 

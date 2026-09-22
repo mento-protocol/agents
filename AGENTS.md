@@ -233,7 +233,10 @@ that start with `#` are skipped. A file row exempts the length of the file
 only: its functions are checked at 50 lines like any other, and so is a
 second declaration of an exempt function name. A nested function is measured
 on its own and as part of the function that holds it, so both lengths have to
-pass.
+pass. Which declaration a function row covers follows the lengths in the
+file, so shrinking the exempt declaration and adding a longer one moves the
+row to the new declaration; that is accepted, because the allowance never
+grows.
 
 A row is an upper bound, not an exact count. The file or function may sit at
 or below its count. Below it the run prints one advisory line and still
