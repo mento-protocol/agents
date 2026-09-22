@@ -155,8 +155,10 @@ Bash gets the same modularity rules as JavaScript. A script is a set of
 small files with one topic each, not one file that holds everything.
 `scripts/check-shell-size.mjs` enforces the limits and CI runs it on every
 pull request. It reads function boundaries with the shfmt parser
-(`mvdan-sh`), so they follow bash grammar, and a file the parser rejects
-fails the check.
+(`mvdan-sh`, pinned to the exact version `0.10.1`), so they follow bash
+grammar, and a file the parser rejects fails the check. The checker is
+maintained here and copied byte-identical into other repositories, so it
+holds no constant of this repository.
 
 Limits:
 
@@ -185,7 +187,11 @@ scripts/tests/<tool>/helpers/<name>.mjs shared fixtures and builders for those c
 The tests for `scripts/validate-skills.mjs` live under
 `scripts/tests/validate-skills/`: one file per YAML topic, plus
 `cli.test.mjs` and `layout.test.mjs` for the command's own behaviour, and a
-`helpers/` directory with the shared fixtures and builders. Run them with
+`helpers/` directory with the shared fixtures and builders. The tests for
+`scripts/check-shell-size.mjs` live under `scripts/tests/check-shell-size/`:
+`limits.test.mjs`, `baseline-rows.test.mjs` and `ratchet.test.mjs`, plus a
+`helpers/` directory whose fixture builds a throwaway git repository for each
+case and runs the checker in it as a command. Run both directories with
 `pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` live under
 `scripts/tests/link-skills/`, one file per topic, sourced from an explicit
 ordered list the way the modules are; the runner itself holds no case. Each
@@ -219,17 +225,45 @@ Rules for a module file:
   file-level directive silences the rest of the file as well, including code
   written later.
 
-`scripts/shell-size-baseline.txt` holds no entries. Both legacy monoliths
-have been split: `scripts/test-link-skills.sh` left the list once the runner
-held no case, and `scripts/link-skills.sh` left it once its topics moved to
+`scripts/shell-size-baseline.txt`, beside the checker, holds the exemptions
+in two kinds of row. A file row is `<path> <count>` and allows that file
+`<count>` lines. A function row is `<path> <function> <count>` and allows the
+longest declaration of that function `<count>` lines. Blank rows and rows
+that start with `#` are skipped. A file row exempts the length of the file
+only: its functions are checked at 50 lines like any other, and so is a
+second declaration of an exempt function name. A nested function is measured
+on its own and as part of the function that holds it, so both lengths have to
+pass.
+
+A row is an upper bound, not an exact count. The file or function may sit at
+or below its count. Below it the run prints one advisory line and still
+passes, so two changes that each shrink one exempt subject merge without
+leaving `main` red. That line asks for the lower count, or for the row to go
+away once the subject fits the ordinary limit. Above it the run fails. A count
+at or below the limit is refused: remove the row instead.
+
+On a pull request CI sets `SHELL_SIZE_BASE` to the base branch, and the
+baseline may then only ratchet down. A row may fall, and a row may go away. A
+row may not rise, and a row whose key the base's baseline lacks is refused, so
+a removed row cannot return and a new exemption cannot be added. The baseline
+file itself may not be removed. When the base lacks the baseline at the
+current path, the checker looks for the file by name anywhere in the base
+tree, so moving the checker and its baseline together keeps the comparison.
+The ratchet is what closes the baseline, so the checker holds no list of the
+files that may be exempt.
+
+A function row is keyed by path and function name. Renaming an exempt
+function, or moving it to another file, makes it a new function, which the
+ratchet refuses. When an over-length file is split by topic, its exempt long
+functions stay in the original file while the short functions move out, or
+they are split as they move.
+
+This repository's baseline holds no rows. Both legacy monoliths have been
+split: `scripts/test-link-skills.sh` left the list once the runner held no
+case, and `scripts/link-skills.sh` left it once its topics moved to
 `scripts/lib/link-skills/`. Every `.sh` file is now checked at the full
-limits. The checker names no legacy file any more, so it refuses any path the
-baseline lists, and it refuses an entry at or below 500 lines. On a pull
-request CI also compares the change with the base branch, so the allowance
-only ratchets down: an entry may not rise, a removed entry may not return,
-and the baseline file itself may not be removed. Keep the file with
-its header comment even though it holds no entries. A script that outgrows a
-limit is split by topic; it does not get an exemption.
+limits. Keep the file with its header comment even though it holds no rows. A
+script that outgrows a limit is split by topic; it does not get an exemption.
 
 Run the check locally before opening a pull request, after `pnpm install`:
 

@@ -7,13 +7,13 @@
     "format": "trunk fmt",
     "lint": "trunk check --all",
     "test": "pnpm -r test",
-    "test:scripts": "node --test scripts/tests/validate-skills/*.test.mjs",
+    "test:scripts": "node --test scripts/tests/check-shell-size/*.test.mjs scripts/tests/validate-skills/*.test.mjs",
     "validate:skills": "node scripts/validate-skills.mjs"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",
     "@commitlint/config-conventional": "^19.8.1",
-    "mvdan-sh": "^0.10.1"
+    "mvdan-sh": "0.10.1"
   },
   "packageManager": "pnpm@10.34.5",
   "engines": {
