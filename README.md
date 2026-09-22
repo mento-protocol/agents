@@ -24,6 +24,9 @@ Claude Code and Codex reach the assembly through the `~/.claude/skills` and
 `~/.codex/skills` symlinks the script also creates; OpenClaw reads
 `~/.agents/skills` directly.
 
+Invoke `grilling` explicitly with `/grilling` in Claude Code or `$grilling`
+in Codex. Its metadata prevents automatic invocation in both runtimes.
+
 ### Install
 
 Clone this repository anywhere, then run the link script:
