@@ -171,17 +171,51 @@ test("an unresolvable base ref is reported", (t) => {
   assert.match(output, /SHELL_SIZE_BASE=no-such does not resolve to a commit/);
 });
 
-// checkBaseRef appends ^{commit}, so a dash value never matches an option
-// exactly there; --end-of-options makes the refusal a property of the code
-// rather than of that suffix, and this case pins the refusal itself: one
-// problem naming the ref, and no git usage text among the problems.
-test("a base ref that starts with a dash is read as a ref", (t) => {
+// A dash value that resolves to nothing is reported as an unresolvable ref,
+// not as a git failure of its own.
+test("an unresolvable base ref that starts with a dash is reported", (t) => {
   const repo = repoWithBase(t, { lines: 2, rows: [] });
 
   const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "-h" });
   assert.equal(status, 1);
   assert.match(output, /SHELL_SIZE_BASE=-h does not resolve to a commit/);
-  assert.doesNotMatch(output, /usage:/i);
+});
+
+/**
+ * Points `refs/heads/<name>` at the base commit. `git branch` refuses a name
+ * that starts with a dash; `git update-ref` accepts it. Such a ref reaches
+ * git as a ref only behind --end-of-options, so these two cases fail without
+ * it.
+ */
+function aliasBase(repo, name) {
+  const commit = git(repo.root, ["rev-parse", "base"]).trim();
+  git(repo.root, ["update-ref", `refs/heads/${name}`, commit]);
+}
+
+// Covers the rev-parse of checkBaseRef and the `git show` of atBase.
+test("a base ref named like an option is read as a ref", (t) => {
+  const repo = repoWithBase(t, { lines: 12, rows: ["a.sh 12"] });
+  aliasBase(repo, "-x");
+  write(repo, "a.sh", fileOfLines(11));
+  writeBaseline(repo, ["a.sh 11"]);
+
+  const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "-x" });
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
+});
+
+// Covers the ls-tree of baseTreePaths: the base holds no baseline where this
+// checker sits, so the tree of the dash ref has to be listed.
+test("the tree of a base ref named like an option is listed", (t) => {
+  const repo = repoWithMovedChecker(t, ["scripts/shell-size-baseline.txt"]);
+  aliasBase(repo, "-x");
+  write(repo, "b.sh", fileOfLines(12));
+  writeBaseline(repo, ["a.sh 12", "b.sh 12"]);
+
+  const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "-x" });
+  assert.equal(status, 1);
+  assert.match(output, /b\.sh is not listed in -x/);
+  assert.doesNotMatch(output, /cannot list the tree of -x/);
 });
 
 /**
