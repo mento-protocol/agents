@@ -417,8 +417,13 @@ another repository adopts it by copying the file:
 3. Create `shell-size-baseline.txt` beside the copy, with the header comment
    and the rows that repository needs today. A file row is `<path> <count>`; a
    function row is `<path> <function> <count>`.
-4. Run the check in a CI job that triggers on every pull request, whatever
-   paths changed: a repository-wide check needs a repository-wide trigger.
+4. Required: the check runs on every pull request that can change a tracked
+   `*.sh` file, with the base ref available there. Recommended: a job with no
+   path filter, which is the simplest way to meet that, because the check
+   measures the whole repository. An adopter that gates the step instead, for
+   example to skip documentation-only pull requests, has to keep every
+   tracked `*.sh` path inside the gate; a `*.sh` file under `docs/` is the
+   case that is easy to miss.
 5. Make the base ref available before the check, and set `SHELL_SIZE_BASE` on
    pull requests only, so the baseline can only ratchet down:
 
@@ -437,6 +442,16 @@ another repository adopts it by copying the file:
 
 The fetch is what a shallow checkout needs to resolve the base ref. The
 checker's tests live in this repository; a copy needs none of its own.
+
+The checker passes `--end-of-options` to `git` only where `SHELL_SIZE_BASE` is
+set, so git 2.24 or newer is needed wherever the ratchet runs, which is the
+pull request job above. A run with `SHELL_SIZE_BASE` unset builds no such
+argument and works on an older git.
+
+On an older git the ratchet fails closed, and the run reports the tree, not the
+ref, as the problem: `git rev-parse` ignores the unknown option, so the base ref
+still resolves, and the later `git ls-tree` refuses it. The run prints
+`cannot list the tree of <ref>; the baseline is uncompared` and exits 1.
 
 ## Publishing a package
 
