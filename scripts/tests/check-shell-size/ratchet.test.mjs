@@ -15,6 +15,7 @@ import test from "node:test";
 import {
   baselinePath,
   commitAs,
+  dropEndOfOptions,
   fileOfLines,
   git,
   makeRepo,
@@ -245,4 +246,34 @@ test("a base whose tree cannot be listed is reported", (t) => {
     output,
     /cannot list the tree of base; the baseline is uncompared/,
   );
+});
+
+/**
+ * These two cases hold a git older than 2.24 to what README's adoption
+ * section says about it. `git rev-parse --verify` ignores an unknown dashed
+ * argument, so checkBaseRef still passes; `git show` and `git ls-tree` refuse
+ * it, so the tree is what the run reports.
+ */
+test("a git without --end-of-options fails the ratchet closed", (t) => {
+  const repo = repoWithBase(t, { lines: 2, rows: [] });
+  dropEndOfOptions(repo);
+
+  const { status, output } = runChecker(repo, AT_BASE);
+  assert.equal(status, 1);
+  assert.match(
+    output,
+    /cannot list the tree of base; the baseline is uncompared/,
+  );
+  assert.doesNotMatch(output, /does not resolve to a commit/);
+});
+
+// With no base ref the run builds no END_OF_OPTIONS argument at all, so an
+// older git runs it as any other git does.
+test("a git without --end-of-options passes with no base ref", (t) => {
+  const repo = repoWithBase(t, { lines: 2, rows: [] });
+  dropEndOfOptions(repo);
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 0, output);
+  assert.match(output, /SHELL_SIZE_BASE unset; not compared with a base ref/);
 });

@@ -443,9 +443,15 @@ another repository adopts it by copying the file:
 The fetch is what a shallow checkout needs to resolve the base ref. The
 checker's tests live in this repository; a copy needs none of its own.
 
-The checker runs `git` with `--end-of-options`, so it needs git 2.24 or newer,
-in CI and on a developer machine. With `SHELL_SIZE_BASE` set, an older git
-fails the run and reports that the base ref does not resolve.
+The checker passes `--end-of-options` to `git` only where `SHELL_SIZE_BASE` is
+set, so git 2.24 or newer is needed wherever the ratchet runs, which is the
+pull request job above. A run with `SHELL_SIZE_BASE` unset builds no such
+argument and works on an older git.
+
+On an older git the ratchet fails closed, and the message names the tree, not
+the ref: `git rev-parse` ignores the unknown option, so the base ref still
+resolves, and the later `git ls-tree` refuses it. The run prints
+`cannot list the tree of <ref>; the baseline is uncompared` and exits 1.
 
 ## Publishing a package
 

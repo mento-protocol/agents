@@ -22,6 +22,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -127,6 +128,31 @@ export function makeNonRepo({ scriptDir = "scripts" } = {}) {
 
 export function removeRepo(repo) {
   rmSync(repo.root, { recursive: true, force: true });
+}
+
+const END_OF_OPTIONS_LINE = 'const END_OF_OPTIONS = "--end-of-options";';
+
+/**
+ * Rewrites the fixture's copy of the checker so END_OF_OPTIONS becomes an
+ * argument no git implements. That models a git older than 2.24: every call
+ * site still passes the argument, and git answers as it answers any unknown
+ * option. The assertion fails if the checker stops defining the constant, so
+ * this helper cannot quietly model nothing.
+ */
+export function dropEndOfOptions(repo) {
+  const file = join(repo.root, repo.scriptDir, "check-shell-size.mjs");
+  const text = readFileSync(file, "utf8");
+  assert.ok(
+    text.includes(END_OF_OPTIONS_LINE),
+    "the checker no longer defines END_OF_OPTIONS as one line",
+  );
+  writeFileSync(
+    file,
+    text.replace(
+      END_OF_OPTIONS_LINE,
+      'const END_OF_OPTIONS = "--not-a-real-option";',
+    ),
+  );
 }
 
 /** Writes `text` at `path` under the fixture and tracks it. */
