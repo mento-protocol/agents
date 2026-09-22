@@ -408,7 +408,9 @@ Each package's own README documents its usage; run its suite directly with
 ## Using the shell size checker in another repository
 
 `scripts/check-shell-size.mjs` holds no constant of this repository, so
-another repository adopts it by copying the file:
+another repository adopts it by copying the file. It runs `git` with
+`--end-of-options`, so it needs git 2.24 or newer, in CI and on a developer
+machine:
 
 1. Copy it byte-identical, at any depth below the repository root. Change it
    here first, then copy it again, so every copy stays identical.

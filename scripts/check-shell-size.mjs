@@ -24,7 +24,7 @@
 // declaration and add a longer one, and the row now covers the new one. That
 // is accepted, because the allowance never grows, one declaration of the name
 // is still the only one above the limit and still at or below the row, and
-// bash only permits a second declaration of one name in a conditional.
+// every other declaration of that name is measured at the ordinary limit.
 //
 // A row is an upper bound, not an exact count. The subject may sit at or
 // below its row: below it the run prints one advisory line and still passes,
