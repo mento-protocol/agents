@@ -8,6 +8,8 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -167,4 +169,46 @@ test("an unresolvable base ref is reported", (t) => {
   const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "no-such" });
   assert.equal(status, 1);
   assert.match(output, /SHELL_SIZE_BASE=no-such does not resolve to a commit/);
+});
+
+// checkBaseRef appends ^{commit}, so a dash value never matches an option
+// exactly there; --end-of-options makes the refusal a property of the code
+// rather than of that suffix, and this case pins the refusal itself: one
+// problem naming the ref, and no git usage text among the problems.
+test("a base ref that starts with a dash is read as a ref", (t) => {
+  const repo = repoWithBase(t, { lines: 2, rows: [] });
+
+  const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "-h" });
+  assert.equal(status, 1);
+  assert.match(output, /SHELL_SIZE_BASE=-h does not resolve to a commit/);
+  assert.doesNotMatch(output, /usage:/i);
+});
+
+/**
+ * Deletes the root tree object of `ref`. The ref still resolves to a commit,
+ * so checkBaseRef passes it, and neither `git show` nor `git ls-tree` can
+ * read its tree afterwards.
+ */
+function breakTreeOf(repo, ref) {
+  const tree = git(repo.root, ["rev-parse", `${ref}^{tree}`]).trim();
+  const object = join(
+    repo.root,
+    ".git/objects",
+    tree.slice(0, 2),
+    tree.slice(2),
+  );
+  assert.ok(existsSync(object), "the fixture packed its objects");
+  rmSync(object);
+}
+
+test("a base whose tree cannot be listed is reported", (t) => {
+  const repo = repoWithBase(t, { lines: 2 });
+  breakTreeOf(repo, "base");
+
+  const { status, output } = runChecker(repo, AT_BASE);
+  assert.equal(status, 1);
+  assert.match(
+    output,
+    /cannot list the tree of base; the baseline is uncompared/,
+  );
 });
