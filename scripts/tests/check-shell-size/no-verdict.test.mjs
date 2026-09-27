@@ -17,8 +17,10 @@ import test from "node:test";
 import {
   FILE_LIMIT,
   baselinePath,
+  commitAs,
   deleteFromWorktree,
   fileOfLines,
+  git,
   makeRepo,
   removeRepo,
   runChecker,
@@ -74,6 +76,37 @@ test(
     assert.match(stderr, /check-shell-size: no verdict; 1 error\(s\)/);
   },
 );
+
+// Before, a baseline the index tracks but the working tree lacks read as no
+// baseline at all: the run passed, or with a base ref reported a removal.
+for (const skipWorktree of [false, true]) {
+  const how = skipWorktree ? "a skip-worktree" : "an unstaged rm of the";
+  test(`${how} baseline stops the verdict`, (t) => {
+    const repo = makeRepo();
+    t.after(() => removeRepo(repo));
+    write(repo, "a.sh", fileOfLines(FILE_LIMIT + 2));
+    writeBaseline(repo, ["a.sh 12"]);
+    commitAs(repo, "base");
+    if (skipWorktree)
+      git(repo.root, [
+        "update-index",
+        "--skip-worktree",
+        "--",
+        baselinePath(repo),
+      ]);
+    deleteFromWorktree(repo, baselinePath(repo));
+
+    for (const env of [{}, { SHELL_SIZE_BASE: "base" }]) {
+      const { status, stderr } = runChecker(repo, env);
+      assert.equal(status, 2, stderr);
+      assert.match(
+        stderr,
+        /scripts\/shell-size-baseline\.txt is tracked but missing from the working tree/,
+      );
+      assert.doesNotMatch(stderr, /was removed|a\.sh: 12 lines/);
+    }
+  });
+}
 
 test(
   "a baseline this user cannot read stops the verdict",

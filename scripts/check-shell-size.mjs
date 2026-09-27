@@ -259,11 +259,33 @@ function storeRow(baseline, row, count) {
   baseline.functions.get(row.path).set(row.name, count);
 }
 
+// Whether the index tracks the baseline, or null after reporting that git
+// could not say. :(literal) keeps a glob character in the path literal.
+function baselineTracked() {
+  try {
+    return git(["ls-files", "-z", "--", `:(literal)${BASELINE_REL}`]) !== "";
+  } catch {
+    operationalError(`git cannot tell whether ${BASELINE_REL} is tracked`);
+    return null;
+  }
+}
+
 // Reads the baseline, reporting every row the checker refuses, or returns
-// null after reporting that the file cannot be read.
+// null after reporting that the file cannot be read. A baseline the index
+// tracks but the working tree lacks, as a sparse checkout or an unstaged rm
+// leaves it, is an error: read as no baseline, it would pass the run or
+// report a removal nobody staged.
 function readBaseline(tracked) {
   const baseline = emptyBaseline();
-  if (!existsSync(BASELINE)) return baseline;
+  if (!existsSync(BASELINE)) {
+    const indexed = baselineTracked();
+    if (indexed === null) return null;
+    if (!indexed) return baseline;
+    operationalError(
+      `${BASELINE_REL} is tracked but missing from the working tree; restore it or stage its removal`,
+    );
+    return null;
+  }
   let text;
   try {
     text = readFileSync(BASELINE, "utf8");

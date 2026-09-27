@@ -453,7 +453,10 @@ The checker exits 0 when everything fits, 1 when it found at least one size
 or baseline problem, and 2 when it could not reach a verdict. Exit 2 covers
 every operational error: no git repository, a baseline outside it, a git
 listing that fails, a tracked file or the baseline that cannot be read (a path
-a sparse checkout left out reads as `ENOENT`), a missing `mvdan-sh`, a
+a sparse checkout left out reads as `ENOENT`), a baseline the index tracks
+but the working tree lacks (a sparse checkout or an unstaged `rm`; a removal
+staged with `git rm` is no error, and the ratchet reports it), a missing
+`mvdan-sh`, a
 `SHELL_SIZE_BASE` that does not resolve, a base tree or base baseline that
 cannot be read, more than one baseline in the base, and a `MAX_FILE_LINES` or
 `MAX_FUNCTION_LINES` override that is not a positive integer. The run prints

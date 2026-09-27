@@ -289,7 +289,9 @@ An operational error is one the checker cannot blame on a file's size: the
 checker is not inside a git repository, the baseline is outside it, git
 cannot list the tracked `*.sh` files, a tracked file or the baseline cannot
 be read (for example `ENOENT` for a path a sparse checkout left out, or
-`EACCES`), `mvdan-sh` cannot be loaded, `SHELL_SIZE_BASE` does not resolve
+`EACCES`), the index tracks the baseline but the working tree lacks it (a
+sparse checkout or an unstaged `rm`; a removal staged with `git rm` is no
+error, and the ratchet reports it), `mvdan-sh` cannot be loaded, `SHELL_SIZE_BASE` does not resolve
 to a commit, the base's tree or baseline cannot be read, the base holds more
 than one baseline, or `MAX_FILE_LINES` or `MAX_FUNCTION_LINES` is set to
 anything but a positive integer. The run prints each reason. When both kinds
