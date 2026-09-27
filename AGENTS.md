@@ -189,7 +189,8 @@ The tests for `scripts/validate-skills.mjs` live under
 `cli.test.mjs` and `layout.test.mjs` for the command's own behaviour, and a
 `helpers/` directory with the shared fixtures and builders. The tests for
 `scripts/check-shell-size.mjs` live under `scripts/tests/check-shell-size/`:
-`limits.test.mjs`, `baseline-rows.test.mjs` and `ratchet.test.mjs`, plus a
+`limits.test.mjs`, `baseline-rows.test.mjs`, `ratchet.test.mjs` and
+`no-verdict.test.mjs`, plus a
 `helpers/` directory whose fixture builds a throwaway git repository for each
 case and runs the checker in it as a command. Run both directories with
 `pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` live under
@@ -228,15 +229,23 @@ Rules for a module file:
 `scripts/shell-size-baseline.txt`, beside the checker, holds the exemptions
 in two kinds of row. A file row is `<path> <count>` and allows that file
 `<count>` lines. A function row is `<path> <function> <count>` and allows the
-longest declaration of that function `<count>` lines. Blank rows and rows
-that start with `#` are skipped. A file row exempts the length of the file
-only: its functions are checked at 50 lines like any other, and so is a
-second declaration of an exempt function name. A nested function is measured
-on its own and as part of the function that holds it, so both lengths have to
-pass. Which declaration a function row covers follows the lengths in the
-file, so shrinking the exempt declaration and adding a longer one moves the
-row to the new declaration; that is accepted, because the allowance never
-grows.
+first declaration of that function in the file, by line, `<count>` lines.
+Blank rows and rows that start with `#` are skipped. A file row exempts the
+length of the file only: its functions are checked at 50 lines like any other.
+A function row exempts one declaration only: every later declaration of the
+same name is checked at 50 lines like any other function. A nested function is
+measured on its own and as part of the function that holds it, so both lengths
+have to pass. The row binds to the first declaration and not to the longest,
+so shrinking the exempt declaration and adding a longer one below it does not
+move the allowance to the new code; the new declaration fails at 50 lines. A
+new declaration placed above the exempt one still takes the row over: no rule
+inside one file can tell the two apart, so review has to catch that case.
+
+The baseline format separates its fields with whitespace, so no row can name
+a path that holds whitespace. A `.sh` file in such a path passes while the
+file and its functions fit the limits. When the file or one of its functions
+breaks a limit, the finding says it cannot be exempted: split it, or rename
+the file.
 
 A row is an upper bound, not an exact count. The file or function may sit at
 or below its count. Below it the run prints one advisory line and still
@@ -267,6 +276,27 @@ case, and `scripts/link-skills.sh` left it once its topics moved to
 `scripts/lib/link-skills/`. Every `.sh` file is now checked at the full
 limits. Keep the file with its header comment even though it holds no rows. A
 script that outgrows a limit is split by topic; it does not get an exemption.
+
+The checker exits with one of three statuses:
+
+| Status | Meaning                                                            |
+| ------ | ------------------------------------------------------------------ |
+| 0      | Every file and function fits its limit or its row.                 |
+| 1      | At least one size or baseline problem, and no operational error.   |
+| 2      | No verdict: an operational error stopped the check or the ratchet. |
+
+An operational error is one the checker cannot blame on a file's size: the
+checker is not inside a git repository, the baseline is outside it, git
+cannot list the tracked `*.sh` files, a tracked file or the baseline cannot
+be read (for example `ENOENT` for a path a sparse checkout left out, or
+`EACCES`), the index tracks the baseline but the working tree lacks it (a
+sparse checkout or an unstaged `rm`; a removal staged with `git rm` is no
+error, and the ratchet reports it), `mvdan-sh` cannot be loaded, `SHELL_SIZE_BASE` does not resolve
+to a commit, the base's tree or baseline cannot be read, the base holds more
+than one baseline, or `MAX_FILE_LINES` or `MAX_FUNCTION_LINES` is set to
+anything but a positive integer. The run prints each reason. When both kinds
+occur, the run exits 2 and prints the problems as well. A file the parser
+rejects is that file's own defect, so it is a problem and exits 1.
 
 Run the check locally before opening a pull request, after `pnpm install`:
 

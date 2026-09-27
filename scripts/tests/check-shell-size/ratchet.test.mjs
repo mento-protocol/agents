@@ -157,7 +157,7 @@ test("two baseline files in the base are reported", (t) => {
   writeBaseline(repo, ["a.sh 12"]);
 
   const { status, output } = runChecker(repo, AT_BASE);
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(
     output,
     /base holds more than one shell-size-baseline\.txt \(.*\); keep one/,
@@ -168,7 +168,7 @@ test("an unresolvable base ref is reported", (t) => {
   const repo = repoWithBase(t, { lines: 2, rows: [] });
 
   const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "no-such" });
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(output, /SHELL_SIZE_BASE=no-such does not resolve to a commit/);
 });
 
@@ -178,7 +178,7 @@ test("an unresolvable base ref that starts with a dash is reported", (t) => {
   const repo = repoWithBase(t, { lines: 2, rows: [] });
 
   const { status, output } = runChecker(repo, { SHELL_SIZE_BASE: "-h" });
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(output, /SHELL_SIZE_BASE=-h does not resolve to a commit/);
 });
 
@@ -241,11 +241,31 @@ test("a base whose tree cannot be listed is reported", (t) => {
   breakTreeOf(repo, "base");
 
   const { status, output } = runChecker(repo, AT_BASE);
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(
     output,
     /cannot list the tree of base; the baseline is uncompared/,
   );
+});
+
+// The tree lists the moved baseline, and its blob is gone, so `git show`
+// fails. Before, the run read that as an empty baseline and refused every row.
+test("a base baseline found by name that cannot be read is reported", (t) => {
+  const repo = repoWithMovedChecker(t, ["scripts/shell-size-baseline.txt"]);
+  writeBaseline(repo, ["a.sh 12"]);
+  const blob = git(repo.root, [
+    "rev-parse",
+    "base:scripts/shell-size-baseline.txt",
+  ]).trim();
+  rmSync(join(repo.root, ".git/objects", blob.slice(0, 2), blob.slice(2)));
+
+  const { status, output } = runChecker(repo, AT_BASE);
+  assert.equal(status, 2, output);
+  assert.match(
+    output,
+    /cannot read scripts\/shell-size-baseline\.txt in base; the baseline is uncompared/,
+  );
+  assert.doesNotMatch(output, /is not listed in base/);
 });
 
 /**
@@ -259,7 +279,7 @@ test("a git without --end-of-options fails the ratchet closed", (t) => {
   dropEndOfOptions(repo);
 
   const { status, output } = runChecker(repo, AT_BASE);
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(
     output,
     /cannot list the tree of base; the baseline is uncompared/,
