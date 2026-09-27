@@ -92,7 +92,7 @@ test("a tracked path missing from the working tree is reported", (t) => {
   deleteFromWorktree(repo, "a.sh");
 
   const { status, output } = runChecker(repo);
-  assert.equal(status, 1);
+  assert.equal(status, 2, output);
   assert.match(output, /a\.sh: cannot read: ENOENT/);
   assert.doesNotMatch(output, /at checkFile/);
 });
@@ -177,7 +177,7 @@ test("a directory outside a git repository is reported, not thrown", (t) => {
   const { status, stderr } = runChecker(dir, {
     GIT_CEILING_DIRECTORIES: dir.ceiling,
   });
-  assert.equal(status, 1);
+  assert.equal(status, 2, stderr);
   assert.match(
     stderr,
     /is not inside a git repository; run the checker from a checkout/,
@@ -185,15 +185,76 @@ test("a directory outside a git repository is reported, not thrown", (t) => {
   assert.doesNotMatch(stderr, /at ChildProcess/);
 });
 
-test("a tracked path that holds whitespace is reported", (t) => {
+test("a path that holds whitespace passes when it fits the limits", (t) => {
   const repo = makeRepo();
   t.after(() => removeRepo(repo));
-  write(repo, "two words.sh", fileOfLines(2));
+  write(repo, "two words.sh", functionOfLines("small", FUNCTION_LIMIT));
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
+  assert.doesNotMatch(output, /two words/);
+});
+
+test("a file over the limit whose path holds whitespace cannot be exempted", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "two words.sh", fileOfLines(FILE_LIMIT + 2));
 
   const { status, output } = runChecker(repo);
   assert.equal(status, 1);
   assert.match(
     output,
-    /two words\.sh holds whitespace; the baseline format cannot name it; rename the file/,
+    new RegExp(
+      `two words\\.sh: 12 lines, the limit is ${FILE_LIMIT}; the baseline format cannot name a path that holds whitespace, so it cannot be exempted; split the file or rename it`,
+    ),
   );
+});
+
+test("a function over the limit whose path holds whitespace cannot be exempted", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "two words.sh", functionOfLines("wide", FUNCTION_LIMIT + 2));
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 1);
+  assert.match(
+    output,
+    new RegExp(
+      `two words\\.sh:1: function wide is 7 lines, the limit is ${FUNCTION_LIMIT}; the baseline format cannot name a path that holds whitespace, so it cannot be exempted; split the function or rename the file`,
+    ),
+  );
+});
+
+// Number() reads these values as NaN, zero, a negative number or a fraction,
+// or reads a form other than plain decimal digits. NaN made every comparison
+// false, so the run passed with nothing measured.
+for (const name of ["MAX_FILE_LINES", "MAX_FUNCTION_LINES"]) {
+  for (const value of ["5O0", "", "0", "-5", "1.5", " 7", "0x10", "1e3"]) {
+    test(`${name}=${JSON.stringify(value)} stops the run with no verdict`, (t) => {
+      const repo = makeRepo();
+      t.after(() => removeRepo(repo));
+      write(repo, "a.sh", fileOfLines(FILE_LIMIT + 2));
+
+      const { status, stderr } = runChecker(repo, { [name]: value });
+      assert.equal(status, 2, stderr);
+      assert.ok(
+        stderr.includes(
+          `${name}=${value} is not a positive integer; unset it or set a whole number of lines`,
+        ),
+        stderr,
+      );
+      assert.doesNotMatch(stderr, /a\.sh: 12 lines/);
+    });
+  }
+}
+
+test("a positive integer limit override is applied", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", fileOfLines(FILE_LIMIT + 2));
+
+  const { status, output } = runChecker(repo, { MAX_FILE_LINES: "12" });
+  assert.equal(status, 0, output);
+  assert.match(output, /check-shell-size: ok/);
 });

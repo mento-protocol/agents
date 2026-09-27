@@ -239,7 +239,7 @@ test("a function back inside the limit is told to remove its row", (t) => {
   assert.doesNotMatch(stdout, /lower the entry/);
 });
 
-test("a function row covers the longest declaration of the name", (t) => {
+test("a function row covers the first declaration of the name", (t) => {
   const repo = makeRepo();
   t.after(() => removeRepo(repo));
   write(repo, "a.sh", functionOfLines("wide", 9) + functionOfLines("wide", 7));
@@ -252,6 +252,47 @@ test("a function row covers the longest declaration of the name", (t) => {
     output,
     new RegExp(
       `a\\.sh:10: function wide is 7 lines, the limit is ${FUNCTION_LIMIT}`,
+    ),
+  );
+});
+
+// While the row covered the longest declaration, shrinking the exempt
+// declaration and adding a longer one handed its allowance to the new code.
+test("a later declaration of an exempt name does not take the row over", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", functionOfLines("wide", 3) + functionOfLines("wide", 9));
+  writeBaseline(repo, ["a.sh 12", "a.sh wide 9"]);
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 1);
+  assert.match(
+    output,
+    new RegExp(
+      `a\\.sh:4: function wide is 9 lines, the limit is ${FUNCTION_LIMIT}`,
+    ),
+  );
+  assert.match(
+    output,
+    new RegExp(
+      `a\\.sh: function wide is 3 lines, its baseline allows 9; it fits the ${FUNCTION_LIMIT}-line limit now, so remove the entry`,
+    ),
+  );
+});
+
+test("a function row exempts one declaration only", (t) => {
+  const repo = makeRepo();
+  t.after(() => removeRepo(repo));
+  write(repo, "a.sh", functionOfLines("wide", 7) + functionOfLines("wide", 7));
+  writeBaseline(repo, ["a.sh 14", "a.sh wide 7"]);
+
+  const { status, output } = runChecker(repo);
+  assert.equal(status, 1);
+  assert.doesNotMatch(output, /a\.sh:1: function wide/);
+  assert.match(
+    output,
+    new RegExp(
+      `a\\.sh:8: function wide is 7 lines, the limit is ${FUNCTION_LIMIT}`,
     ),
   );
 });

@@ -419,7 +419,10 @@ another repository adopts it by copying the file:
    package script that runs the copy with node.
 3. Create `shell-size-baseline.txt` beside the copy, with the header comment
    and the rows that repository needs today. A file row is `<path> <count>`; a
-   function row is `<path> <function> <count>`.
+   function row is `<path> <function> <count>` and covers the first
+   declaration of that name in the file. No row can name a path that holds
+   whitespace: such a file passes while it fits the limits, and a file or
+   function there that breaks a limit has to be split, or the file renamed.
 4. Required: the check runs on every pull request that can change a tracked
    `*.sh` file, with the base ref available there. Recommended: a job with no
    path filter, which is the simplest way to meet that, because the check
@@ -446,6 +449,20 @@ another repository adopts it by copying the file:
 The fetch is what a shallow checkout needs to resolve the base ref. The
 checker's tests live in this repository; a copy needs none of its own.
 
+The checker exits 0 when everything fits, 1 when it found at least one size
+or baseline problem, and 2 when it could not reach a verdict. Exit 2 covers
+every operational error: no git repository, a baseline outside it, a git
+listing that fails, a tracked file or the baseline that cannot be read (a path
+a sparse checkout left out reads as `ENOENT`), a missing `mvdan-sh`, a
+`SHELL_SIZE_BASE` that does not resolve, a base tree or base baseline that
+cannot be read, more than one baseline in the base, and a `MAX_FILE_LINES` or
+`MAX_FUNCTION_LINES` override that is not a positive integer. The run prints
+each reason, and exits 2 when problems and errors occur together. A file the
+parser rejects is a problem, so it exits 1. A gate that wraps the checker maps
+exit 2 to its own incomplete status and never reads it as a pass or as a size
+finding; it then needs no probes of its own for the base ref, the index or a
+sparse checkout.
+
 The checker passes `--end-of-options` to `git` only where `SHELL_SIZE_BASE` is
 set, so git 2.24 or newer is needed wherever the ratchet runs, which is the
 pull request job above. A run with `SHELL_SIZE_BASE` unset builds no such
@@ -454,7 +471,7 @@ argument and works on an older git.
 On an older git the ratchet fails closed, and the run reports the tree, not the
 ref, as the problem: `git rev-parse` ignores the unknown option, so the base ref
 still resolves, and the later `git ls-tree` refuses it. The run prints
-`cannot list the tree of <ref>; the baseline is uncompared` and exits 1.
+`cannot list the tree of <ref>; the baseline is uncompared` and exits 2.
 
 ## Publishing a package
 
