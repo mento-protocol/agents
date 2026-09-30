@@ -27,6 +27,10 @@ Claude Code and Codex reach the assembly through the `~/.claude/skills` and
 Invoke `grilling` explicitly with `/grilling` in Claude Code or `$grilling`
 in Codex. Its metadata prevents automatic invocation in both runtimes.
 
+Use [test-audit](skills/test-audit/SKILL.md) to assess test value, strengthen
+regression proof, or remove redundant coverage while preserving distinct
+contracts. It includes a focused workflow and an optional subsystem audit guide.
+
 ### Install
 
 Clone this repository anywhere, then run the link script:
