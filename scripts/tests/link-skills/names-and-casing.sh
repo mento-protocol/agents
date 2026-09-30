@@ -71,9 +71,11 @@ case_ascii_names_fold_without_tr() {
 	shims_drop
 	assert_rc 0 "link"
 	assert_out_has "linked 5" "every skill linked"
-	if [ "$(assert_count_in_file "$CASE_DIR/tr.log" "[:upper:]")" != "0" ]; then
-		case_fail "a run over ASCII names started tr to fold a name"
-	fi
+	# The filesystem probe upper-cases one name, so the log holds that call
+	# whenever the shim was in front of the real tr. Without it a run the shim
+	# never saw would pass the next line.
+	assert_file_has "$CASE_DIR/tr.log" "[:lower:]" "the shim saw the filesystem probe"
+	assert_file_lacks "$CASE_DIR/tr.log" "[:upper:]" "no tr started to fold a name"
 }
 
 # The cases of this topic, in the order the runner ran them.
