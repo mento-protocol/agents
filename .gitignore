@@ -9,6 +9,10 @@ node_modules
 .DS_Store
 coverage
 
+# pnpm puts its store here when it cannot use the shared one, for example when
+# the install runs in a sandbox or the shared store is on another filesystem.
+.pnpm-store/
+
 # Throwaway probes a review or fix round leaves in a package's test directory.
 # `pnpm test` runs `test/*.test.mjs`, so these never run and nothing keeps them
 # compiling; ignoring them stops the next round's debris reaching a commit.
