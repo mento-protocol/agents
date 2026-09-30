@@ -52,6 +52,13 @@ Either way it then links every skill from every source the file lists into
 Every run names the sources it used (`link-skills: sources: ...`) and warns
 when this clone's own `skills` directory is not one of them.
 
+On a terminal, a run names each step that can take seconds before it starts
+it, with about how long the run waits before it gives up: the `git fetch` of
+each source in `check`, and the wait for a lock another run holds. The time is
+approximate, because both waits count 0.2-second pauses and not seconds. These
+lines go to stderr.
+Captured output, `--quiet` and the session hook carry none of them.
+
 The script points `~/.claude/skills` and `~/.codex/skills` at the assembly
 only when `~/.claude` or `~/.codex` already exists; it creates neither home
 directory and names the runtime it skipped. An existing real `~/.claude/skills`

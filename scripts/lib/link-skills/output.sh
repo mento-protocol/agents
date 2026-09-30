@@ -1,11 +1,12 @@
 # shellcheck shell=bash
 #
-# output.sh - what this script prints: the four report levels, the refusal
+# output.sh - what this script prints: the five report levels, the refusal
 # that stops a run, the line a session hook prints, and the help text. It
 # holds the "output" section of the single-file script.
 #
-# Reads: QUIET (output_info, output_warn), PROG (output_err, output_warn,
-# output_die, output_hook_say), HOOK_MODE (output_die).
+# Reads: QUIET (output_info, output_warn, output_progress), PROG (output_err,
+# output_warn, output_progress, output_die, output_hook_say), HOOK_MODE
+# (output_die, output_progress).
 # Writes: ERRORS (output_err).
 #
 # output_die ends the process. In hook mode it prints one bracketed line and
@@ -20,6 +21,16 @@ output_info() {
 output_err() {
 	printf '%s: %s\n' "$PROG" "$*" >&2
 	ERRORS=$((ERRORS + 1))
+}
+
+# A step that can take seconds, named before it starts, so a person watching a
+# terminal knows what the run waits for and about how long. It goes to
+# stderr and only to a terminal: captured output, the session hook and a
+# --quiet run carry no such line.
+output_progress() {
+	if [ "$QUIET" -eq 0 ] && [ "$HOOK_MODE" -eq 0 ] && [ -t 2 ]; then
+		printf '%s: %s\n' "$PROG" "$*" >&2
+	fi
 }
 
 # A problem worth naming that must not change the exit code.

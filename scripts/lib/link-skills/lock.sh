@@ -207,7 +207,7 @@ _lock_clear_stale() {
 # Status: 0 the lock is held, or the assembly cannot be written at all; 1
 # another run holds it; 2 the lock path is not usable and LOCK_PROBLEM says why.
 lock_take() {
-	local mode waited limit vanished
+	local mode waited limit vanished announced=0
 	mode=$1
 	if [ "$LOCK_HELD" -eq 1 ]; then
 		return 0
@@ -250,9 +250,21 @@ lock_take() {
 		if [ "$mode" != "wait" ]; then
 			return 1
 		fi
-		sleep 0.2
+		_lock_pause "$announced"
+		announced=1
 	done
 	return 1
+}
+
+# The pause between two attempts of a run that waits for the lock. $1 is 0 on
+# the first pause, which names the wait on a terminal. The time it names is
+# approximate: lock_take counts pauses, not seconds, so the work between two
+# pauses comes on top.
+_lock_pause() {
+	if [ "$1" -eq 0 ]; then
+		output_progress "another run holds the lock $LOCK_DIR; waiting about $LOCK_WAIT_SECONDS seconds for it"
+	fi
+	sleep 0.2
 }
 
 # Make the lock directory and record this run as its owner. Status 1 says

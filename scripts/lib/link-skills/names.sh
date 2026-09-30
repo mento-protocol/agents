@@ -7,7 +7,9 @@
 #
 # Reads: ASSEMBLY_DIR (names_detect_case_insensitive), CASE_INSENSITIVE
 # (names_detect_case_insensitive, names_equal).
-# Writes: CASE_INSENSITIVE (names_detect_case_insensitive).
+# Writes: CASE_INSENSITIVE (names_detect_case_insensitive). names_equal turns
+# the shell option nocasematch on for one comparison and puts it back to the
+# state it found.
 
 # A manifest name must be one plain basename. Anything else could name a path
 # outside the assembly directory, so it never licenses a removal.
@@ -58,12 +60,35 @@ names_detect_case_insensitive() {
 }
 
 # Two entry names that the filesystem in use cannot tell apart.
+#
+# Every table lookup compares one name with every other, so a run makes
+# thousands of these calls. Two ASCII names are folded by the shell itself:
+# two 'tr' processes per call made a run over 47 skills take 45 seconds. A
+# name that holds any other character keeps the 'tr' fold.
 names_equal() {
+	local rc had
 	if [ "$1" = "$2" ]; then
 		return 0
 	fi
 	if [ "$CASE_INSENSITIVE" != "1" ]; then
 		return 1
+	fi
+	if [[ $1$2 != *[![:ascii:]]* ]]; then
+		rc=1
+		# A shell that starts with nocasematch on, through an exported
+		# BASHOPTS, keeps it: the option goes back to what it was.
+		had=0
+		if shopt -q nocasematch; then
+			had=1
+		fi
+		shopt -s nocasematch
+		if [[ $1 == "$2" ]]; then
+			rc=0
+		fi
+		if [ "$had" -eq 0 ]; then
+			shopt -u nocasematch
+		fi
+		return "$rc"
 	fi
 	if [ "$(_names_to_lower "$1")" = "$(_names_to_lower "$2")" ]; then
 		return 0

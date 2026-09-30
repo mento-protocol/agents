@@ -1,11 +1,11 @@
 # shellcheck shell=bash
 #
 # names-and-casing.sh - the cases for the "names and casing" section of
-# scripts/link-skills.sh: a case-only rename of a skill directory, and two
-# names a case-insensitive filesystem cannot tell apart.
+# scripts/link-skills.sh: a case-only rename of a skill directory, two names a
+# case-insensitive filesystem cannot tell apart, and the cost of comparing them.
 #
-# Both cases skip on a case-sensitive filesystem, where neither situation can
-# be built.
+# Every case skips on a case-sensitive filesystem, where none of these situations
+# can be built.
 #
 # Reads: CASE_DIR, HOME.
 # Writes: nothing outside the case's own throwaway HOME and CASE_DIR.
@@ -52,8 +52,35 @@ case_variant_names_are_duplicates() {
 	fs_assert_link "$HOME/.agents/skills/keep" "$CASE_DIR/one/keep" "the other skill still links"
 }
 
+# Comparing two ASCII names starts no process. A run compares every name with
+# every other, so one 'tr' per comparison made a run over 47 skills take 45
+# seconds with nothing printed.
+case_ascii_names_fold_without_tr() {
+	local name
+	if ! fs_case_insensitive "$CASE_DIR"; then
+		case_skip "case-sensitive filesystem"
+	fi
+	for name in alpha beta gamma delta Epsilon; do
+		fixtures_skill "$CASE_DIR/one" "$name"
+	done
+	fixtures_write_sources
+	fixtures_add_source "$CASE_DIR/one"
+	shims_counting_tr "$CASE_DIR/bin"
+	shims_use "$CASE_DIR/bin"
+	LS_TEST_TR_LOG="$CASE_DIR/tr.log" case_run_script link
+	shims_drop
+	assert_rc 0 "link"
+	assert_out_has "linked 5" "every skill linked"
+	# The filesystem probe upper-cases one name, so the log holds that call
+	# whenever the shim was in front of the real tr. Without it a run the shim
+	# never saw would pass the next line.
+	assert_file_has "$CASE_DIR/tr.log" "[:lower:]" "the shim saw the filesystem probe"
+	assert_file_lacks "$CASE_DIR/tr.log" "[:upper:]" "no tr started to fold a name"
+}
+
 # The cases of this topic, in the order the runner ran them.
 cases_names_and_casing() {
 	case_run case_only_rename_relinks
 	case_run case_variant_names_are_duplicates
+	case_run case_ascii_names_fold_without_tr
 }
