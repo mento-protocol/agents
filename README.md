@@ -53,8 +53,10 @@ Every run names the sources it used (`link-skills: sources: ...`) and warns
 when this clone's own `skills` directory is not one of them.
 
 On a terminal, a run names each step that can take seconds before it starts
-it, with the longest that step can last: the `git fetch` of each source in
-`check`, and the wait for a lock another run holds. These lines go to stderr.
+it, with about how long the run waits before it gives up: the `git fetch` of
+each source in `check`, and the wait for a lock another run holds. The time is
+approximate, because both waits count 0.2-second pauses and not seconds. These
+lines go to stderr.
 Captured output, `--quiet` and the session hook carry none of them.
 
 The script points `~/.claude/skills` and `~/.codex/skills` at the assembly

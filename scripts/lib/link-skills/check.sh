@@ -128,7 +128,7 @@ _check_report_git() {
 	fi
 	# check is the command a person runs to get a fresh answer, so it
 	# fetches every time. The throttle belongs to the session hook.
-	output_progress "fetching $root, at most $FETCH_TIMEOUT_SECONDS seconds"
+	output_progress "fetching $root; gives up after about $FETCH_TIMEOUT_SECONDS seconds"
 	fetch_note=$(git_maybe_fetch "$root" "$FETCH_TIMEOUT_SECONDS" force)
 	behind=$(git_behind_count "$root")
 	output_info "  git: branch $branch, $state, behind $behind"

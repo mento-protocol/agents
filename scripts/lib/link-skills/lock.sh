@@ -257,10 +257,12 @@ lock_take() {
 }
 
 # The pause between two attempts of a run that waits for the lock. $1 is 0 on
-# the first pause, which names the wait and its limit on a terminal.
+# the first pause, which names the wait on a terminal. The time it names is
+# approximate: lock_take counts pauses, not seconds, so the work between two
+# pauses comes on top.
 _lock_pause() {
 	if [ "$1" -eq 0 ]; then
-		output_progress "another run holds the lock $LOCK_DIR; waiting at most $LOCK_WAIT_SECONDS seconds"
+		output_progress "another run holds the lock $LOCK_DIR; waiting about $LOCK_WAIT_SECONDS seconds for it"
 	fi
 	sleep 0.2
 }

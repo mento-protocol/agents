@@ -24,7 +24,7 @@ output_err() {
 }
 
 # A step that can take seconds, named before it starts, so a person watching a
-# terminal knows what the run waits for and for how long at most. It goes to
+# terminal knows what the run waits for and about how long. It goes to
 # stderr and only to a terminal: captured output, the session hook and a
 # --quiet run carry no such line.
 output_progress() {
