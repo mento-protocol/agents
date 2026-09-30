@@ -58,12 +58,27 @@ names_detect_case_insensitive() {
 }
 
 # Two entry names that the filesystem in use cannot tell apart.
+#
+# Every table lookup compares one name with every other, so a run makes
+# thousands of these calls. Two ASCII names are folded by the shell itself:
+# two 'tr' processes per call made a run over 47 skills take 45 seconds. A
+# name that holds any other character keeps the 'tr' fold.
 names_equal() {
+	local rc
 	if [ "$1" = "$2" ]; then
 		return 0
 	fi
 	if [ "$CASE_INSENSITIVE" != "1" ]; then
 		return 1
+	fi
+	if [[ $1$2 != *[![:ascii:]]* ]]; then
+		rc=1
+		shopt -s nocasematch
+		if [[ $1 == "$2" ]]; then
+			rc=0
+		fi
+		shopt -u nocasematch
+		return "$rc"
 	fi
 	if [ "$(_names_to_lower "$1")" = "$(_names_to_lower "$2")" ]; then
 		return 0

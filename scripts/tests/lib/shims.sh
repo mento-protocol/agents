@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 #
 # shims.sh - builders for the command shims a case puts in front of the real
-# git, date, ln, mktemp, ls and mkdir, plus the PATH switch that turns them on.
+# git, date, ln, mktemp, ls, mkdir and tr, plus the PATH switch that turns them
+# on.
 #
 # Reads: PATH and SAVED_PATH. Each builder takes the shim directory as an
 # argument and finds the real command through PATH with command -v.
@@ -196,6 +197,25 @@ shims_vanishing_lock_mkdir() {
 		'esac' \
 		"exec \"$real\" \"\$@\"" >"$dir/mkdir"
 	chmod +x "$dir/mkdir"
+}
+
+# A tr shim that records each call: one line holding the call's first argument
+# goes to the file named by LS_TEST_TR_LOG, and the call itself is the real tr.
+# A case reads the file to see how many processes a run started to fold names.
+# The single-quoted lines are shim source, not expansions.
+# shellcheck disable=SC2016
+shims_counting_tr() {
+	local dir real
+	dir=$1
+	real=$(command -v tr)
+	mkdir -p "$dir"
+	printf '%s\n' \
+		'#!/bin/sh' \
+		'if [ -n "${LS_TEST_TR_LOG:-}" ]; then' \
+		'	printf "%s\n" "${1:-}" >>"$LS_TEST_TR_LOG"' \
+		'fi' \
+		"exec \"$real\" \"\$@\"" >"$dir/tr"
+	chmod +x "$dir/tr"
 }
 
 shims_use() {
