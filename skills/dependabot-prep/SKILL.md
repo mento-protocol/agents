@@ -200,6 +200,8 @@ CI/review waits, work on independent PRs without a second heavy tree.
    holds, missing authority/access, irreversible/out-of-scope changes or unavailable
    required validation; continue independent work.
 3. Use a clean dedicated clone/worktree and pinned repository tool versions.
+   Read [completion proof](references/completion-proof.md) before validation;
+   record its validation binding and select an available publication verifier.
    Preserve dirty/unrelated work. Merge the exact current base (no rebase), resolve
    conflicts and repair necessary compatibility and proven manifest/lockfile/runtime
    coupling. Run normal installs, generators and checks with hooks enabled and
@@ -375,7 +377,9 @@ counts out of the digest. Keep each PR block under about 300 characters. Point
 to the evidence tier, then end the digest with: No approval, merge, close or
 auto-merge action was performed. Report any thread resolutions separately.
 
-Perform a final live sweep and report each PR:
+Perform the [completion-proof handoff](references/completion-proof.md) and a
+final live sweep before reporting each PR. Publication proof is necessary for
+locally prepared work, but never substitutes for checks, reviews or mergeability:
 
 - **ready for maintainer decision**: conflict-free current head, required checks
   and technical reviews satisfied, findings addressed, risks/choices documented,
