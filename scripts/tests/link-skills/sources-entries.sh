@@ -326,7 +326,7 @@ assembly_dir_refused_as_source() {
 	# source does today, and the hook adds no notice of its own.
 	case_run_script hook
 	assert_rc 0 "hook with the assembly listed as a source"
-	assert_out_lacks "[link-skills]" "the hook says nothing about it"
+	assert_out_lacks "link-skills hook:" "the hook says nothing about it"
 }
 
 # The cases of this topic, in the order the runner ran them.

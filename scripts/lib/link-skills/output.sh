@@ -9,7 +9,7 @@
 # (output_die, output_progress).
 # Writes: ERRORS (output_err).
 #
-# output_die ends the process. In hook mode it prints one bracketed line and
+# output_die ends the process. In hook mode it prints one plain-text line and
 # exits 0, because a session start must end well whatever this script finds.
 
 output_info() {
@@ -42,7 +42,7 @@ output_warn() {
 
 # A refusal that stops the run. The session hook is the exception: a session
 # must start whatever this script finds, so in hook mode the same refusal is
-# one '[link-skills]' line and exit 0. Every other command keeps exit 2.
+# one 'link-skills hook:' line and exit 0. Every other command keeps exit 2.
 output_die() {
 	if [ "$HOOK_MODE" -eq 1 ]; then
 		output_hook_say "$*"
@@ -52,8 +52,9 @@ output_die() {
 	exit 2
 }
 
+# Keep the prefix plain text: Codex parses output starting with '[' as JSON.
 output_hook_say() {
-	printf '[%s] %s\n' "$PROG" "$*"
+	printf '%s hook: %s\n' "$PROG" "$*"
 }
 
 # No here documents anywhere in this script: bash 3.2 writes every here
