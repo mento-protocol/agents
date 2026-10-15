@@ -170,7 +170,7 @@ resolve_symlink_path() {
 
 # Report the module that would not load, and stop. Every other reporting
 # function lives in a module, so this one prints for itself. A session start
-# must end well, so a hook run gets the bracketed line output_hook_say prints
+# must end well, so a hook run gets the plain-text line output_hook_say prints
 # and exit 0; every other command gets the line output_die prints and exit 2.
 #
 # The option parser has not run yet, so the command is read here by main's own
@@ -191,7 +191,7 @@ boot_fail() {
 		esac
 	done
 	if [ "$cmd" = "hook" ]; then
-		printf '[%s] cannot load %s\n' "$PROG" "$LIB_DIR/$1"
+		printf '%s hook: cannot load %s\n' "$PROG" "$LIB_DIR/$1"
 		exit 0
 	fi
 	printf '%s: cannot load %s\n' "$PROG" "$LIB_DIR/$1" >&2

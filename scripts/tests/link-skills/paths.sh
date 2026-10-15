@@ -52,7 +52,7 @@ assembly_inside_runtime_home_refused() {
 	# A session start never fails on a path this script cannot use.
 	case_run_script --assembly "$HOME/.claude" hook
 	assert_rc 0 "the same refusal in hook mode"
-	assert_out_has "[link-skills] the assembly directory must not contain a runtime skills path" "one hook line"
+	assert_out_has "link-skills hook: the assembly directory must not contain a runtime skills path" "one hook line"
 	fs_assert_absent "$HOME/.claude/skills" "the hook creates nothing"
 
 	# The default assembly is neither runtime path and holds neither, so it

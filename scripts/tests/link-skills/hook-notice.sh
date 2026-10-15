@@ -222,7 +222,7 @@ hook_exits_zero_on_init_failure() {
 	export SKILLS_ASSEMBLY_DIR
 	case_run_script hook
 	assert_rc 0 "hook with a root assembly directory"
-	assert_out_has "[link-skills]" "hook notice"
+	assert_out_has "link-skills hook:" "hook notice"
 	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
 	if [ "$lines" != "1" ]; then
 		case_fail "expected one line for the root assembly, got $lines: $LS_OUT"
@@ -234,7 +234,7 @@ hook_exits_zero_on_init_failure() {
 	LS_OUT=$(HOME="" "$BASH_BIN" "$LS" hook 2>&1)
 	LS_RC=$?
 	assert_rc 0 "hook with an empty HOME"
-	assert_out_has "[link-skills]" "hook notice"
+	assert_out_has "link-skills hook:" "hook notice"
 	lines=$(printf '%s\n' "$LS_OUT" | wc -l | tr -d ' ')
 	if [ "$lines" != "1" ]; then
 		case_fail "expected one line for the empty HOME, got $lines: $LS_OUT"
@@ -249,7 +249,7 @@ unset_home_hook_exits_zero() {
 	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" hook 2>&1)
 	LS_RC=$?
 	assert_rc 0 "hook without HOME"
-	assert_out_has "[link-skills] HOME is not set" "hook notice"
+	assert_out_has "link-skills hook: HOME is not set" "hook notice"
 	LS_OUT=$(env -u HOME "$BASH_BIN" "$LS" link 2>&1)
 	# shellcheck disable=SC2034 # read by assert.sh
 	LS_RC=$?
