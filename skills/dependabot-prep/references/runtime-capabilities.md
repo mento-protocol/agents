@@ -9,9 +9,16 @@ runtime permissions during preparation.
 Use a documented repository state path where applicable to this host. Otherwise
 use a writable root outside checkouts: Linux
 `${XDG_STATE_HOME:-$HOME/.local/state}/dependabot-prep`; macOS
-`$HOME/Library/Application Support/dependabot-prep`. A sandboxed macOS session
-may be unable to write that Library path; it then uses the XDG path above and
-records the deviation in the owner file. Keep per-repository state under a canonical
+`$HOME/Library/Application Support/dependabot-prep`. Every run on a macOS host
+uses that one root, so the heavy-tree slot below stays single. A sandboxed
+session that cannot write it ("Operation not permitted") runs every command
+that writes under that root outside the sandbox, through the runtime's
+permission path: creating the slot and its owner record, per-repository state
+and any report kept there, the claim-document copy, and releasing the slot.
+It never falls back to the XDG path, because a
+second state root is a second slot pool. When no such path is available, local
+work on this host stops, as it does when the slot cannot be acquired.
+Keep per-repository state under a canonical
 `<state root>/<host>__<owner>__<repo>` directory built from validated
 path-safe components; reject separators, traversal and malformed identities,
 and quote paths with spaces.
