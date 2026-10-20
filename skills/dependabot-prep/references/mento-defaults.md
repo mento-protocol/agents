@@ -58,6 +58,12 @@ before the first claim: exit 0 with an empty `warnings` array proves the
 document and the package version. A `package-version` warning on the default
 document means the runner resolved a different version. Stop and report it.
 
+The runner needs network access to the npm registry and to GitHub. A sandbox
+that blocks the registry fails before any claim command runs, for example with
+corepack's `getaddrinfo ENOTFOUND registry.npmjs.org`, which is not a claim
+error. Run the claims commands outside the sandbox through the runtime's
+permission path.
+
 A repository policy that names its own `coordination.claims.command` keeps
 that command and its own working-directory rule, as
 [runtime capabilities](runtime-capabilities.md#state-and-concurrency) states.

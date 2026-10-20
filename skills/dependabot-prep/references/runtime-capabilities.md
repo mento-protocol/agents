@@ -10,8 +10,12 @@ Use a documented repository state path where applicable to this host. Otherwise
 use a writable root outside checkouts: Linux
 `${XDG_STATE_HOME:-$HOME/.local/state}/dependabot-prep`; macOS
 `$HOME/Library/Application Support/dependabot-prep`. A sandboxed macOS session
-may be unable to write that Library path; it then uses the XDG path above and
-records the deviation in the owner file. Keep per-repository state under a canonical
+may be unable to write that Library path ("Operation not permitted"). When the
+host operator names a shared slot pool at that path, do not fall back: run the
+slot and claim-document commands outside the sandbox through the runtime's
+permission path, because a second state root is a second pool. Otherwise the
+session uses the XDG path above and records the deviation in the owner file.
+Keep per-repository state under a canonical
 `<state root>/<host>__<owner>__<repo>` directory built from validated
 path-safe components; reject separators, traversal and malformed identities,
 and quote paths with spaces.
