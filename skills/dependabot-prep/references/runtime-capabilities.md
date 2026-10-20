@@ -11,9 +11,11 @@ use a writable root outside checkouts: Linux
 `${XDG_STATE_HOME:-$HOME/.local/state}/dependabot-prep`; macOS
 `$HOME/Library/Application Support/dependabot-prep`. Every run on a macOS host
 uses that one root, so the heavy-tree slot below stays single. A sandboxed
-session that cannot write it ("Operation not permitted") runs the commands that
-create the slot and copy the claim document outside the sandbox, through the
-runtime's permission path. It never falls back to the XDG path, because a
+session that cannot write it ("Operation not permitted") runs every command
+that writes under that root outside the sandbox, through the runtime's
+permission path: creating the slot and its owner record, per-repository state
+and any report kept there, the claim-document copy, and releasing the slot.
+It never falls back to the XDG path, because a
 second state root is a second slot pool. When no such path is available, local
 work on this host stops, as it does when the slot cannot be acquired.
 Keep per-repository state under a canonical
