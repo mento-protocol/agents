@@ -1,6 +1,6 @@
 # Completion proof for the portable workflow
 
-Use with the active `trusted-agent-v2` entry, not the archived sealed handoff.
+Use with the `trusted-agent-v2` entry.
 Keep this evidence in the existing per-run report; do not create another claim
 registry, scheduler or batch state machine. This is a handoff contract, not a
 guarantee that a language model cannot produce an unsupported summary.
@@ -115,6 +115,6 @@ review instead of launching a duplicate. A generic, empty, refused or truncated
 response is a coverage gap, not ALL CLEAR. Changed relevant inputs invalidate the
 matching evidence, not the original attempt/deadline budget. Coordinator and
 worker outputs must distinguish **eligible**, **deferred**, **blocked**,
-**ready (prepare-only)**, **merged, rollout pending**, **rollout verified** and
+**merged, rollout pending**, **rollout verified** and
 **stopped**; a worker success alone selects none of them. Keep rollout evidence
 and its continuation after PR writes and the writer claim have ended.

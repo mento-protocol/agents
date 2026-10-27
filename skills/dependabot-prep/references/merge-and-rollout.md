@@ -2,7 +2,7 @@
 
 The normal write workflow merges eligible Dependabot PRs at ALL CLEAR and then
 verifies the resulting rollout. No separate maintenance flag or per-PR permission
-record is required. The entry's explicit prepare-only, read-only, scope and hold
+record is required. The entry's read-only, scope and hold
 restrictions still apply; credentials and claims are not authorization.
 
 ## One writer and explicit mutation gates
