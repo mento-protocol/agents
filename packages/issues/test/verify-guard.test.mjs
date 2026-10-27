@@ -1911,85 +1911,97 @@ test("--advisory does not force exit 0 for a child that never started", async ()
   assert.equal(ran.exitCode, 0);
 });
 
-test("a renew mid-flight when the child exits settles, and no further member is started", async () => {
-  // The exit path waits for the tick's real settlement, so a compare-and-swap
-  // that answers after the child has gone still reaches the report — that is
-  // the state of the reference, and a report naming the token before it would
-  // be wrong. What must **not** happen is the rest of the pass: a family's
-  // remaining members are round trips nobody is waiting for, and starting them
-  // is what made the wait unbounded.
-  const { ctx, server, clock } = createTestContext();
-  const first = await acquireClaim(ctx, PR, {});
-  const second = await acquireClaim(ctx, 880, {});
-  const scheduler = manualScheduler();
-  const spawned = realSpawn();
-  const stderr = sink();
-  const renewed = [];
+test(
+  "a renew mid-flight when the child exits settles, and no further member is started",
+  { timeout: 5000 },
+  async () => {
+    // The exit path waits for the tick's real settlement, so a compare-and-swap
+    // that answers after the child has gone still reaches the report — that is
+    // the state of the reference, and a report naming the token before it would
+    // be wrong. What must **not** happen is the rest of the pass: a family's
+    // remaining members are round trips nobody is waiting for, and starting them
+    // is what made the wait unbounded.
+    const { ctx, server, clock } = createTestContext();
+    const first = await acquireClaim(ctx, PR, {});
+    const second = await acquireClaim(ctx, 880, {});
+    const scheduler = manualScheduler();
+    const spawned = realSpawn();
+    const stderr = sink();
+    const renewed = [];
 
-  let releaseCas = () => {};
-  const casHeld = new Promise((resolve) => {
-    releaseCas = resolve;
-  });
-  let slow = false;
+    let releaseCas = () => {};
+    const casHeld = new Promise((resolve) => {
+      releaseCas = resolve;
+    });
+    let announceCas;
+    const casEntered = new Promise((resolve) => {
+      announceCas = resolve;
+    });
+    let slow = false;
 
-  const guarded = guardChild(
-    ctx,
-    [
-      { number: PR, token: first.token },
-      { number: 880, token: second.token },
-    ],
-    {
-      runId: first.owner.runId,
-      purpose: "push",
-      argv: [...LONG_LIVED_ARGV],
-      spawn: spawned.spawn,
-      scheduleRenews: (intervalMs, tick) =>
-        scheduler.schedule(intervalMs, tick),
-      reportSink: stderr.write,
-      stdio: [...LONG_LIVED_STDIO],
-      onRenew: (entry) => {
-        renewed.push(entry.number);
-        return [];
-      },
-      overrides: server.withOperations({
-        async compareAndSwapRef(...args) {
-          if (slow) {
-            slow = false;
-            await casHeld;
-          }
-          return server.operations.compareAndSwapRef(...args);
+    const guarded = guardChild(
+      ctx,
+      [
+        { number: PR, token: first.token },
+        { number: 880, token: second.token },
+      ],
+      {
+        runId: first.owner.runId,
+        purpose: "push",
+        argv: [...LONG_LIVED_ARGV],
+        spawn: spawned.spawn,
+        scheduleRenews: (intervalMs, tick) =>
+          scheduler.schedule(intervalMs, tick),
+        reportSink: stderr.write,
+        stdio: [...LONG_LIVED_STDIO],
+        onRenew: (entry) => {
+          renewed.push(entry.number);
+          return [];
         },
-      }),
-    },
-  );
+        overrides: server.withOperations({
+          async compareAndSwapRef(...args) {
+            if (slow) {
+              slow = false;
+              announceCas();
+              await casHeld;
+            }
+            return server.operations.compareAndSwapRef(...args);
+          },
+        }),
+      },
+    );
 
-  await scheduler.registered;
-  slow = true;
-  // Past `renewAfter`, so the tick really writes, and well before the deadline.
-  clock.advance(11 * MINUTE);
-  const ticked = scheduler.tick();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  spawned.finish();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  releaseCas();
-  await ticked;
+    await scheduler.registered;
+    slow = true;
+    // Past `renewAfter`, so the tick really writes, and well before the deadline.
+    clock.advance(11 * MINUTE);
+    const ticked = scheduler.tick();
+    await casEntered;
+    const childExited = new Promise((resolve) => {
+      spawned.children[0].once("exit", resolve);
+    });
+    spawned.finish();
+    await childExited;
+    releaseCas();
+    await ticked;
 
-  const result = await guarded;
-  const rotated = server.getRefOid(claimRefName(ctx, PR));
-  assert.equal(
-    result.report.claims[0].token,
-    rotated,
-    "the rotation that settled is what the report names",
-  );
-  assert.notEqual(result.report.claims[0].token, first.token);
-  assert.equal(
-    result.report.claims[1].token,
-    second.token,
-    "the member the closing tick never reached is untouched",
-  );
-  assert.deepEqual(renewed, [PR], "and no renew was started for it");
-  assert.equal(result.report.renews.length, 1);
-});
+    const result = await guarded;
+    const rotated = server.getRefOid(claimRefName(ctx, PR));
+    assert.equal(
+      result.report.claims[0].token,
+      rotated,
+      "the rotation that settled is what the report names",
+    );
+    assert.notEqual(result.report.claims[0].token, first.token);
+    assert.equal(
+      result.report.claims[1].token,
+      second.token,
+      "the member the closing tick never reached is untouched",
+    );
+    assert.deepEqual(renewed, [PR], "and no renew was started for it");
+    assert.equal(result.report.renews.length, 1);
+  },
+);
 
 test("nothing the renew loop does can land after the final report", async () => {
   // The probe this case exists for: a tick parked in a transport when the
