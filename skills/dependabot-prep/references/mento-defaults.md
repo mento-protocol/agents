@@ -4,8 +4,8 @@ Use this file with SKILL.md for a repository owned by `mento-protocol` whose
 base carries no `.github/dependabot-prep-policy.json`. SKILL.md's _Resolve
 scope and authority_ states when claims are in effect; this file supplies the
 claim document and the runner for the no-policy case. A repository policy that
-does exist still wins, under the validation rules in SKILL.md and
-[inspection](inspection.md#1-resolve-scope-and-policy).
+does exist still wins, under the validation rules in
+[SKILL.md](../SKILL.md#resolve-scope-and-authority).
 
 ## The default claim document
 

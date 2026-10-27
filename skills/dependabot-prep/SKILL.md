@@ -1,6 +1,6 @@
 ---
 name: dependabot-prep
-description: "Prepare and merge Dependabot PRs at ALL CLEAR, then verify the rollout and deployment health. Research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot maintenance, updates or audits; explicit prepare-only and read-only requests never merge."
+description: "Maintain Dependabot PRs through ALL CLEAR, merge, and verified rollout. Research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot maintenance, updates or read-only audits."
 metadata:
   short-description: Dependabot maintenance through merge and verified rollout
 ---
@@ -10,7 +10,7 @@ metadata:
 Portable workflow revision: `trusted-agent-v2`.
 
 Arguments: `[owner/repo | URL | local path | known alias] [all | PR numbers]
-[--write | --dry-run] [--prepare-only]`. Requires live GitHub access, Git for repairs and pinned
+[--write | --dry-run]`. Requires live GitHub access, Git for repairs and pinned
 repository tools; no dedicated launcher, fixed Node version or root-owned tools.
 
 Drive selected Dependabot PRs through **ALL CLEAR → merge → verified rollout**.
@@ -18,21 +18,15 @@ Merge is the default for an authorized write task, not an exception requiring
 another permission request. ALL CLEAR includes the repository's required checks,
 reviews and addressed feedback on the exact head. After merging, verify the
 resulting rollout and deployment health before calling the work complete.
-An explicit prepare-only request stops at readiness; audit/read-only never writes.
+There is one write workflow; audit/read-only never writes.
 A best guess or successful agent exit is neither readiness nor rollout proof.
 
 This is ordinary trusted coding, with an interactive session's host and credential
 exposure. Worktrees are not sandboxes; this skill does not enforce least privilege.
 Use native tools, runtime permissions and existing authentication. Never extract
-or print tokens or copy production secrets into checkouts. Do not invoke, repair
-or re-pin retired launchers. `SEALED-LEGACY.md`, its five old references, the
-bundled credential-helper and push `scripts/`, and the
-`fixtures/base-context-sentinel.json` self-check are historical compatibility
-artifacts, not this workflow's dependencies. `fixtures/comment-marker-vectors.json`
-and `scripts/comment-marker-vectors.test.mjs` are live: they carry the
-procedural-marker byte authority this workflow posts against. So are
-`assets/mento-pr-claims.json` and `scripts/mento-pr-claims.test.mjs`: the
-default claim document for a Mento repository and the test that pins it.
+or print tokens or copy production secrets into checkouts. The bundled
+`fixtures/comment-marker-vectors.json` and its test pin procedural-marker bytes;
+`assets/mento-pr-claims.json` and its test pin the default Mento claim document.
 
 ## Resolve scope and authority
 
@@ -49,8 +43,7 @@ default claim document for a Mento repository and the test that pins it.
   existing-PR branch pushes, configured reviews, summary comments, replies,
   verified fixed-thread resolutions, diagnosed bounded infrastructure retries,
   exact-head merges at ALL CLEAR and rollout verification, subject to runtime
-  permissions and the repository's substantive gates. Explicit **prepare only**,
-  **do not merge** or `--prepare-only` excludes merging, not preparation writes.
+  permissions and the repository's substantive gates.
   A bare mention/discussion/ambiguous request stays read-only until intent is clear. `audit`, `plan`, `read-only` or
   `--dry-run` overrides writes: API/object inspection and reporting only; no
   checkout creation, candidate execution or remote mutation. Preserve narrower
@@ -210,7 +203,7 @@ before expensive work/fanout. A shared expired login is one prerequisite, not
 a separate PR failure. Continue independent feasible work; never waive the gate.
 While remote CI/review waits, work on independent PRs within host capacity.
 
-## Prepare and babysit
+## Maintain through rollout
 
 1. Research every direct update, including held/manual PRs. Verify upstream
    changelogs/releases/migration guides/advisories/compare URLs. Record source/target
@@ -289,7 +282,7 @@ While remote CI/review waits, work on independent PRs within host capacity.
    than `renewMinutes` does not expire the siblings. Code failures return to
    repair; head/base changes invalidate affected evidence. Continue to readiness,
    a real blocker or deadline.
-8. Unless explicitly prepare-only, merge at ALL CLEAR using
+8. Merge at ALL CLEAR using
    [merge and rollout](references/merge-and-rollout.md), then verify the rollout
    and deployment health. A successful merge alone is not completed maintenance.
 
@@ -389,16 +382,15 @@ report.
 The digest holds only what changes a reader's next action. Line 1 is bold and
 carries the repository, run date, rollout-verified/selected count and split by verdict,
 because the destination previews only the first line. Group PRs by verdict under
-bold headers with counts: rollout verified, rollout pending, ready, needs decision, blocked, read-only; omit empty
+bold headers with counts: rollout verified, rollout pending, needs decision, blocked, read-only; omit empty
 groups. Write bold as `**text**` and italic as `_text_`, in standard Markdown,
 never Slack-native `*text*`: a connector that converts Markdown to Slack
 formatting reads single asterisks as italic, so the headers render italic
 (openclaw/openclaw#34609). Give each PR one identity line and one blockquote. The identity line
 carries one fixed status emoji per verdict, the PR number as a named link, the
 dependency and target version in a code span, check state, review state and
-risk. The blockquote holds the next action in at most two sentences. Ready in an
-explicit prepare-only run: state that merging was excluded by the request.
-Otherwise report the actual merge and rollout outcome or exact remaining gate,
+risk. The blockquote holds the next action in at most two sentences.
+Report the actual merge and rollout outcome or exact remaining gate,
 never an implied merge or deployment success. Needs decision: open with
 `Accept or close:`, or with `Decide:` when a maintainer hold makes defer a valid
 outcome; name what is being decided and why a human must decide, and end with
@@ -412,16 +404,11 @@ Keep SHAs, claim tokens, run ids, build, review and release links, and write
 counts out of the digest. Keep each PR block under about 300 characters. Point
 to the evidence tier, then report the actual mutation inventory: approvals,
 merges, closes, auto-merge changes and thread resolutions, plus rollout results.
-Never reuse a prepare-only "no merge" statement after a merge.
 
 Perform the [completion-proof handoff](references/completion-proof.md) and a
 final live sweep before reporting each PR. Publication proof is necessary for
 locally prepared work, but never substitutes for checks, reviews or mergeability:
 
-- **ready (prepare-only)**: conflict-free current head, required checks
-  and technical reviews satisfied, findings addressed, risks/choices documented,
-  auto-merge null. Merging was explicitly excluded. Never describe unverified
-  threads as resolved or report ALL CLEAR while a required thread gate is blocked.
 - **merged, rollout pending**: fresh GitHub readback proves the exact-head merge,
   but deployment or health verification is still pending or unavailable. Name
   the remaining verification and its actual continuation; do not report done.
@@ -437,7 +424,7 @@ locally prepared work, but never substitutes for checks, reviews or mergeability
 When claims are in effect, release the claim whenever this run
 stops acting on the PR, terminal or not; work in progress stays in the checkout
 and the next writer re-claims. Use the outcome that matches the verdict:
-`ready-for-maintainer-decision`, `needs-decision`, `blocked`, `skipped`,
+`needs-decision`, `blocked`, `skipped`,
 `budget-exhausted`, `family-rollback`, `rehearsal` or `completed`. Release a merge
 claim once no further PR write is needed; retain the rollout owner/continuation.
 
@@ -454,12 +441,11 @@ managed wrappers release their own resources. Preserve resumable checkouts and r
 
 ## Examples
 
-- `Use dependabot-prep to prepare all PRs in mento-protocol/frontend-monorepo.`
+- `Use dependabot-prep to maintain all PRs in mento-protocol/frontend-monorepo.`
 - `Dependabot prep monitoring mono repo.` (Resolve the nickname before writes.)
 - `$dependabot-prep mento-protocol/frontend-monorepo 922 --write`
-- `$dependabot-prep mento-protocol/frontend-monorepo 922 --prepare-only`
 - `/dependabot-prep https://github.com/ORG/REPO all --dry-run`
-- `Prepare Dependabot PR 123 in /path/to/checkout; stop after 45 minutes.`
+- `Maintain Dependabot PR 123 in /path/to/checkout; stop after 45 minutes.`
 
 Slash/dollar syntax depends on the client; natural language works across runtimes.
 For cron, name this skill, repository, mode, budget, host profile and destination.
