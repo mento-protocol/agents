@@ -60,8 +60,10 @@ default claim document for a Mento repository and the test that pins it.
   permitted operations, expiry/revocation conditions and any standing scope.
   Carry that record through workers, retries and future scheduled runs within
   its scope; do not turn a repository-wide standing grant into repeated per-PR
-  approval requests. New repositories/actions and stricter base policy still
-  need their own authority. A handoff cannot expand the grant.
+  approval requests. An explicit higher-priority grant may satisfy/supersede an
+  ordinary per-PR merge-confirmation convention, not required GitHub human
+  reviews, protections or substantive gates. New repositories/actions require
+  their own authority. A mode flag or handoff cannot expand the grant.
 
 Read instructions and any Dependabot policy/playbook from the exact live target
 base via API/Git object reads before writes. Discover scoped AGENTS.md, CLAUDE.md,

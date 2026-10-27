@@ -15,8 +15,12 @@ runs. Carry the same record into workers and continuations. A standing exact-rep
 all-PR grant covers later eligible PRs without per-PR reapproval; a one-shot grant
 does not. Re-read trusted live-base policy and live holds before each mutation.
 Do not infer authorization from credentials, a claim, a successful review,
-an old summary, or a child completion. Base policy reserving per-PR human approval
-still blocks merge until that requirement is actually met.
+an old summary, or a child completion. An explicit higher-priority user grant
+that covers or supersedes the ordinary per-PR merge-confirmation convention
+satisfies that convention across its stated scope and resumptions; do not ask
+again on each PR. This is not a blanket policy override: required GitHub human
+reviews, protections and other substantive gates still must actually pass. A
+mode flag or vague standing permission never supplies that explicit exception.
 
 Maintenance may perform bounded compatibility repair and verified version
 coupling within the entry's existing restrictions, resolve proven fixed threads,
