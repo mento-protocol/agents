@@ -88,7 +88,7 @@ another scheduler or claim authority. Before fanout record shared prerequisites
 (reviewer capability and documentation/auth access) once, with dependent work
 separated from independently eligible PRs. Keep these fields through handoffs:
 
-- Original campaign/run ID, authority source and exact-repo standing scope,
+- Original campaign/run ID and repository/PR scope (including explicit limits),
   start/deadline, active repair time, and attempts consumed by recurring issue.
   Head changes, provider switches and child restarts do not reset attempts.
 - Per-PR eligibility and its source: live identity/head/base, holds, draft,
@@ -115,4 +115,6 @@ review instead of launching a duplicate. A generic, empty, refused or truncated
 response is a coverage gap, not ALL CLEAR. Changed relevant inputs invalidate the
 matching evidence, not the original attempt/deadline budget. Coordinator and
 worker outputs must distinguish **eligible**, **deferred**, **blocked**,
-**ready**, **merged** and **stopped**; a worker success alone selects none of them.
+**ready (prepare-only)**, **merged, rollout pending**, **rollout verified** and
+**stopped**; a worker success alone selects none of them. Keep rollout evidence
+and its continuation after PR writes and the writer claim have ended.

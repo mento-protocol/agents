@@ -1,25 +1,25 @@
 ---
 name: dependabot-prep
-description: "Prepare one or all Dependabot PRs in a specified GitHub repository for a human merge decision: research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot prep, updates or audits; explicit authorized-maintenance mode also permits gated squash merges. Never approve reviews."
+description: "Prepare and merge Dependabot PRs at ALL CLEAR, then verify the rollout and deployment health. Research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot maintenance, updates or audits; explicit prepare-only and read-only requests never merge."
 metadata:
-  short-description: Portable Dependabot preparation for human merge decisions
+  short-description: Dependabot maintenance through merge and verified rollout
 ---
 
-# Prepare Dependabot pull requests
+# Maintain Dependabot pull requests
 
 Portable workflow revision: `trusted-agent-v2`.
 
 Arguments: `[owner/repo | URL | local path | known alias] [all | PR numbers]
-[--write | --dry-run] [--authorized-maintenance]`. Requires live GitHub access, Git for repairs and pinned
+[--write | --dry-run] [--prepare-only]`. Requires live GitHub access, Git for repairs and pinned
 repository tools; no dedicated launcher, fixed Node version or root-owned tools.
 
-Drive selected Dependabot PRs to **ready for maintainer decision**: conflict-free,
-required exact-head checks and technical reviews satisfied, actionable feedback
-addressed, and researched risks and consequential decisions visible on the PR.
-By default final human approval and merge remain human actions. Explicit
-`--authorized-maintenance` uses the bounded authority contract below; it is not
-implied by `--write`, credentials or a schedule. A best guess is not passed
-validation, and an agent's successful exit is not readiness evidence.
+Drive selected Dependabot PRs through **ALL CLEAR → merge → verified rollout**.
+Merge is the default for an authorized write task, not an exception requiring
+another permission request. ALL CLEAR includes the repository's required checks,
+reviews and addressed feedback on the exact head. After merging, verify the
+resulting rollout and deployment health before calling the work complete.
+An explicit prepare-only request stops at readiness; audit/read-only never writes.
+A best guess or successful agent exit is neither readiness nor rollout proof.
 
 This is ordinary trusted coding, with an interactive session's host and credential
 exposure. Worktrees are not sandboxes; this skill does not enforce least privilege.
@@ -46,8 +46,11 @@ default claim document for a Mento repository and the test that pins it.
   Dependabot PRs in that repository, accounting for held/draft updates too.
 - An explicit request to use this skill to **prepare/fix/get PRs ready**, or
   `--write`, authorizes scoped installs, builds, tests, hooks, edits, commits,
-  existing-PR branch pushes, configured reviews, summary comments, replies and
-  verified fixed-thread resolutions, subject to runtime/repository permissions.
+  existing-PR branch pushes, configured reviews, summary comments, replies,
+  verified fixed-thread resolutions, diagnosed bounded infrastructure retries,
+  exact-head merges at ALL CLEAR and rollout verification, subject to runtime
+  permissions and the repository's substantive gates. Explicit **prepare only**,
+  **do not merge** or `--prepare-only` excludes merging, not preparation writes.
   A bare mention/discussion/ambiguous request stays read-only until intent is clear. `audit`, `plan`, `read-only` or
   `--dry-run` overrides writes: API/object inspection and reporting only; no
   checkout creation, candidate execution or remote mutation. Preserve narrower
@@ -55,15 +58,12 @@ default claim document for a Mento repository and the test that pins it.
   arguments, not a bundled executable CLI parser.
 - A scheduled job must explicitly name the repository and write/audit task.
   Installing a skill does not authorize scheduled writes.
-- **Authorized maintenance:** read [maintenance authority](references/maintenance-authority.md)
-  before selecting this mode. Record the explicit grant, exact repositories,
-  permitted operations, expiry/revocation conditions and any standing scope.
-  Carry that record through workers, retries and future scheduled runs within
-  its scope; do not turn a repository-wide standing grant into repeated per-PR
-  approval requests. An explicit higher-priority grant may satisfy/supersede an
-  ordinary per-PR merge-confirmation convention, not required GitHub human
-  reviews, protections or substantive gates. New repositories/actions require
-  their own authority. A mode flag or handoff cannot expand the grant.
+- Standing authorization remains effective across workers, resumptions and
+  scheduled runs in its stated scope. Do not require an opt-in flag, a separate
+  exception record or renewed per-PR merge permission. An applicable user grant
+  satisfies an ordinary merge-confirmation convention, never a required GitHub
+  approving review, protection, substantive check or maintainer hold. Read
+  [merge and rollout](references/merge-and-rollout.md) before the first merge.
 
 Read instructions and any Dependabot policy/playbook from the exact live target
 base via API/Git object reads before writes. Discover scoped AGENTS.md, CLAUDE.md,
@@ -102,9 +102,10 @@ rollout: this revision no longer acquires that lock.
 
 - Never approve or dismiss reviews, close, mark drafts ready, change auto-merge,
   unresolve threads, change repository settings/protections, delete branches,
-  create replacement PRs or deploy to production. Merge is prohibited in default
-  prep mode; only the explicit maintenance contract permits exact-head squash.
-  No Dependabot rebase/recreate commands or production-infrastructure approval.
+  create replacement PRs or approve production-infrastructure changes. A merge's
+  standard repository deployment is part of the rollout to verify; this does not
+  authorize a new deployment mechanism or manual infrastructure apply.
+  No Dependabot rebase/recreate commands.
 - Only write to authenticated open, non-draft, same-repository Dependabot PRs with
   existing recognized Dependabot refs and `autoMergeRequest: null`. On github.com,
   verify author login `dependabot[bot]`, numeric ID `49699333`, type `Bot`; Enterprise
@@ -131,8 +132,8 @@ rollout: this revision no longer acquires that lock.
   a proven fast-forward to the existing PR ref using an exact observed-head lease
   and explicit new-SHA refspec. No bare force, implicit lease or base-branch push.
   Rejected/uncertain writes require reconciliation, never blind retries. Check
-  reruns require explicit authorization and proven infrastructure failure. An
-  applicable maintenance grant supplies that authority, not the diagnosis.
+  reruns require proven infrastructure failure and the bounded recovery procedure
+  in [merge and rollout](references/merge-and-rollout.md); no blind retry loops.
 
 During an authorized preparation task, resolve a review thread only after
 verifying that published fixes sufficiently address every actionable finding in
@@ -163,8 +164,8 @@ whether this run held, renewed or took over that claim. `claims read` writes
 nothing; `claims claim` takes an expired claim over, so never read with it.
 Discover effective required checks/producers, review/merge rules, pinned package
 manager, lockfiles, engines, catalogs, overrides and standalone runtime pins. Do
-not guess when lockfiles conflict. Separate technical preparation from final
-human approval.
+not guess when lockfiles conflict. Required GitHub approving reviews are actual
+repository gates, distinct from unnecessary per-PR merge confirmation.
 
 Read [runtime capabilities](references/runtime-capabilities.md) before local work
 or scheduled delivery, and [procedural markers](references/procedural-markers.md)
@@ -288,6 +289,9 @@ While remote CI/review waits, work on independent PRs within host capacity.
    than `renewMinutes` does not expire the siblings. Code failures return to
    repair; head/base changes invalidate affected evidence. Continue to readiness,
    a real blocker or deadline.
+8. Unless explicitly prepare-only, merge at ALL CLEAR using
+   [merge and rollout](references/merge-and-rollout.md), then verify the rollout
+   and deployment health. A successful merge alone is not completed maintenance.
 
 Installed `address-feedback`/`babysit-pr` may handle a defined subtask, but do not
 duplicate watchers/reviewers or inherit conflicting merge/thread authority. This
@@ -383,18 +387,19 @@ message timestamp carries the date. Keep the inventory evidence in the local
 report.
 
 The digest holds only what changes a reader's next action. Line 1 is bold and
-carries the repository, run date, ready/selected count and the split by verdict,
+carries the repository, run date, rollout-verified/selected count and split by verdict,
 because the destination previews only the first line. Group PRs by verdict under
-bold headers with counts: ready, needs decision, blocked, read-only; omit empty
+bold headers with counts: rollout verified, rollout pending, ready, needs decision, blocked, read-only; omit empty
 groups. Write bold as `**text**` and italic as `_text_`, in standard Markdown,
 never Slack-native `*text*`: a connector that converts Markdown to Slack
 formatting reads single asterisks as italic, so the headers render italic
 (openclaw/openclaw#34609). Give each PR one identity line and one blockquote. The identity line
 carries one fixed status emoji per verdict, the PR number as a named link, the
 dependency and target version in a code span, check state, review state and
-risk. The blockquote holds the ask in at most two sentences. Ready in prep mode: state that
-the merge decision is the maintainer's. Maintenance mode reports the actual
-gated merge outcome or exact remaining gate, never an implied merge. Needs decision: open with
+risk. The blockquote holds the next action in at most two sentences. Ready in an
+explicit prepare-only run: state that merging was excluded by the request.
+Otherwise report the actual merge and rollout outcome or exact remaining gate,
+never an implied merge or deployment success. Needs decision: open with
 `Accept or close:`, or with `Decide:` when a maintainer hold makes defer a valid
 outcome; name what is being decided and why a human must decide, and end with
 the bold research recommendation; a missing technical review changes the review
@@ -406,20 +411,23 @@ state when any PR reports an exact-head review. Use named links, never raw URLs.
 Keep SHAs, claim tokens, run ids, build, review and release links, and write
 counts out of the digest. Keep each PR block under about 300 characters. Point
 to the evidence tier, then report the actual mutation inventory: approvals,
-merges, closes, auto-merge changes and thread resolutions. Never reuse a prep-only
-"no merge" statement after an authorized maintenance merge.
+merges, closes, auto-merge changes and thread resolutions, plus rollout results.
+Never reuse a prepare-only "no merge" statement after a merge.
 
 Perform the [completion-proof handoff](references/completion-proof.md) and a
 final live sweep before reporting each PR. Publication proof is necessary for
 locally prepared work, but never substitutes for checks, reviews or mergeability:
 
-- **ready for maintainer decision**: conflict-free current head, required checks
+- **ready (prepare-only)**: conflict-free current head, required checks
   and technical reviews satisfied, findings addressed, risks/choices documented,
-  auto-merge null. Final human approval remains human merge-gate work. List any
-  remaining unresolved threads and their reasons. Maintenance mode additionally
-  records **merged** only after exact-head merge readback under the authority
-  reference; never describe unverified threads as resolved
-  or report ALL CLEAR while a required thread gate is blocked.
+  auto-merge null. Merging was explicitly excluded. Never describe unverified
+  threads as resolved or report ALL CLEAR while a required thread gate is blocked.
+- **merged, rollout pending**: fresh GitHub readback proves the exact-head merge,
+  but deployment or health verification is still pending or unavailable. Name
+  the remaining verification and its actual continuation; do not report done.
+- **rollout verified**: merged state, deployed revision (or equivalent artifact),
+  completed rollout and post-deploy health/smoke evidence are verified. For a
+  non-deploying change, record why and the applicable post-merge CI/install proof.
 - **blocked**: failed/unknown validation, access or exhausted budget; state exact
   next work and saved state. Time exhaustion is not a product decision.
 - **needs decision**: explicit hold, excluded scope or real authority boundary;
@@ -430,7 +438,8 @@ When claims are in effect, release the claim whenever this run
 stops acting on the PR, terminal or not; work in progress stays in the checkout
 and the next writer re-claims. Use the outcome that matches the verdict:
 `ready-for-maintainer-decision`, `needs-decision`, `blocked`, `skipped`,
-`budget-exhausted`, `family-rollback`, `rehearsal` or `completed`.
+`budget-exhausted`, `family-rollback`, `rehearsal` or `completed`. Release a merge
+claim once no further PR write is needed; retain the rollout owner/continuation.
 
 The evidence tier carries, per PR, the exact head and base SHAs, old→new
 transitions, check/review evidence with links, upstream links, auto-merge state,
@@ -448,6 +457,7 @@ managed wrappers release their own resources. Preserve resumable checkouts and r
 - `Use dependabot-prep to prepare all PRs in mento-protocol/frontend-monorepo.`
 - `Dependabot prep monitoring mono repo.` (Resolve the nickname before writes.)
 - `$dependabot-prep mento-protocol/frontend-monorepo 922 --write`
+- `$dependabot-prep mento-protocol/frontend-monorepo 922 --prepare-only`
 - `/dependabot-prep https://github.com/ORG/REPO all --dry-run`
 - `Prepare Dependabot PR 123 in /path/to/checkout; stop after 45 minutes.`
 

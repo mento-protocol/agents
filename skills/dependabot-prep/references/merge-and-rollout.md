@@ -1,39 +1,13 @@
-# Explicit authorized maintenance
+# Merge and verify the rollout
 
-This opt-in contract extends `trusted-agent-v2`; ordinary prep remains prep-only.
-It is not a new scheduler, readiness checker or claim registry. A job selects
-`--authorized-maintenance` only with an explicit user/repository grant covering
-its exact canonical repository and the actions below. A mode flag alone is not
-that grant. `--dry-run`, holds, drafts and narrower restrictions still win.
-
-## Carry authority, do not manufacture it
-
-Keep the source of authorization in the existing run report: canonical host and
-repository allowlist, PR selection (specific numbers or all eligible Dependabot
-PRs), allowed operations, expiry/revocation, and whether it covers future daily
-runs. Carry the same record into workers and continuations. A standing exact-repo
-all-PR grant covers later eligible PRs without per-PR reapproval; a one-shot grant
-does not. Re-read trusted live-base policy and live holds before each mutation.
-Do not infer authorization from credentials, a claim, a successful review,
-an old summary, or a child completion. An explicit higher-priority user grant
-that covers or supersedes the ordinary per-PR merge-confirmation convention
-satisfies that convention across its stated scope and resumptions; do not ask
-again on each PR. This is not a blanket policy override: required GitHub human
-reviews, protections and other substantive gates still must actually pass. A
-mode flag or vague standing permission never supplies that explicit exception.
-
-Maintenance may perform bounded compatibility repair and verified version
-coupling within the entry's existing restrictions, resolve proven fixed threads,
-retry diagnosed infrastructure failures, and squash an exact head after ALL CLEAR.
-It cannot approve or dismiss reviews, ignore findings, waive checks/security,
-change holds/protections, enable auto-merge, approve production infrastructure,
-expand repositories, or rewrite history. No desired success percentage changes
-eligibility. Report measured outcomes and denominators only; do not assert a
-90% automation target has been achieved without evidence.
+The normal write workflow merges eligible Dependabot PRs at ALL CLEAR and then
+verifies the resulting rollout. No separate maintenance flag or per-PR permission
+record is required. The entry's explicit prepare-only, read-only, scope and hold
+restrictions still apply; credentials and claims are not authorization.
 
 ## One writer and explicit mutation gates
 
-Use existing claims, not a second mutex. Before the first affected mutation,
+Where claims are in effect, use them, not a second mutex. Before the first affected mutation,
 preflight the trusted runner's version and supported gates. Version 0.3.0 of
 `@mento-protocol/issues` adds `thread-resolve`, `check-rerun`, and `merge` to
 `claims guard`. They are always mandatory, including with older config lists;
@@ -71,9 +45,10 @@ indeterminate evidence blocks the affected action. Repository-owned policies for
 hosted-review waiting/fallback belong in that checker; this skill consumes its
 result and reasons rather than copying a timeout or inventing an alternate gate.
 
-Immediately before merging, re-read authority, eligibility, head/base and ALL
-CLEAR freshness. Hold the sole writer claim and execute the repository-supported
-squash operation through `claims guard --gate merge` with the exact expected head
+Immediately before merging, re-read eligibility, head/base and ALL CLEAR
+freshness. Execute the repository-supported squash operation with the exact
+expected head; where claims apply, hold the sole writer claim and execute it
+through `claims guard --gate merge`
 (e.g. `gh pr merge <n> --repo <owner/repo> --squash --match-head-commit <sha>`).
 Never use `--admin`, enable auto-merge, delete the branch, or retry on drift.
 Preflight the merge mechanism too: if a required merge queue or the selected
@@ -86,8 +61,36 @@ stays uncertain until readback proves the outcome; never issue a second merge
 blindly. ALL CLEAR is point-in-time evidence, not an atomic lock on GitHub; a
 head/base/feedback change before the command requires re-evaluation.
 
-Independent PRs can progress concurrently within the host resource adapter.
-Assign one writer per PR; serialize overlapping families, shared worktrees,
-lockfiles and integration. A worker may return ready without merge authority;
-its coordinator consumes the evidence and performs only its own authorized next
-step. Scheduled reporting remains exceptions-only under the entry contract.
+## Rollout verification is part of completion
+
+Before merging, identify the repository's normal deployment/release path and
+the health checks relevant to the changed dependency. Retain the available
+pre-change health baseline so existing failures are not attributed to this PR.
+Use existing deployment status, CI and monitoring tools; do not build a parallel
+deployment controller or change production permissions.
+
+After merging:
+
+1. Follow the actual deployment/release triggered by the merge. Bind its target
+   environment and deployed revision or artifact to the merged change. Green PR
+   CI, a queued workflow or a successful merge is not proof of a healthy deploy.
+2. Wait for rollout completion using events or bounded scheduled continuation.
+   Check the existing post-deploy health signals and run the relevant smoke
+   checks for the affected application or service. Compare errors, availability
+   and dependency-specific behavior with the baseline where available. State
+   what was checked; do not claim that all possible regressions were excluded.
+3. For library/tooling changes without a deployment, verify the applicable
+   post-merge CI and release/install smoke checks instead. Record why deployment
+   is not applicable; do not invent a production rollout to satisfy a checklist.
+4. If rollout or health fails, stop dependent merges, diagnose the failure and
+   use the repository's authorized repair/revert path. Preserve independent
+   unblocked work. Escalate only the concrete residual blocker or action needing
+   human authority; do not retry a failed rollout blindly.
+
+If deployment is delayed, manual, inaccessible or outside the run budget,
+report **merged, rollout pending** with the exact missing proof and an observed
+owner or scheduled continuation. Never mark it complete or silently abandon it.
+Keep deployed revision, rollout/check URLs, observation time and health results
+in the existing report; no new approval ledger or attestation format is needed.
+Release PR claims once writes finish; rollout observation does not require
+holding a writer claim on a closed PR. Scheduled reporting stays exceptions-only.
