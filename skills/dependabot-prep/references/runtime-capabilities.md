@@ -44,7 +44,7 @@ Claims are in effect when the repository policy carries a `coordination.claims`
 block, or when the repository is under `mento-protocol/` and carries no policy
 file; [Mento defaults](mento-defaults.md) supplies the claim document and the
 pinned runner for the second case. Then the claim ref is the sole per-PR writer
-authority. SKILL.md's _Inventory and host setup_ and _Prepare and babysit_
+authority. SKILL.md's _Inventory and host setup_ and _Maintain through rollout_
 steps define the claim lifecycle — which command runs when, and the token each
 one takes. There is no hand-edited path into that ref: an expired claim is
 taken over only by the claim command's own takeover. Outside those two cases,
