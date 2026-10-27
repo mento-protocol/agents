@@ -24,6 +24,7 @@ import { CLAIM_PROFILES, claimProfile } from "../claims/profile.mjs";
 import {
   FENCE_PURPOSE_ALIASES,
   FENCE_PURPOSES,
+  MAINTENANCE_FENCE_PURPOSES,
   canonicalFencePurpose,
 } from "../claims/verify.mjs";
 import {
@@ -305,8 +306,9 @@ function assertFencePurposes(claims, key) {
  *
  * The two lists are the policy's control surface, so they decide which gates
  * `verify` and `guard` enforce. That makes completeness a fail-closed rule:
- * every purpose this package knows must appear in exactly one list, or a
- * document could silently leave a gate with no kind at all.
+ * every original purpose must appear in exactly one list. The maintenance
+ * purposes added in 0.3 default to mandatory in older documents and cannot
+ * be demoted, so upgrading never turns a new mutation into an advisory one.
  *
  * @param {string[]} requiredBefore canonical mandatory purposes.
  * @param {string[]} advisoryBefore canonical advisory purposes.
@@ -327,6 +329,17 @@ function buildFencePurposes(requiredBefore, advisoryBefore) {
   };
   assign(requiredBefore, "mandatory");
   assign(advisoryBefore, "advisory");
+  for (const purpose of MAINTENANCE_FENCE_PURPOSES) {
+    if (table[purpose] === "advisory") {
+      throw configError(
+        `Maintenance fence purpose ${purpose} cannot be advisory`,
+        {
+          details: { purpose },
+        },
+      );
+    }
+    table[purpose] = "mandatory";
+  }
   const missing = Object.keys(FENCE_PURPOSES).filter(
     (purpose) => table[purpose] === undefined,
   );

@@ -145,7 +145,7 @@ const BASE_CLAIMS = Object.freeze({
   renewMinutes: 10,
   graceMinutes: 5,
   label: "dependabot-prep:claimed",
-  package: { name: "@mento-protocol/issues", version: "0.2.0" },
+  package: { name: "@mento-protocol/issues", version: "0.3.0" },
 });
 
 function packageDocument(claims = {}) {
@@ -577,7 +577,7 @@ test("the loader rejects renewMinutes twice over ttlMinutes, minRemainingSeconds
     warned.document.warnings.map((warning) => warning.stage),
     ["package-version"],
   );
-  assert.match(warned.document.warnings[0].message, /0\.2\.0.*0\.9\.9/u);
+  assert.match(warned.document.warnings[0].message, /0\.3\.0.*0\.9\.9/u);
 });
 
 test("the config rejects a package block without an exact version", async () => {
@@ -622,7 +622,7 @@ test("the config rejects a package block without an exact version", async () => 
   const accepted = normalizeConfigDocument(packageDocument());
   assert.deepEqual(accepted.claims.package, {
     name: "@mento-protocol/issues",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 });
 
@@ -1668,7 +1668,7 @@ test("doctor reports a measured clock offset and warns above half the budget", a
   assert.equal(inBudget.document.clock.warn, false);
   assert.equal(inBudget.document.clock.measured, true);
   assert.deepEqual(inBudget.document.scopes, ["repo", "workflow"]);
-  assert.equal(inBudget.document.version, "0.2.0");
+  assert.equal(inBudget.document.version, "0.3.0");
   assert.match(inBudget.document.exitCodes.rule, /^0 proceed; 10\/11\/14\/15/u);
   assert.deepEqual(inBudget.document.warnings, []);
 
@@ -6938,4 +6938,39 @@ test("a policy saying the same thing twice is not a contradiction", async () => 
   ]);
   assert.equal(contradictory.exitCode, 3);
   assert.match(contradictory.document.error.message, /and they differ/u);
+});
+
+test("CLI maintenance gates dispatch with a held claim and reject advisory bypass", async () => {
+  for (const gate of ["thread-resolve", "check-rerun", "merge"]) {
+    const context = harness();
+    const claimed = await claimOnce(context);
+    const argv = [
+      "claims",
+      "guard",
+      "--pr",
+      String(PR),
+      "--token",
+      claimed.document.claim.token,
+      "--run-id",
+      claimed.document.claim.runId,
+      "--gate",
+      gate,
+    ];
+    const refused = recordingSpawn(0);
+    const advisory = await context.run(
+      [...argv, "--advisory", "--", "node", "--version"],
+      {
+        spawn: refused.spawn,
+      },
+    );
+    assert.equal(advisory.exitCode, 2);
+    assert.equal(refused.calls.length, 0);
+    const spawned = recordingSpawn(0);
+    const held = await context.run([...argv, "--", "node", "--version"], {
+      spawn: spawned.spawn,
+    });
+    assert.equal(held.exitCode, 0);
+    assert.equal(spawned.calls.length, 1);
+    assert.equal(held.stderrDocuments.at(-1).gate, "mandatory");
+  }
 });

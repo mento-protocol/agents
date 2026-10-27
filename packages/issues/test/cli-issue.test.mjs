@@ -54,7 +54,7 @@ const BASE_ISSUE_CLAIMS = Object.freeze({
   maxTtlMinutes: 360,
   label: "issue-sweep:claimed",
   verifySubjectKind: false,
-  package: { name: "@mento-protocol/issues", version: "0.2.0" },
+  package: { name: "@mento-protocol/issues", version: "0.3.0" },
 });
 
 const BASE_PR_CLAIMS = Object.freeze({
@@ -66,7 +66,7 @@ const BASE_PR_CLAIMS = Object.freeze({
   renewMinutes: 10,
   graceMinutes: 5,
   label: "dependabot-prep:claimed",
-  package: { name: "@mento-protocol/issues", version: "0.2.0" },
+  package: { name: "@mento-protocol/issues", version: "0.3.0" },
 });
 
 function issueDocument(claims = {}) {

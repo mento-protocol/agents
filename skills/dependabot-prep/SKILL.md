@@ -1,6 +1,6 @@
 ---
 name: dependabot-prep
-description: "Prepare one or all Dependabot PRs in a specified GitHub repository for a human merge decision: research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot prep, updates or audits; never approve or merge."
+description: "Prepare one or all Dependabot PRs in a specified GitHub repository for a human merge decision: research upgrades, repair conflicts and compatibility, validate, and address reviews. Works in ordinary Codex, Claude and OpenClaw coding sessions on macOS or Linux. Use for Dependabot prep, updates or audits; explicit authorized-maintenance mode also permits gated squash merges. Never approve reviews."
 metadata:
   short-description: Portable Dependabot preparation for human merge decisions
 ---
@@ -10,13 +10,15 @@ metadata:
 Portable workflow revision: `trusted-agent-v2`.
 
 Arguments: `[owner/repo | URL | local path | known alias] [all | PR numbers]
-[--write | --dry-run]`. Requires live GitHub access, Git for repairs and pinned
+[--write | --dry-run] [--authorized-maintenance]`. Requires live GitHub access, Git for repairs and pinned
 repository tools; no dedicated launcher, fixed Node version or root-owned tools.
 
 Drive selected Dependabot PRs to **ready for maintainer decision**: conflict-free,
 required exact-head checks and technical reviews satisfied, actionable feedback
 addressed, and researched risks and consequential decisions visible on the PR.
-Final human approval and merge remain human actions. A best guess is not passed
+By default final human approval and merge remain human actions. Explicit
+`--authorized-maintenance` uses the bounded authority contract below; it is not
+implied by `--write`, credentials or a schedule. A best guess is not passed
 validation, and an agent's successful exit is not readiness evidence.
 
 This is ordinary trusted coding, with an interactive session's host and credential
@@ -53,6 +55,13 @@ default claim document for a Mento repository and the test that pins it.
   arguments, not a bundled executable CLI parser.
 - A scheduled job must explicitly name the repository and write/audit task.
   Installing a skill does not authorize scheduled writes.
+- **Authorized maintenance:** read [maintenance authority](references/maintenance-authority.md)
+  before selecting this mode. Record the explicit grant, exact repositories,
+  permitted operations, expiry/revocation conditions and any standing scope.
+  Carry that record through workers, retries and future scheduled runs within
+  its scope; do not turn a repository-wide standing grant into repeated per-PR
+  approval requests. New repositories/actions and stricter base policy still
+  need their own authority. A handoff cannot expand the grant.
 
 Read instructions and any Dependabot policy/playbook from the exact live target
 base via API/Git object reads before writes. Discover scoped AGENTS.md, CLAUDE.md,
@@ -89,9 +98,11 @@ rollout: this revision no longer acquires that lock.
 
 ## Hard boundaries
 
-- Never approve, dismiss reviews, merge, close, mark drafts ready, change auto-merge,
+- Never approve or dismiss reviews, close, mark drafts ready, change auto-merge,
   unresolve threads, change repository settings/protections, delete branches,
-  create replacement PRs or deploy to production. No Dependabot rebase/recreate commands.
+  create replacement PRs or deploy to production. Merge is prohibited in default
+  prep mode; only the explicit maintenance contract permits exact-head squash.
+  No Dependabot rebase/recreate commands or production-infrastructure approval.
 - Only write to authenticated open, non-draft, same-repository Dependabot PRs with
   existing recognized Dependabot refs and `autoMergeRequest: null`. On github.com,
   verify author login `dependabot[bot]`, numeric ID `49699333`, type `Bot`; Enterprise
@@ -118,7 +129,8 @@ rollout: this revision no longer acquires that lock.
   a proven fast-forward to the existing PR ref using an exact observed-head lease
   and explicit new-SHA refspec. No bare force, implicit lease or base-branch push.
   Rejected/uncertain writes require reconciliation, never blind retries. Check
-  reruns require explicit authorization and proven infrastructure failure.
+  reruns require explicit authorization and proven infrastructure failure. An
+  applicable maintenance grant supplies that authority, not the diagnosis.
 
 During an authorized preparation task, resolve a review thread only after
 verifying that published fixes sufficiently address every actionable finding in
@@ -128,9 +140,13 @@ resolve the thread and read back its state. Apply the same open-PR, draft, hold
 and repository-policy restrictions as other preparation writes. For repositories
 with a revision-pinned preparation policy, resolve threads only when that policy
 explicitly permits thread resolution; a matching workflow revision alone does
-not grant this capability. Thread resolution remains disabled when claims are
-in effect: the current claim tool has no guarded resolution gate.
-Continue other authorized preparation work and report the remaining thread gate.
+not grant this capability. When claims are in effect, require a capable trusted
+runner (the bundled default pins `@mento-protocol/issues@0.3.0`) and execute
+the resolution command under `claims guard --gate thread-resolve`. This gate
+is mandatory and cannot be advisory; a point-in-time verify is not a fence.
+Older policy-pinned runners block this operation until separately upgraded,
+not other preparation. Read back thread state after success or uncertainty
+before retrying. The guard proves writer ownership, not finding disposition.
 Leave unaddressed or declined findings open. Confidence alone is not proof of a
 fix. Do not resolve threads during audit or read-only work.
 
@@ -151,12 +167,12 @@ human approval.
 Read [runtime capabilities](references/runtime-capabilities.md) before local work
 or scheduled delivery, and [procedural markers](references/procedural-markers.md)
 before posting a comment or a reply. Select actual-host state and resource
-controls, recording what is enforced, and acquire the heavy-tree slot before
-any heavy work. That slot is per host, not per repository: one slot covers this
-host whatever repository this run targets, so a run for another repository
-cannot start a second heavy tree beside it. Use the repository's documented
-host slot path when prescribed. Never start a second heavy tree on this host
-and never clear someone else's slot. When claims are in
+controls, recording what is enforced. Use the host-supplied managed wrapper
+and its configured capacity for every heavy command, including hooks. Never
+create manual slot directories beside a managed pool or override its capacity.
+Only a host without a managed facility uses the single-slot fallback in the
+reference. Independent work may overlap within that capacity; serialize work
+on shared trees, lockfiles and PRs. When claims are in
 effect, the claim ref is the sole per-PR writer authority: claim each
 selected PR before its first write to that PR, never write to a PR another live
 owner holds, and never take a claim from another owner except through the claim
@@ -184,9 +200,12 @@ renewals old with exit 14 `not-held`: verify prints the current token as
 
 Default budget: one hour total, 30 active repair minutes per PR, three attempts
 per recurring issue, unless user/repository/job specifies otherwise. Persist
-start/deadline/attempts; resumes and provider switches do not reset them. One heavy
-tree at a time, including hooks, installs, builds, tests and browsers. While remote
-CI/review waits, work on independent PRs without a second heavy tree.
+start/deadline/attempts; resumes and provider switches do not reset them. Read
+[completion proof](references/completion-proof.md) for the continuation ledger.
+Preflight required reviewer capability and shared documentation access once
+before expensive work/fanout. A shared expired login is one prerequisite, not
+a separate PR failure. Continue independent feasible work; never waive the gate.
+While remote CI/review waits, work on independent PRs within host capacity.
 
 ## Prepare and babysit
 
@@ -216,7 +235,12 @@ CI/review waits, work on independent PRs without a second heavy tree.
    eligible target unless policy specifies another. Explain on allowed affected
    PRs, leave siblings open and never count siblings ready through the target's
    CI.
-5. Review the complete diff. Before pushing re-read open/draft/hold, identity,
+5. Review the complete diff. Reuse an existing review only for the same
+   repository, base, head/snapshot, scope and reviewer configuration, with
+   findings disposed. Empty/generic/refusal output is missing coverage, not clean.
+   If a required reviewer is unavailable, record the exact capability gap and
+   route the pinned diff to an authorized independent reviewer; never launch a
+   nested coding CLI to bypass runtime restrictions. Before pushing re-read open/draft/hold, identity,
    ref/head, auto-merge and live base. When claims are in effect,
    run the push itself through `claims guard --gate push`, which re-reads the
    claim ref, requires its LOCK oid to equal this run's token and its `ownerRunId`
@@ -330,9 +354,12 @@ with this reversible choice**, ask a precise question and continue safe work.
 Low confidence does not make unverified gates ready. Holds prohibit comments too;
 put their research in the final report.
 
-Scheduled delivery: start, actionable exceptions and final report only—no periodic
-Slack chatter. Keep detailed progress locally. Interactive sessions follow runtime
-progress requirements. Deliver the final report in two tiers to the invoking
+Scheduled delivery: actionable exceptions only by default; no start, all-green,
+no-op or periodic messages unless the job explicitly requests them. Retain the
+full final report and delivery/dedup receipts locally; send a digest/evidence tier
+only for a new actionable blocker, decision, authority gap or failed continuation.
+Interactive sessions follow runtime progress requirements. When a report is due,
+deliver it in two tiers to the invoking
 channel or explicitly configured destination, never only a disk path: a digest as
 the message, and an evidence tier as a reply in its thread. If the destination
 cannot thread, post the evidence tier as the next message with its own dated
@@ -342,8 +369,9 @@ sections. Verify external sends and save receipts; surface failure and return
 useful fallback text without duplicating confirmed delivery. Do not infer Slack
 destinations for Mac sessions.
 
-When an all-PR selection finds no open Dependabot PR, drafts and held updates
-included, the final report is one line with no evidence tier:
+For interactive or explicitly requested routine reports, when an all-PR selection
+finds no open Dependabot PR, drafts and held updates included, use one line with
+no evidence tier (scheduled exception-only runs remain silent):
 `<repo>: [No open Dependabot pull requests](<list URL>)`. Name the repository
 without its owner. Link the repository's open Dependabot PR list on its host,
 such as
@@ -362,8 +390,9 @@ formatting reads single asterisks as italic, so the headers render italic
 (openclaw/openclaw#34609). Give each PR one identity line and one blockquote. The identity line
 carries one fixed status emoji per verdict, the PR number as a named link, the
 dependency and target version in a code span, check state, review state and
-risk. The blockquote holds the ask in at most two sentences. Ready: state that
-the merge decision is the maintainer's. Needs decision: open with
+risk. The blockquote holds the ask in at most two sentences. Ready in prep mode: state that
+the merge decision is the maintainer's. Maintenance mode reports the actual
+gated merge outcome or exact remaining gate, never an implied merge. Needs decision: open with
 `Accept or close:`, or with `Decide:` when a maintainer hold makes defer a valid
 outcome; name what is being decided and why a human must decide, and end with
 the bold research recommendation; a missing technical review changes the review
@@ -374,8 +403,9 @@ state assigns it; a released claim resumes nothing. State every PR's review
 state when any PR reports an exact-head review. Use named links, never raw URLs.
 Keep SHAs, claim tokens, run ids, build, review and release links, and write
 counts out of the digest. Keep each PR block under about 300 characters. Point
-to the evidence tier, then end the digest with: No approval, merge, close or
-auto-merge action was performed. Report any thread resolutions separately.
+to the evidence tier, then report the actual mutation inventory: approvals,
+merges, closes, auto-merge changes and thread resolutions. Never reuse a prep-only
+"no merge" statement after an authorized maintenance merge.
 
 Perform the [completion-proof handoff](references/completion-proof.md) and a
 final live sweep before reporting each PR. Publication proof is necessary for
@@ -384,7 +414,9 @@ locally prepared work, but never substitutes for checks, reviews or mergeability
 - **ready for maintainer decision**: conflict-free current head, required checks
   and technical reviews satisfied, findings addressed, risks/choices documented,
   auto-merge null. Final human approval remains human merge-gate work. List any
-  remaining unresolved threads and their reasons; never describe them as resolved
+  remaining unresolved threads and their reasons. Maintenance mode additionally
+  records **merged** only after exact-head merge readback under the authority
+  reference; never describe unverified threads as resolved
   or report ALL CLEAR while a required thread gate is blocked.
 - **blocked**: failed/unknown validation, access or exhausted budget; state exact
   next work and saved state. Time exhaustion is not a product decision.
@@ -406,8 +438,8 @@ and the write inventory. Held PRs carry their research here. When this run
 claimed, renewed or took over a PR, include the claim token held at handoff, the
 owner run id, and, for a takeover, the superseded owner and the superseded
 comment URL. End the evidence tier by naming each PR's summary comment, where
-one exists, and the local report by its run stamp. Stop owned work before
-releasing only your slot; preserve resumable checkouts and reports.
+one exists, and the local report by its run stamp. Stop owned work before releasing your claim or any fallback slot you own;
+managed wrappers release their own resources. Preserve resumable checkouts and reports.
 
 ## Examples
 

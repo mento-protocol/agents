@@ -80,3 +80,39 @@ mechanism. Release claims when this run stops acting, as the entry requires. Do
 not say “monitoring” after that release without a separately observed continuing
 owner. A resumed run reconciles live state and preserves the original deadline
 and attempts; it does not silently start a fresh budget.
+
+## Durable continuation evidence
+
+Use the existing per-run report or the host's durable journal; do not introduce
+another scheduler or claim authority. Before fanout record shared prerequisites
+(reviewer capability and documentation/auth access) once, with dependent work
+separated from independently eligible PRs. Keep these fields through handoffs:
+
+- Original campaign/run ID, authority source and exact-repo standing scope,
+  start/deadline, active repair time, and attempts consumed by recurring issue.
+  Head changes, provider switches and child restarts do not reset attempts.
+- Per-PR eligibility and its source: live identity/head/base, holds, draft,
+  authority, required gates; next eligible time and reason for deferral. A deferred
+  item is neither complete nor an instruction to spin until eligible.
+- Worker/continuation handle and assigned writer, plus consumed completion IDs
+  and their exact repository/head/base evidence. Record consumption before
+  scheduling follow-up; duplicate or late completions cannot start another writer
+  or overwrite newer live state. Reconcile any recorded pending transition on
+  restart rather than dropping it or treating it as completed.
+- Intent before each remote mutation: operation, PR/head, claim owner, unique
+  intent ID and remaining attempt budget. Record acknowledged or uncertain
+  outcome and readback evidence. Pending/uncertain pushes, comments, thread
+  resolutions, reruns and merges reconcile live state before retry; a timeout
+  or released claim never proves the remote action failed.
+- Actual next action, active owner or accepted runtime continuation/event handle,
+  trigger/eligibility/deadline and delivery receipts. Native completion events or
+  explicit one-shot resumptions may continue work; a daily job is only a backstop
+  when actually configured. Record failed scheduling as stopped/actionable.
+
+Accept a review completion only when its repository, base, head/snapshot, scope,
+reviewer configuration and finding dispositions match. Reuse that exact-input
+review instead of launching a duplicate. A generic, empty, refused or truncated
+response is a coverage gap, not ALL CLEAR. Changed relevant inputs invalidate the
+matching evidence, not the original attempt/deadline budget. Coordinator and
+worker outputs must distinguish **eligible**, **deferred**, **blocked**,
+**ready**, **merged** and **stopped**; a worker success alone selects none of them.

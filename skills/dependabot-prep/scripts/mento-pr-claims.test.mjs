@@ -10,7 +10,7 @@ import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = join(here, "..", "assets", "mento-pr-claims.json");
-const PINNED_VERSION = "0.2.0";
+const PINNED_VERSION = "0.3.0";
 
 function readFixture() {
   return JSON.parse(readFileSync(fixturePath, "utf8"));
@@ -72,9 +72,15 @@ test("the claims block writes no label and buys no overrides", () => {
   assert.equal("verifySubjectKind" in claims, false);
 });
 
-test("the two mandatory gates are required and every purpose has a kind", () => {
+test("the mutation gates are required and every purpose has a kind", () => {
   const { claims } = readFixture();
-  assert.deepEqual(claims.requiredBefore, ["branch-push", "review-request"]);
+  assert.deepEqual(claims.requiredBefore, [
+    "branch-push",
+    "review-request",
+    "thread-resolve",
+    "check-rerun",
+    "merge",
+  ]);
   assert.deepEqual(claims.advisoryBefore, [
     "summary-comment",
     "inline-reply",

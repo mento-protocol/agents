@@ -23,7 +23,7 @@ Nothing installs this package. Consumers pin the exact version in policy and
 spawn the CLI:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.3.0 \
   dlx mento-issues claims read --pr 872 --config .github/dependabot-prep-policy.json
 ```
 
@@ -31,7 +31,7 @@ Two details of that command line are load-bearing, both measured against pnpm
 10.34.5:
 
 - **`--package=<name>@<version>` … `dlx <binary>`, not `dlx <spec> <binary>`.**
-  The shorter `pnpm dlx @mento-protocol/issues@0.2.0 mento-issues …` form
+  The shorter `pnpm dlx @mento-protocol/issues@0.3.0 mento-issues …` form
   passes `mento-issues` to the CLI as its first positional argument, where it
   is an unknown command.
 - **`--config.ignore-scripts=true`, not `--ignore-scripts`.** The latter is not
@@ -405,15 +405,22 @@ controlling terminal, so a guarded command must be non-interactive: a
 credential prompt fails rather than hanging, which is the right failure for an
 unattended run but is worth knowing before guarding something by hand.
 
-| Gate                              | Kind      | Behaviour when the claim is not held        |
-| --------------------------------- | --------- | ------------------------------------------- |
-| `push`, `review-request`          | mandatory | refuse to spawn; exit from the verify table |
-| `wait`                            | advisory  | print the verdict and spawn anyway          |
-| `summary-comment`, `inline-reply` | advisory  | print the verdict and spawn anyway          |
+| Gate                                     | Kind      | Behaviour when the claim is not held        |
+| ---------------------------------------- | --------- | ------------------------------------------- |
+| `push`, `review-request`                 | mandatory | refuse to spawn; exit from the verify table |
+| `thread-resolve`, `check-rerun`, `merge` | mandatory | refuse to spawn; never demotable            |
+| `wait`                                   | advisory  | print the verdict and spawn anyway          |
+| `summary-comment`, `inline-reply`        | advisory  | print the verdict and spawn anyway          |
 
 That table is the **default**, not a constant: `requiredBefore` and
 `advisoryBefore` in the loaded config decide it, and promoting a purpose there
-really does gate the write.
+really does gate the write. The maintenance gates added in 0.3.0 are an
+exception: omitted gates default to mandatory for compatibility with older
+configurations, and an advisory declaration is refused. Library callers cannot
+demote them either. These gates fence an independently authorized mutation;
+they do not verify findings, diagnose infrastructure, decide readiness or grant
+merge authority. The caller must enforce those prerequisites and reconcile an
+uncertain remote outcome before retrying.
 
 Guard writes its report to **stderr** as one JSON line before spawning and one
 after the child exits; `--report <path>` also writes the final one to a file.
@@ -698,7 +705,7 @@ and `coordination.claims` are read.
 | `namespace`                                  | a `refs/…` prefix                                                            |
 | `scopeTemplate`                              | the namespace plus `/{pr}` or `/{issue}`, matching the profile, exactly once |
 | `label`                                      | a GitHub label name, or `null`                                               |
-| `package`                                    | `{ "name": "@mento-protocol/issues", "version": "0.2.0" }`                   |
+| `package`                                    | `{ "name": "@mento-protocol/issues", "version": "0.3.0" }`                   |
 | `ttlMinutes`, `renewMinutes`, `graceMinutes` | on a lease-capable profile only                                              |
 
 **Optional**, with defaults:
@@ -742,8 +749,10 @@ a **version** difference is only a warning, because the exact pin is enforced
 where the wrapper spawns `pnpm --package=<name>@<version> dlx` rather than here.
 
 `requiredBefore` and `advisoryBefore` are the real mandatory/advisory table:
-they must together name every fence purpose exactly once, and `verify` and
-`guard` use them. `markerRevision` (and the optional top-level
+they must together name each original fence purpose exactly once, and `verify`
+and `guard` use them. Since 0.3.0, `thread-resolve`, `check-rerun` and `merge`
+may be omitted (mandatory by default) or listed in `requiredBefore`, never
+`advisoryBefore`. Existing configurations keep all their original gate choices. `markerRevision` (and the optional top-level
 `markers.revision`) must be `v1` or `v2`, and `markers build`/`markers verify`
 refuse a job whose schema disagrees with it. `gh.timeoutSeconds` is the
 per-`gh` wall-clock default that `--timeout-seconds` overrides, and the loader
@@ -912,7 +921,7 @@ A consuming repository carries the claims block inside its
       "allowOverrides": false,
       "allowCloudWriters": false,
       "command": ["pnpm", "dependabot:claim", "--"],
-      "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
+      "package": { "name": "@mento-protocol/issues", "version": "0.3.0" }
     }
   },
   "forbiddenActions": ["delete-claim-refs"]
@@ -927,8 +936,7 @@ before any further `--`, then spawns the `pnpm … dlx` line shown above with
 Four facts a consuming repository must agree with this package on:
 
 - **Gate names.** Policy `branch-push` is CLI `--gate push`; policy `long-wait`
-  is `--gate wait`. The other three — `review-request`, `summary-comment`,
-  `inline-reply` — are spelled the same on both sides.
+  is `--gate wait`. All other gate names are spelled the same on both sides.
 - **Argument splicing.** pnpm 10.34.5 forwards the first bare `--` after a
   script name rather than stripping it, so a wrapper drops one leading `--` and
   then splices `--config` before any remaining `--`. A guarded child's argv
@@ -964,7 +972,7 @@ An issue sweep carries a standalone `mento-issues-config:v1` document instead,
     "advisoryBefore": ["summary-comment", "inline-reply", "long-wait"],
     "allowOverrides": false,
     "allowCloudWriters": false,
-    "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
+    "package": { "name": "@mento-protocol/issues", "version": "0.3.0" }
   }
 }
 ```
