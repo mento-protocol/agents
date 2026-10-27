@@ -10,34 +10,35 @@ Use a documented repository state path where applicable to this host. Otherwise
 use a writable root outside checkouts: Linux
 `${XDG_STATE_HOME:-$HOME/.local/state}/dependabot-prep`; macOS
 `$HOME/Library/Application Support/dependabot-prep`. Every run on a macOS host
-uses that one root, so the heavy-tree slot below stays single. A sandboxed
-session that cannot write it ("Operation not permitted") runs every command
-that writes under that root outside the sandbox, through the runtime's
-permission path: creating the slot and its owner record, per-repository state
-and any report kept there, the claim-document copy, and releasing the slot.
-It never falls back to the XDG path, because a
-second state root is a second slot pool. When no such path is available, local
-work on this host stops, as it does when the slot cannot be acquired.
-Keep per-repository state under a canonical
-`<state root>/<host>__<owner>__<repo>` directory built from validated
-path-safe components; reject separators, traversal and malformed identities,
-and quote paths with spaces.
+uses that one root for reports and fallback coordination. If a sandbox cannot
+write it, use the runtime's authorized permission path; do not invent a second
+root to bypass coordination. If no authorized path exists, stop affected local
+work. Keep per-repository state under a canonical
+`<state root>/<host>__<owner>__<repo>` directory built from validated path-safe
+components; reject separators, traversal and malformed identities, and quote
+paths with spaces.
 
-The heavy-tree slot is **per host, not per repository**: it is the single
-`<state root>/active` directory, and it is the only slot on this host whatever
-repository a run targets. A slot under the per-repository directory would let a
-run for another repository take a second slot and start a second heavy tree,
-which is the invariant this slot exists for. Acquire it by atomic `mkdir`
-before hooks, installs, builds, tests or browsers run. Immediately record host,
-owner, repository, owner/session ID, PID if available, start/deadline and
-report path inside it, so another run can see which repository holds the host.
-Failure to acquire or record ownership stops local work on this host. Do not
-clear a stale-looking slot. Resume only after ownership proof and live-state
-reconciliation; otherwise ask for operator recovery. Stop owned processes
-before releasing only your slot. This slot serializes heavy work on one host.
-It does not decide who may write to a PR: a host-local slot does not serialize
-Mac/server writers, and exact-head leases catch branch races, not duplicate
-comments or all repository-wide operations. Never claim otherwise.
+Discover host resource capabilities before heavy work:
+
+1. **Managed host facility available:** use the supplied wrapper/queue for every
+   heavy command, including hooks, installs, builds, tests and browsers. Its
+   configured capacity is authoritative, whether one slot or several. Record
+   the wrapper and observed constraints. Do not create/remove slot directories,
+   set a replacement capacity, or layer this skill's single-slot fallback over
+   it. A refused/timed-out job is not permission to bypass or blindly retry it.
+2. **No managed facility:** fall back to one host-wide `<state root>/active`
+   directory, acquired by atomic `mkdir` before heavy work. Record host, owner,
+   repository, session/PID, start/deadline and report path immediately. Failure
+   to acquire or record ownership stops heavy work. Never clear another owner's
+   or a stale-looking slot; require ownership/live-process reconciliation or
+   operator recovery. Stop owned processes before releasing only this slot.
+
+The fallback serializes heavy trees across repositories on that host, not across
+machines. A managed pool may run independent trees concurrently up to its actual
+capacity; neither a pool nor a fallback grants PR writer authority. Parallelize
+independent research, reads and remote waits, but keep one writer per PR and
+serialize shared trees, lockfiles and overlapping dependency families. Exact-head
+leases detect branch races, not duplicate comments or all repository operations.
 
 Claims are in effect when the repository policy carries a `coordination.claims`
 block, or when the repository is under `mento-protocol/` and carries no policy
@@ -47,7 +48,7 @@ authority. SKILL.md's _Inventory and host setup_ and _Prepare and babysit_
 steps define the claim lifecycle — which command runs when, and the token each
 one takes. There is no hand-edited path into that ref: an expired claim is
 taken over only by the claim command's own takeover. Outside those two cases,
-skip every claim step — the host-local heavy-tree slot and the exact-head push
+skip every claim step — the host resource adapter and exact-head push
 lease are the only coordination in effect.
 
 The claims command is the repository policy's `coordination.claims.command`
@@ -63,8 +64,9 @@ every checkout. Read `namespace`, `ttlMinutes`, `renewMinutes`,
 `graceMinutes`, `minRemainingSeconds`, `label`, `requiredBefore` and
 `advisoryBefore` from the loaded document — the policy, or the copied default —
 as this run's operating parameters; do not invent defaults. `requiredBefore`'s `branch-push` and `advisoryBefore`'s
-`long-wait` name the `push` and `wait` gates; the other three names match their
-gates exactly. SKILL.md's push, review-request and wait steps say which
+`long-wait` name the `push` and `wait` gates; other names match their gates
+exactly. The 0.3 maintenance gates default to mandatory even in older documents
+and cannot be demoted; this does not grant authority to perform those actions. SKILL.md's push, review-request and wait steps say which
 operations run inside `claims guard`. Exit codes: 0 proceed; 10/11/14/15 act as
 printed; 12 run adopt; 13 stop publishing this PR and treat work in flight as
 forfeit; 3/16/21 stop and report; 20 retry.
@@ -77,7 +79,8 @@ The command forms, their flags and what each one writes:
   it is never a read.
 - `claims verify --pr <n> --token <t> --run-id <r> --gate <gate>` checks one gate
   against the claim this run holds and writes nothing. Its gates are `push`,
-  `review-request`, `wait`, `summary-comment` and `inline-reply`.
+  `review-request`, `wait`, `summary-comment`, `inline-reply`, `thread-resolve`,
+  `check-rerun` and `merge` (the last three require runner 0.3.0 or newer).
 - `claims claim --pr <n>` acquires the claim. It generates this run's owner id
   and prints the claim token in `claim.token`. When the current owner's lease has
   expired and takeover is eligible, the same call takes the claim over and
@@ -96,7 +99,8 @@ The command forms, their flags and what each one writes:
   one command under the claim; it accepts every gate `verify` accepts. A gate
   the policy lists in `requiredBefore` is mandatory: guard refuses to start the
   command without a held claim, and stops the command when the claim is lost.
-  SKILL.md requires `push` and `review-request` there before any write. A gate
+  SKILL.md requires `push` and `review-request` there before any write. The
+  maintenance gates are always mandatory, even if omitted by older config. A gate
   in `advisoryBefore` (by default `wait`, `summary-comment` and `inline-reply`)
   only prints the verdict and runs the command anyway.
   Repeat `--pr <n> --token <t>` for a family; one `--run-id` covers every pair,
@@ -135,17 +139,19 @@ label missing at run time is reported as a rollout gap, not created.
 
 ## Resource safety
 
-- Every host: one heavy tree including hooks, explicit runner/test concurrency,
+- Every host: the managed capacity or single-slot fallback above, including hooks;
+  explicit runner/test concurrency,
   available-memory check before work, logs and terminal exit status. Verify real
   child behavior; environment flags alone do not prove serialization.
 - Linux with an existing systemd user manager: separate heavy scopes from the
   gateway/agent service, apply operator-configured memory/swap/CPU limits and
   verify live properties. Do not install systemd or raise limits. Mandatory
   repository/host caps fail closed if unavailable.
-- macOS: systemd/cgroups are unavailable. Serialize heavy work and workers and
+- macOS: systemd/cgroups are unavailable. Honor the managed pool (otherwise
+  serialize heavy work) and
   monitor native memory pressure. Node heap limits cover only Node; `nice` is not
   a memory cap. Ordinary Mac work without a hard-cap requirement may proceed
-  with one worker and the documented residual; stop owned work on unsafe pressure.
+  within the documented capacity and residual; stop owned work on unsafe pressure.
   If hard caps/isolation are mandatory and unavailable, use policy-permitted
   exact-head CI or report that blocker, not fictitious enforcement.
 - After OOM/stall/timeout reconcile processes and remote state before retrying.

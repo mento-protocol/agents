@@ -654,7 +654,8 @@ question and performs zero writes.
 
 `requireFencedWrite(..., { purpose })` divides the purposes:
 
-- **Mandatory** — `push`, `review-request`. Throws the mapped error when the
+- **Mandatory** — `push`, `review-request`, `thread-resolve`, `check-rerun`,
+  `merge`. Throws the mapped error when the
   claim is not held.
 - **Advisory** — `summary-comment`, `inline-reply`, `long-wait`. Never throws;
   returns the report so the caller can record it.
@@ -664,7 +665,7 @@ performs no proving read, so a positive report would be a lie.
 
 The configuration spells two of these differently, and the mapping is fixed:
 policy `branch-push` is CLI `--gate push`; policy `long-wait` is `--gate wait`.
-The other three names match.
+All other gate names match.
 
 ### The guard contract
 
@@ -828,12 +829,16 @@ it.
 `--gate wait` is **advisory**: guard always spawns the child, renews while the
 claim is held, and — if the claim is not held at start — prints the verdict and
 runs the child anyway, because a run may legitimately watch CI read-only.
-Kill-on-lost-claim applies only to `push` and `review-request`.
+Kill-on-lost-claim applies to every mandatory gate, including the maintenance
+mutations added in 0.3.0: `thread-resolve`, `check-rerun` and `merge`.
 
-Which gates are mandatory is the **policy's** decision, not a constant:
+For the original gates, mandatory versus advisory is the **policy's** decision:
 `claims.requiredBefore` and `claims.advisoryBefore` are normalized into the
 purpose table the context carries, and the built-in split is only the default.
-The two lists must together name every purpose, or the document is refused.
+The two lists must together name every original purpose, or the document is
+refused. Maintenance gates default to mandatory when omitted by older configs
+and reject advisory declarations. The library enforces them even when a caller
+supplies its own table; ownership does not confer action authorization.
 
 `--advisory` (always exit 0) combined with a mandatory gate is a usage refusal,
 exit 2.
@@ -1600,8 +1605,9 @@ Every failure exits 3 **before any network call**:
   reason — the wrapper's `pnpm --package=<name>@<version> dlx` is where the
   exact pin actually binds, so a difference observed here means a stale `dlx`
   cache or a checkout bin run by hand.
-- `requiredBefore` and `advisoryBefore` must together name every fence purpose,
-  each exactly once. They are the mandatory/advisory table the run uses.
+- `requiredBefore` and `advisoryBefore` must together name every original fence
+  purpose, each exactly once. Maintenance purposes added in 0.3.0 default to
+  mandatory if absent and cannot be advisory.
 - `profile` must be `pr` or `issue`. `issue-board` is a valid profile value in
   the library but is refused by the configuration loader
   (`CLAIM_CONFIG_PROFILE_UNSUPPORTED`): its canonical scope needs a Project
@@ -1889,7 +1895,7 @@ Consumers do not add this package to a `package.json` or a lockfile. The policy
 pins the exact version and a thin wrapper spawns it:
 
 ```bash
-pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.2.0 \
+pnpm --config.ignore-scripts=true --package=@mento-protocol/issues@0.3.0 \
   dlx mento-issues claims read --pr 872 --config .github/dependabot-prep-policy.json
 ```
 

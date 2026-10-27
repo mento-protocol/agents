@@ -64,16 +64,26 @@ export const RESULT_SCHEMA = "mento-issues-result:v1";
  * Fence purposes and their kind.
  *
  * AMENDMENTS §D makes the long wait advisory: a run may watch CI read-only, so
- * guard prints the verdict and still spawns. Only a publishing write —
- * a branch push or a review request — is mandatory.
+ * guard prints the verdict and still spawns. Maintenance mutations always
+ * require a held claim; a fence proves ownership, never action authority.
  */
 export const FENCE_PURPOSES = Object.freeze({
   push: "mandatory",
   "review-request": "mandatory",
+  "thread-resolve": "mandatory",
+  "check-rerun": "mandatory",
+  merge: "mandatory",
   "summary-comment": "advisory",
   "inline-reply": "advisory",
   "long-wait": "advisory",
 });
+
+/** Added in 0.3: safe defaults for older configs; never demotable. */
+export const MAINTENANCE_FENCE_PURPOSES = Object.freeze([
+  "thread-resolve",
+  "check-rerun",
+  "merge",
+]);
 
 /** Spellings the config and the CLI accept for a canonical purpose. */
 export const FENCE_PURPOSE_ALIASES = Object.freeze({
@@ -182,7 +192,11 @@ export function canonicalFencePurpose(purpose) {
  * @returns {Record<string, string>} purpose to `"mandatory"` or `"advisory"`.
  */
 export function fencePurposesFor(ctx) {
-  return ctx?.fencePurposes ?? FENCE_PURPOSES;
+  if (!ctx?.fencePurposes) return FENCE_PURPOSES;
+  const table = { ...ctx.fencePurposes };
+  for (const purpose of MAINTENANCE_FENCE_PURPOSES)
+    table[purpose] = "mandatory";
+  return table;
 }
 
 /**

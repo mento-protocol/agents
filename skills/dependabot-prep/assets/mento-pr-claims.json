@@ -12,17 +12,23 @@
     "graceMinutes": 10,
     "minRemainingSeconds": 360,
     "maxTtlMinutes": 360,
-    "requiredBefore": ["branch-push", "review-request"],
+    "requiredBefore": [
+      "branch-push",
+      "review-request",
+      "thread-resolve",
+      "check-rerun",
+      "merge"
+    ],
     "advisoryBefore": ["summary-comment", "inline-reply", "long-wait"],
     "allowOverrides": false,
     "allowCloudWriters": false,
     "command": [
       "pnpm",
       "--config.ignore-scripts=true",
-      "--package=@mento-protocol/issues@0.2.0",
+      "--package=@mento-protocol/issues@0.3.0",
       "dlx",
       "mento-issues"
     ],
-    "package": { "name": "@mento-protocol/issues", "version": "0.2.0" }
+    "package": { "name": "@mento-protocol/issues", "version": "0.3.0" }
   }
 }
