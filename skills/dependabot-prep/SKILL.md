@@ -121,7 +121,8 @@ rollout: this revision no longer acquires that lock.
 - Other workflow/local-Action changes, automation-authority, credentials and
   security controls require an explicit repository-approved path. Version-only
   coupling does not authorize changing permissions, secrets, triggers, admission,
-  executable steps, runner trust or check coverage, nor upgrading an Action itself.
+  executable steps, runner trust or check coverage, nor upgrading an Action itself,
+  except a Dependabot Action bump that meets [review tiers](references/review-tiers.md).
   Never modify your own authority or weaken checks/tests to manufacture green.
 - No rebase, published amend or history rewrite. Preserve others' work. Push only
   a proven fast-forward to the existing PR ref using an exact observed-head lease

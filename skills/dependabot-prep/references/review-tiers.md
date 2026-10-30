@@ -29,8 +29,15 @@ the human tier.
 ## Automatic tier: merge without a human approval
 
 Everything else is in the automatic tier, at any bump: development, test, lint,
-type and tooling dependencies, CI-only Actions, and patch or minor upgrades of
-production dependencies whose research found nothing from the list above.
+type and tooling dependencies, Dependabot bumps of GitHub Actions, and patch or
+minor upgrades of production dependencies whose research found nothing from the
+list above.
+
+The maintainer's approval of this tier is the repository-approved path for a
+Dependabot Action bump when its diff against the base changes only the `uses:`
+pin and version comment, and the new SHA is the commit the upstream release tag
+resolves to. Any other workflow change, or a pin that does not match the tag,
+stays under the hard boundaries in `SKILL.md`.
 
 An automatic-tier PR still needs every other ALL CLEAR gate on the exact head:
 required checks, the configured technical review, resolved threads,
@@ -98,8 +105,7 @@ fresh reads immediately before merging, against the PR's exact head `<sha>`:
 Stop and report the gap on any other result: a missing context, another
 conclusion or state (`skipped` and `neutral` included), a different producer, a
 context that matches both a check run and a status or more than one check run,
-an entry with no `integration_id` and no producer recorded during discovery, or
-a failed read. If the base or head moves before the merge, run the proof again.
+an entry with no `integration_id`, or a failed read. If the base or head moves before the merge, run the proof again.
 
 Then merge with
 `gh pr merge <n> --repo <owner/repo> --squash --admin --match-head-commit <sha>`
