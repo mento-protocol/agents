@@ -39,15 +39,17 @@ is waived, and only through the repository's review bypass below.
 
 ## Merging an automatic-tier PR
 
+The bypass waives only the required human approving review. Use it only for
+the squash merge below. Never use it for a direct push, force push or deletion.
+
 Use the review bypass only when all of these are true right before merging:
 
 - The fresh ALL CLEAR result's only unmet gate is the required human approving
   review.
 - The merging identity can bypass the ruleset that holds the `pull_request`
   rule (`current_user_can_bypass` is `always` or `pull_requests_only`).
-- It cannot bypass any ruleset that holds required status checks, deletion or
-  non-fast-forward rules (`current_user_can_bypass` is `never` for each).
-  Otherwise `--admin` would also skip checks: stop and report the gap.
+- Each ruleset that holds required status checks reads `never`, or reads
+  `always` or `pull_requests_only` and the required-check proof below passes.
 
 Read those conditions with the merging identity's own token, because
 `current_user_can_bypass` describes the requesting actor:
@@ -69,10 +71,35 @@ a token without admin rights. When `protected` is true and step 1 is empty, or
 eligible for the bypass unless the repository's bypass list is otherwise
 confirmed.
 
-A `pull_request` rule that shares a ruleset with required status checks,
-deletion or non-fast-forward rules cannot meet both conditions, so that
-repository has no review bypass. Any other value (`exempt`, null), a missing
-field or a failed read leaves the condition unmet.
+Any other value (`exempt`, null), a missing field or a failed read leaves the
+condition unmet.
+
+When the identity can also bypass required checks, GitHub no longer enforces
+them on an `--admin` merge, so this proof is the only gate on them. Run it from
+fresh reads immediately before merging, against the PR's exact head `<sha>`:
+
+1. Take every entry of `.parameters.required_status_checks` from the
+   `required_status_checks` rules in step 1, with its `context` and
+   `integration_id`.
+2. Find each context on `<sha>`. It can be a check run or a commit status, so
+   read both:
+   - `gh api --paginate "repos/<owner>/<repo>/commits/<sha>/check-runs?filter=latest&per_page=100"`:
+     `name` equals the context, `conclusion` is `success`, `app.id` equals
+     `integration_id`.
+   - `gh api --paginate "repos/<owner>/<repo>/commits/<sha>/statuses?per_page=100"`:
+     the first entry for the context is the newest. Its `state` is `success`,
+     `creator.type` is `Bot`, and `gh api apps/<slug> --jq .id` equals
+     `integration_id`, where `<slug>` is `creator.login` without `[bot]`.
+3. Read the base head with
+   `gh api repos/<owner>/<repo>/branches/<base> --jq .commit.sha`, then require
+   `gh api repos/<owner>/<repo>/compare/<base-sha>...<sha> --jq .behind_by` to
+   be `0`, so the head contains the current base.
+
+Stop and report the gap on any other result: a missing context, another
+conclusion or state (`skipped` and `neutral` included), a different producer, a
+context that matches both a check run and a status or more than one check run,
+an entry with no `integration_id` and no producer recorded during discovery, or
+a failed read. If the base or head moves before the merge, run the proof again.
 
 Then merge with
 `gh pr merge <n> --repo <owner/repo> --squash --admin --match-head-commit <sha>`
