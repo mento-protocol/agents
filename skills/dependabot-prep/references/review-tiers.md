@@ -49,6 +49,31 @@ Use the review bypass only when all of these are true right before merging:
   non-fast-forward rules (`current_user_can_bypass` is `never` for each).
   Otherwise `--admin` would also skip checks: stop and report the gap.
 
+Read those conditions with the merging identity's own token, because
+`current_user_can_bypass` describes the requesting actor:
+
+1. `gh api --paginate repos/<owner>/<repo>/rules/branches/<base>` lists the
+   active rules on the PR's base branch. Record each rule's `type` and
+   `ruleset_id`.
+2. For each distinct `ruleset_id`, read
+   `gh api repos/<owner>/<repo>/rulesets/<id> --jq .current_user_can_bypass`.
+   Use this single-ruleset read: `GET repos/<owner>/<repo>/rulesets` leaves the
+   field out, and a missing field is not `never`.
+3. `gh api repos/<owner>/<repo>/branches/<base> --jq '{protected, classic: .protection.enabled}'`
+   shows whether classic branch protection applies.
+
+An empty result from step 1 is not proof of no protection. Classic branch
+protection never appears there, and `branches/<base>/protection` returns 404 to
+a token without admin rights. When `protected` is true and step 1 is empty, or
+`classic` is true, the conditions above cannot be verified: the PR is not
+eligible for the bypass unless the repository's bypass list is otherwise
+confirmed.
+
+A `pull_request` rule that shares a ruleset with required status checks,
+deletion or non-fast-forward rules cannot meet both conditions, so that
+repository has no review bypass. Any other value (`exempt`, null), a missing
+field or a failed read leaves the condition unmet.
+
 Then merge with
 `gh pr merge <n> --repo <owner/repo> --squash --admin --match-head-commit <sha>`
 under the same claim, guard, write-intent and readback rules as any merge.
