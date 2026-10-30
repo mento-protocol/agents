@@ -29,9 +29,9 @@ the human tier.
 ## Automatic tier: merge without a human approval
 
 Everything else is in the automatic tier, at any bump: development, test, lint,
-type and tooling dependencies, Dependabot bumps of GitHub Actions, and patch or
-minor upgrades of production dependencies whose research found nothing from the
-list above.
+type and tooling dependencies, Dependabot bumps of GitHub Actions other than a
+major used in a deploy or release workflow, and patch or minor upgrades of
+production dependencies whose research found nothing from the list above.
 
 The maintainer's approval of this tier is the repository-approved path for a
 Dependabot Action bump when its diff against the base changes only the `uses:`
