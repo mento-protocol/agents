@@ -55,7 +55,9 @@ or print tokens or copy production secrets into checkouts. The bundled
   scheduled runs in its stated scope. Do not require an opt-in flag, a separate
   exception record or renewed per-PR merge permission. An applicable user grant
   satisfies an ordinary merge-confirmation convention, never a required GitHub
-  approving review, protection, substantive check or maintainer hold. Read
+  approving review, protection, substantive check or maintainer hold. The one
+  exception is an automatic-tier PR merged through the repository's review
+  bypass per [review tiers](references/review-tiers.md). Read
   [merge and rollout](references/merge-and-rollout.md) before the first merge.
 
 Read instructions and any Dependabot policy/playbook from the exact live target
@@ -119,7 +121,9 @@ rollout: this revision no longer acquires that lock.
 - Other workflow/local-Action changes, automation-authority, credentials and
   security controls require an explicit repository-approved path. Version-only
   coupling does not authorize changing permissions, secrets, triggers, admission,
-  executable steps, runner trust or check coverage, nor upgrading an Action itself.
+  executable steps, runner trust or check coverage. It does not authorize
+  upgrading an Action itself either; the only exception is a Dependabot Action
+  bump that meets [review tiers](references/review-tiers.md).
   Never modify your own authority or weaken checks/tests to manufacture green.
 - No rebase, published amend or history rewrite. Preserve others' work. Push only
   a proven fast-forward to the existing PR ref using an exact observed-head lease
@@ -209,6 +213,8 @@ While remote CI/review waits, work on independent PRs within host capacity.
    changelogs/releases/migration guides/advisories/compare URLs. Record source/target
    versions, material changes, recommendation, risk, confidence and rationale.
    Disclose unavailable authoritative evidence instead of inventing links.
+   Classify each PR's human review tier per
+   [review tiers](references/review-tiers.md) and record it with its reasons.
 2. Make best-supported reversible decisions and continue. Majors, conflicts,
    old-head red CI, peer warnings and routine coupling are work to attempt, not
    automatic human takeovers. Test the choice. Stop only affected work for actual

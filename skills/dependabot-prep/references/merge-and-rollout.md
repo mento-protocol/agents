@@ -50,7 +50,9 @@ freshness. Execute the repository-supported squash operation with the exact
 expected head; where claims apply, hold the sole writer claim and execute it
 through `claims guard --gate merge`
 (e.g. `gh pr merge <n> --repo <owner/repo> --squash --match-head-commit <sha>`).
-Never use `--admin`, enable auto-merge, delete the branch, or retry on drift.
+Never use `--admin` except for an automatic-tier PR under every condition in
+[review tiers](review-tiers.md); never enable auto-merge, delete the branch, or
+retry on drift.
 Preflight the merge mechanism too: if a required merge queue or the selected
 tool would schedule auto-merge instead of performing this exact-head squash,
 stop that action and report the unsupported mechanism; do not invoke the
