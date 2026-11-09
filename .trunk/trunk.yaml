@@ -62,4 +62,8 @@ actions:
     - trunk-fmt-pre-commit # Auto-format files when committing
     - commitlint # Validate commit messages follow conventional format
     - trunk-announce # Show announcements for new features
-    - trunk-upgrade-available # Notify when Trunk updates are available
+  disabled:
+    - trunk-upgrade-available # Hourly client call keeps idle daemons alive
+    - trunk-cache-prune # Built-in 24h scheduled action
+    - trunk-share-with-everyone # Built-in 24h scheduled action
+    - trunk-whoami # Built-in 24h scheduled action
