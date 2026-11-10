@@ -58,6 +58,11 @@ that from an organization owner or member, the action then requires write
 access, and the workflow refuses a request on a fork PR. The workflow needs
 the `CLAUDE_CODE_OAUTH_TOKEN` secret.
 
+## Code ownership
+
+This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.
+Ownership covers design and cleanup, not authority: approval rules, scope sign-off, review and no-merge rules still apply. Keep related fixes in separate commits and list them in the PR body.
+
 ## Promoting a skill from a personal library
 
 Follow this checklist when moving a skill from a personal skills library
