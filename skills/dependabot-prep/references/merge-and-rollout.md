@@ -89,6 +89,17 @@ After merging:
    unblocked work. Escalate only the concrete residual blocker or action needing
    human authority; do not retry a failed rollout blindly.
 
+   Diagnose the first failed rollout before requesting any rerun. Inspect the
+   failed step and logs; code, configuration, dependency, security and test
+   failures return to repair, not rerun. A repeated signature strengthens the
+   case for a persistent defect but is not by itself proof of determinism.
+   Before proposing a rerun after a pipeline fix, verify which workflow and
+   script revision that rerun executes; if it remains bound to the defective
+   revision, use the repository-authorized path that deploys the fixed revision
+   instead. (Incident: 2026-11-11 frontend-monorepo run 43025121963: attempts 1
+   and 3 reproduced `active-census-unproven`; rerunning bfac15b8 could not load
+   #1081's fix.)
+
 If deployment is delayed, manual, inaccessible or outside the run budget,
 report **merged, rollout pending** with the exact missing proof and an observed
 owner or scheduled continuation. Never mark it complete or silently abandon it.
