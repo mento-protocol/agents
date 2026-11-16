@@ -63,6 +63,19 @@ Read assertions and parameter rows, not just test names. Look for:
   removed the item, or tripped another guard before the intended guard ran.
 - Tests keeping otherwise unused production code or test-only accessors alive.
 - Names promising more than the input and assertions exercise.
+- Logic with a contract, such as a parser, a calculation or a state machine,
+  that only example tests cover: no test states what must always hold. For the
+  repair, state what must always hold and test that statement, not one sample
+  of it. Where the inputs or the sequences of operations are many, generate
+  them and assert the property: a round trip, a rule that every operation
+  keeps, agreement with a simpler model, or a total that does not change. For
+  stateful code, run generated sequences of operations and check the rule
+  after each step; include long runs and boundary values. Fix the seed so that
+  a failure repeats. Take every expected value from the specification, never
+  from the output of the implementation. Use the property-testing library that
+  the repository already has; if it has none, write a seeded generator with
+  the standard library and do not add a dependency. Keep example tests for
+  named regressions and for documentation.
 
 These are investigation leads, not automatic deletion rules. Read the complete
 candidate, production owner, callers, relevant dependencies, sibling coverage,
