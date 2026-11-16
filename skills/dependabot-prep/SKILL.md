@@ -227,6 +227,9 @@ While remote CI/review waits, work on independent PRs within host capacity.
    conflicts and repair necessary compatibility and proven manifest/lockfile/runtime
    coupling. Run normal installs, generators and checks with hooks enabled and
    effective serialization. Do not upgrade global tools or host security settings.
+   When research put a PR in the human tier for new or changed install scripts,
+   do not run those scripts before a maintainer approves. Install with scripts
+   disabled, or report local validation as the remaining gate.
    Inspect dependency/generated deltas; keep unrelated updates out.
 4. When claims are in effect, claim every family member in
    ascending PR number before evaluating consolidation — `claims family claim

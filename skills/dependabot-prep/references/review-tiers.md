@@ -19,7 +19,10 @@ A PR is in the human tier when any of these holds:
    provenance or signature; an advisory, compromise report, yank or
    deprecation; code in the published package that is not in the tagged source,
    or obfuscated code; unexpected new transitive dependencies; documented
-   breaking changes in APIs the repository uses that tests do not cover.
+   breaking changes in APIs the repository uses that tests do not cover; a
+   target version published fewer than 7 days ago, unless the repository's
+   Dependabot cooldown or package-manager minimum release age already enforces
+   at least that age.
 3. **Repository policy says so.** A stricter trusted repository policy, a
    maintainer hold or a veto label still wins.
 
