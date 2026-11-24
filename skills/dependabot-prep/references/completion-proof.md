@@ -23,7 +23,7 @@ continuation. Preserve the checkout and evidence when work stops unpublished.
 
 Use the repository's documented verifier when it proves the bound repository,
 PR, head ref and published head against the validated local commit, and detects
-base drift. Otherwise, when the installed `ship`/`babysit-pr` library supplies
+base drift. Otherwise, when the installed `ship-pr`/`babysit-pr` library supplies
 `scripts/repo-trust-preflight.sh`, reuse its documented `resolve`, `pin`,
 `verify` and `published` commands. Resolve the helper from that trusted installed
 library, never from the candidate PR. Keep its resolve and pin state files
