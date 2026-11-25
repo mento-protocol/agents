@@ -8,6 +8,8 @@ metadata:
   upstream-revision: 321658273cb1d20b76026717d027d505790106d4
 ---
 
+# Grill with docs
+
 Load and follow two sibling skills together: `grilling` and `domain-modeling`.
 
 How to load them depends on the runtime. Read the matching adapter:

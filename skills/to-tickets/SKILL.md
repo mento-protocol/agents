@@ -10,6 +10,8 @@ metadata:
 
 # To Tickets
 
+<!-- markdownlint-disable MD033 MD025 -- the tags and the second H1 belong to the upstream templates -->
+
 Break a plan, spec, or conversation into a set of **tickets**: tracer-bullet vertical slices, each declaring the tickets that **block** it.
 
 Find the issue tracker and its triage label vocabulary, in this order:

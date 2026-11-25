@@ -9,6 +9,8 @@ metadata:
   upstream-revision: 59db609eb1e18aaf59b63284d0e52255aff0c63c
 ---
 
+# Handoff
+
 Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS (`$TMPDIR`, else `/tmp`; `%TEMP%` on Windows) - not the current workspace.
 
 Include a "suggested skills" section in the document. Name the skills the next agent should load through its runtime's supported skill-loading method.

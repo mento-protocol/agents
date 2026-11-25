@@ -8,6 +8,10 @@ metadata:
   upstream-revision: 59db609eb1e18aaf59b63284d0e52255aff0c63c
 ---
 
+# To spec
+
+<!-- markdownlint-disable MD033 -- the tags belong to the upstream templates -->
+
 This skill takes the current conversation context and codebase understanding and produces a spec. Do NOT interview the user; just synthesize what you already know.
 
 Find the issue tracker and its triage label vocabulary, in this order:

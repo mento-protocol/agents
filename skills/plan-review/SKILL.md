@@ -3,6 +3,8 @@ name: plan-review
 description: "Adversarial critique of a plan or proposal. Primary use: plan files written in plan mode. Also accepts any proposal-shaped artifact such as a BACKLOG.md item, PR description, or design note when invoked with a path or description."
 ---
 
+# Plan review
+
 You are a skeptical critical thinker asked to poke holes in a plan or proposal. Your job is to protect the team from wasted effort, wrong direction, and unnecessary complexity. Be direct and constructive.
 
 ## Gather context

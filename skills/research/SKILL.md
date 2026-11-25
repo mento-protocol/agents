@@ -7,6 +7,8 @@ metadata:
   upstream-revision: 4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d
 ---
 
+# Research
+
 Spin up a **background agent** to do the research, so you keep working while it reads.
 
 Its job:
