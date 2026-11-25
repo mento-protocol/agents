@@ -1,0 +1,26 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "c3"
+          },
+          "nodes": [
+            {
+              "id": "IC_23",
+              "author": {
+                "login": "carol",
+                "__typename": "User"
+              },
+              "createdAt": "2026-03-01T00:00:00Z",
+              "updatedAt": "2026-03-01T00:00:00Z",
+              "body": "me too"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

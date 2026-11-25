@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "demonstration": true,
+  "run": {
+    "status": "complete",
+    "phase": "Both versions finished all four test cases",
+    "elapsed_seconds": 202
+  },
+  "conclusion": {
+    "status": "regression",
+    "answer": "No, keep the current /review skill: the candidate misses the renamed-keyword defect, which the stated requirement does not allow.",
+    "text": "Keep the current /review skill in this fictional example. The added check removes one false finding but misses the renamed-keyword defect. It also takes longer and uses more tokens. Missing a known defect breaks the stated requirement."
+  },
+  "title": "Requiring a failure path cut false findings but missed a known bug",
+  "purpose": "Compare the current /review skill with a candidate that must cite the changed code, trace an affected caller, and describe a triggering input before reporting a defect.",
+  "decision": "Should /review require a traced failure path for every finding?",
+  "baseline_id": "baseline",
+  "dataset": {
+    "name": "Review defects and clean changes",
+    "version": "fictional-seed-v1",
+    "provenance": "Four handwritten cases: two known defects, one unrelated defect, and one clean change. All inputs, outputs and measurements are fictional.",
+    "cases": [
+      {
+        "id": "scope-leak",
+        "title": "A valid defect outside the changed code",
+        "input": "Review only the authentication diff. A legacy settings bug is visible in surrounding context.",
+        "expected": "Do not report the unrelated settings defect. Report only defects caused by the scoped change.",
+        "tags": ["scope", "negative"]
+      },
+      {
+        "id": "missing-check",
+        "title": "A removed authorization check",
+        "input": "A handler diff removes the ownership check before reading an account record.",
+        "expected": "Identify the access-control regression and cite the removed check.",
+        "tags": ["security", "positive"]
+      },
+      {
+        "id": "plausible-noise",
+        "title": "A parameter rename breaks a keyword caller",
+        "input": "A function parameter is renamed from owner_id to account_id. An unchanged caller still passes owner_id by keyword.",
+        "expected": "Report the broken keyword call. Cite the changed parameter and the unchanged caller that triggers the error.",
+        "tags": ["trace", "positive"]
+      },
+      {
+        "id": "clean-change",
+        "title": "A behavior-preserving rename",
+        "input": "A local variable is renamed consistently in a pure helper.",
+        "expected": "Return no actionable finding.",
+        "tags": ["precision", "negative"]
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "id": "correct",
+      "label": "Correct case verdicts",
+      "definition": "Test cases where the review reaches the expected conclusion.",
+      "unit": "percent",
+      "aggregation": "binary_mean",
+      "direction": "higher",
+      "comparison_eligible": true,
+      "best_possible": 100,
+      "best_possible_note": "Every case has the expected verdict."
+    },
+    {
+      "id": "found",
+      "label": "Known defects found",
+      "definition": "Distinct known defects correctly identified, out of two in this dataset.",
+      "unit": "count",
+      "direction": "higher",
+      "comparison_eligible": true,
+      "best_possible": 2,
+      "best_possible_note": "2 known defects; one trial per case."
+    },
+    {
+      "id": "unsupported",
+      "label": "False findings",
+      "definition": "Reported findings confirmed wrong or outside the reviewed change.",
+      "unit": "count",
+      "direction": "lower",
+      "comparison_eligible": true,
+      "best_possible": 0,
+      "best_possible_note": "No false findings."
+    },
+    {
+      "id": "missed",
+      "label": "Known defects missed",
+      "definition": "Known defects the review did not identify. This count covers the labeled defects only.",
+      "unit": "count",
+      "direction": "lower",
+      "comparison_eligible": true,
+      "best_possible": 0,
+      "best_possible_note": "No known defects missed."
+    }
+  ],
+  "guardrails": [
+    "Retain detection of both known defects: the removed authorization check and the broken keyword call.",
+    "Reduce false findings without excluding valid defects from the review.",
+    "Use real, human-reviewed cases before making a change to the installed skill."
+  ],
+  "budget": {
+    "status": "Subscription usage",
+    "note": "One shared limit covers both versions, grader calls, retries, and cleanup. This example represents a single comparison on the full four-case dataset.",
+    "max_calls": 12,
+    "max_seconds": 1200
+  },
+  "variants": [
+    {
+      "id": "baseline",
+      "label": "Current /review",
+      "revision": "Fictional baseline revision",
+      "runtime": "Codex · fixed model and effort (fictional example)",
+      "changes": [
+        "Reference version before adding the failure-path requirement."
+      ],
+      "status": "complete",
+      "planned": 4,
+      "completed": 4,
+      "summary": [
+        {
+          "metric_id": "correct",
+          "value": 75,
+          "numerator": 3,
+          "denominator": 4,
+          "note": "3 of 4 case verdicts match the expected conclusion."
+        },
+        {
+          "metric_id": "found",
+          "value": 2,
+          "numerator": null,
+          "denominator": 4,
+          "note": "Known defects found among 2 labeled defects across 4 graded trials."
+        },
+        {
+          "metric_id": "unsupported",
+          "value": 1,
+          "numerator": null,
+          "denominator": 4,
+          "note": "False findings across 4 completed test cases."
+        },
+        {
+          "metric_id": "missed",
+          "value": 0,
+          "numerator": null,
+          "denominator": 4,
+          "note": "Known defects missed among 2 labeled defects across 4 graded trials."
+        }
+      ],
+      "usage": {
+        "input_tokens": 8400,
+        "cached_input_tokens": 2000,
+        "output_tokens": 1650,
+        "seconds": 84
+      },
+      "overhead": {
+        "input_tokens": 600,
+        "cached_input_tokens": 0,
+        "output_tokens": 80,
+        "seconds": 4
+      },
+      "results": [
+        {
+          "case_id": "scope-leak",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 0,
+            "found": 0,
+            "unsupported": 1,
+            "missed": 0
+          },
+          "evidence": "Reported an unrelated legacy-settings defect.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "missing-check",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 1,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Reported the access-control regression and cited the removed check.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "plausible-noise",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 1,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Reported the broken owner_id keyword call with the changed function and caller.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "clean-change",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 0,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Returned no finding, as required for this case.",
+          "note": "Fictional example; not a live model result."
+        }
+      ]
+    },
+    {
+      "id": "candidate",
+      "label": "Require a failure path",
+      "revision": "Fictional candidate revision",
+      "runtime": "Codex · fixed model and effort (fictional example)",
+      "changes": [
+        "Before reporting a defect, cite changed code, trace an affected caller, and describe an input that causes failure."
+      ],
+      "status": "complete",
+      "planned": 4,
+      "completed": 4,
+      "summary": [
+        {
+          "metric_id": "correct",
+          "value": 75,
+          "numerator": 3,
+          "denominator": 4,
+          "note": "3 of 4 case verdicts match the expected conclusion."
+        },
+        {
+          "metric_id": "found",
+          "value": 1,
+          "numerator": null,
+          "denominator": 4,
+          "note": "Known defects found among 2 labeled defects across 4 graded trials."
+        },
+        {
+          "metric_id": "unsupported",
+          "value": 0,
+          "numerator": null,
+          "denominator": 4,
+          "note": "False findings across 4 completed test cases."
+        },
+        {
+          "metric_id": "missed",
+          "value": 1,
+          "numerator": null,
+          "denominator": 4,
+          "note": "Known defects missed among 2 labeled defects across 4 graded trials."
+        }
+      ],
+      "usage": {
+        "input_tokens": 10300,
+        "cached_input_tokens": 3000,
+        "output_tokens": 2100,
+        "seconds": 110
+      },
+      "overhead": {
+        "input_tokens": 600,
+        "cached_input_tokens": 0,
+        "output_tokens": 80,
+        "seconds": 4
+      },
+      "results": [
+        {
+          "case_id": "scope-leak",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 0,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Returned no finding, as required for this case.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "missing-check",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 1,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Reported the access-control regression and cited the removed check.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "plausible-noise",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 0,
+            "found": 0,
+            "unsupported": 0,
+            "missed": 1
+          },
+          "evidence": "Missed the broken keyword call after failing to establish a full failure path.",
+          "note": "Fictional example; not a live model result."
+        },
+        {
+          "case_id": "clean-change",
+          "trial": 1,
+          "status": "completed",
+          "scores": {
+            "correct": 1,
+            "found": 0,
+            "unsupported": 0,
+            "missed": 0
+          },
+          "evidence": "Returned no finding, as required for this case.",
+          "note": "Fictional example; not a live model result."
+        }
+      ]
+    }
+  ]
+}

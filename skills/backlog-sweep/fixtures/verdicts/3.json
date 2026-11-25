@@ -1,0 +1,17 @@
+{
+  "id": "3",
+  "verdict": "release-claim",
+  "confidence": "high",
+  "summary": "Claim idle since September.",
+  "labels": {
+    "remove": ["claimed"]
+  },
+  "comment": "Releasing this stale claim.",
+  "evidence": [
+    {
+      "kind": "issue",
+      "ref": "#3",
+      "note": "see this"
+    }
+  ]
+}

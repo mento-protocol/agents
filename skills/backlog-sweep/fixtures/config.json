@@ -1,0 +1,8 @@
+{
+  "ownAuthors": ["maint"],
+  "claimLabels": ["claimed"],
+  "protectLabels": ["wayfinder:*"],
+  "humanGateLabels": ["needs-owner"],
+  "parkedLabels": ["parked"],
+  "staleClaimDays": 14
+}

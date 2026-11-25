@@ -1,0 +1,3 @@
+interface:
+  display_name: Backlog Sweep
+  short_description: Sweep a backlog to one verdict per issue

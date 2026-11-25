@@ -1,0 +1,19 @@
+{
+  "id": "8",
+  "verdict": "update",
+  "confidence": "high",
+  "summary": "Rewrite the body.",
+  "newBody": "New text.",
+  "newTitle": "Rewritten",
+  "labels": {
+    "add": ["triage"]
+  },
+  "comment": "Rewrote the description.",
+  "evidence": [
+    {
+      "kind": "file",
+      "ref": "src/a.js:3",
+      "note": "see this"
+    }
+  ]
+}

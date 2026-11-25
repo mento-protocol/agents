@@ -1,0 +1,42 @@
+{
+  "data": {
+    "repository": {
+      "labels": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "id": "L_bug",
+            "name": "bug"
+          },
+          {
+            "id": "L_claimed",
+            "name": "claimed"
+          },
+          {
+            "id": "L_enhancement",
+            "name": "enhancement"
+          },
+          {
+            "id": "L_needs-owner",
+            "name": "needs-owner"
+          },
+          {
+            "id": "L_parked",
+            "name": "parked"
+          },
+          {
+            "id": "L_triage",
+            "name": "triage"
+          },
+          {
+            "id": "L_wayfinder:map",
+            "name": "wayfinder:map"
+          }
+        ]
+      }
+    }
+  }
+}
