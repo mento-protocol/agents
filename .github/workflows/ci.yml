@@ -100,11 +100,25 @@ jobs:
       - name: Test the skill test runner
         run: node --test scripts/tests/test-skills/*.test.mjs
 
+      # A skill's requirements.txt pins the Python packages its scripts and
+      # tests need, by version and hash. Install them all into one virtual
+      # environment for the next step.
+      - name: Install skill Python packages
+        run: |
+          venv="$RUNNER_TEMP/skills-venv"
+          python3 -m venv "$venv"
+          for req in skills/*/requirements.txt; do
+            [ -f "$req" ] || continue
+            "$venv/bin/pip" install --require-hashes -r "$req"
+          done
+
       # Every skill's own suite: *.test.mjs with node --test, *.test.sh,
       # *-test.sh and test-*.sh with bash, test_*.py and *_test.py with
-      # unittest, one file at a time. A kind with no files passes.
+      # unittest, one file at a time. A kind with no files passes. The
+      # virtual environment comes first on PATH, so the runner's python3 has
+      # the packages.
       - name: Test the skills
-        run: bash scripts/test-skills.sh
+        run: PATH="$RUNNER_TEMP/skills-venv/bin:$PATH" bash scripts/test-skills.sh
 
       - name: Test link-skills.sh
         run: bash scripts/test-link-skills.sh
