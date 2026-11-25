@@ -102,7 +102,7 @@ jobs:
 
       # Every skill's own suite: *.test.mjs with node --test, *.test.sh,
       # *-test.sh and test-*.sh with bash, test_*.py and *_test.py with
-      # python3 -m unittest. A kind with no files passes.
+      # unittest, one file at a time. A kind with no files passes.
       - name: Test the skills
         run: bash scripts/test-skills.sh
 

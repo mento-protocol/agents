@@ -9,28 +9,39 @@
 #
 #   *.test.mjs                         node --test, all files in one run
 #   *.test.sh, *-test.sh, test-*.sh    bash <file>, one file at a time
-#   test_*.py, *_test.py               python3 -m unittest discover, per file
+#   test_*.py, *_test.py               python3 with unittest, one file at a time
 #
-# Every runner starts in the repository root. A Python file runs with its own
-# directory as the top level, so it imports its siblings as it does when it
-# runs as a script. A kind with no matching file is reported and passes.
+# Every runner starts in the repository root. lib/test-skills/run-unittest.py
+# loads each Python file by its exact path, with the file's directory first on
+# sys.path, so it imports its siblings as it does when it runs as a script; a
+# Python file with no test case fails. A kind with no matching file is
+# reported and passes.
 #
 # Exit 0: every file passed, or there was none. Exit 1: a file failed.
-# Exit 2: the root is not a git work tree or a runner is not installed.
+# Exit 2: the root is not a git work tree, git cannot list its files, or a
+# runner is not installed.
 
 set -uo pipefail
 
-ROOT=${1:-$(cd "$(dirname "$0")/.." && pwd -P)}
+HERE=$(cd "$(dirname "$0")" && pwd -P)
+ROOT=${1:-$HERE/..}
 NODE_FILES=()
 BASH_FILES=()
 PY_FILES=()
 FAILED=()
 PASSED=0
 
-# Sort each file under skills/ into the list of its kind.
+# Sort each file under skills/ into the list of its kind. A process
+# substitution hides the exit status of git, and an unreadable index would
+# then pass as a repository with no tests, so the listing ends with an end
+# marker only when git succeeded. No path under skills/ equals the marker.
 collect_files() {
-	local file base
+	local file base complete=0
 	while IFS= read -r -d '' file; do
+		if [[ $file == "--end-of-listing--" ]]; then
+			complete=1
+			continue
+		fi
 		[[ -f "$ROOT/$file" ]] || continue
 		base=${file##*/}
 		case "$base" in
@@ -39,7 +50,12 @@ collect_files() {
 		test_*.py | *_test.py) PY_FILES+=("$file") ;;
 		*) ;;
 		esac
-	done < <(git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- skills/)
+	done < <(git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- skills/ &&
+		printf '%s\0' "--end-of-listing--")
+	if ((complete == 0)); then
+		echo "test-skills: git cannot list the files under $ROOT/skills" >&2
+		exit 2
+	fi
 }
 
 # Stop with exit 2 when a kind has files but its runner is missing.
@@ -89,24 +105,26 @@ run_bash() {
 }
 
 run_python() {
-	local file dir status
+	local file status
 	if ((${#PY_FILES[@]} == 0)); then
 		echo "== python3: no test_*.py or *_test.py files"
 		return
 	fi
 	for file in "${PY_FILES[@]}"; do
-		dir=$(dirname "$ROOT/$file")
-		echo "== python3 -m unittest $file"
-		(cd "$ROOT" && python3 -m unittest discover -s "$dir" -t "$dir" -p "${file##*/}")
+		echo "== python3 $file"
+		(cd "$ROOT" && python3 "$HERE/lib/test-skills/run-unittest.py" "$file")
 		status=$?
-		record "$status" "python3 -m unittest $file"
+		record "$status" "python3 $file"
 	done
 }
 
 main() {
-	local entry
-	if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		echo "test-skills: $ROOT is not a git work tree" >&2
+	local entry given=$ROOT
+	# An absolute root: a relative one would resolve again inside the
+	# subshells, which already start in the root.
+	if ! ROOT=$(cd "$given" 2>/dev/null && pwd -P) ||
+		! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		echo "test-skills: $given is not a git work tree" >&2
 		exit 2
 	fi
 	collect_files

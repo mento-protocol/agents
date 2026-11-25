@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -70,10 +70,15 @@ function makeRepo(t, files) {
   return root;
 }
 
-function run(root) {
-  const result = spawnSync("bash", [RUNNER, root], { encoding: "utf8" });
+function run(root, cwd) {
+  const result = spawnSync("bash", [RUNNER, root], { cwd, encoding: "utf8" });
   return { status: result.status, out: result.stdout + result.stderr };
 }
+
+const PY_OK =
+  "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): pass\n";
+const PY_BAD =
+  "import unittest\nclass T(unittest.TestCase):\n    def test_bad(self): self.fail('x')\n";
 
 test("a repository with no skill tests passes and names each empty kind", (t) => {
   const { status, out } = run(makeRepo(t, { "skills/a/SKILL.md": "x\n" }));
@@ -103,9 +108,56 @@ for (const [kind, [path, body]] of Object.entries(FAILING)) {
   test(`a failing ${kind} test fails the run`, (t) => {
     const { status, out } = run(makeRepo(t, { ...PASSING, [path]: body }));
     assert.equal(status, 1, out);
-    assert.match(out, /FAIL /);
+    const label = kind === "node" ? "node --test" : path;
+    assert.ok(
+      out.includes(
+        `  FAIL ${kind === "bash" ? "bash " : kind === "python" ? "python3 " : ""}${label}`,
+      ),
+      out,
+    );
+    // The node files run as one run, so a failing one also takes the passing one.
+    const passed = kind === "node" ? 5 : 6;
+    assert.ok(out.includes(`test-skills: 1 failed, ${passed} passed`), out);
   });
 }
+
+test("an index git cannot read stops the run with exit 2", (t) => {
+  const root = makeRepo(t, PASSING);
+  writeFileSync(join(root, ".git", "index"), "not an index");
+  const { status, out } = run(root);
+  assert.equal(status, 2, out);
+  assert.match(out, /git cannot list the files/);
+});
+
+test("a Python file runs by its exact path, also with a hyphen in its name", (t) => {
+  const { status, out } = run(
+    makeRepo(t, {
+      "skills/a/tests/test_multi-chain.py": PY_OK,
+      ".gitignore": "skills/a/tests/nested/\n",
+      "skills/a/tests/__init__.py": "",
+      "skills/a/tests/nested/__init__.py": "",
+      "skills/a/tests/nested/test_multi-chain.py": PY_BAD,
+    }),
+  );
+  assert.equal(status, 0, out);
+  assert.match(out, /Ran 1 test/);
+  assert.match(out, /test-skills: 1 run\(s\) passed/);
+});
+
+test("a Python file with no test case fails", (t) => {
+  const { status, out } = run(
+    makeRepo(t, { "skills/a/tests/test_empty.py": "x = 1\n" }),
+  );
+  assert.equal(status, 1, out);
+  assert.match(out, /no test cases in/);
+});
+
+test("a relative root resolves before the runners start", (t) => {
+  const root = makeRepo(t, { "skills/a/tests/test_ok.py": PY_OK });
+  const { status, out } = run(basename(root), dirname(root));
+  assert.equal(status, 0, out);
+  assert.match(out, /test-skills: 1 run\(s\) passed/);
+});
 
 test("a test file outside skills/ does not run", (t) => {
   const { status, out } = run(

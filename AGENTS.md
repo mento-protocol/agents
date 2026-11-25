@@ -39,9 +39,9 @@ Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
 and layout, and `bash scripts/test-skills.sh` (or `pnpm test:skills`) to run
 every skill's own suite. The runner takes the files from git under
 `skills/`: `*.test.mjs` runs with `node --test`; `*.test.sh`, `*-test.sh` and
-`test-*.sh` run with `bash`; `test_*.py` and `*_test.py` run with
-`python3 -m unittest`. Every runner starts in the repository root. A kind with
-no files passes. The `skills` CI job runs both steps on Ubuntu and macOS on
+`test-*.sh` run with `bash`; `test_*.py` and `*_test.py` run with `unittest`,
+each loaded by its exact path. Every runner starts in the repository root. A
+Python file with no test case fails. A kind with no files passes. The `skills` CI job runs both steps on Ubuntu and macOS on
 every pull request.
 
 ## Public readership
@@ -220,10 +220,10 @@ builds a throwaway git repository and runs the runner over it. Run the three
 directories with `pnpm test:scripts`. The cases of
 `scripts/test-link-skills.sh` live under `scripts/tests/link-skills/`, one
 file per topic, sourced from an explicit ordered list the way the modules
-are; the runner itself holds no case. Each topic file ends with a `cases_<topic>` function that calls `case_run` for its
-cases in order, and the runner's `main` calls those functions in order. A
-helper file shared by several topics, such as `install-hooks-common.sh`, holds
-no case and so has no `cases_<topic>` function; it is sourced before the topics
+are; the runner itself holds no case. Each topic file ends with a
+`cases_<topic>` function that calls `case_run` for its cases in order, and the
+runner's `main` calls those functions in order. A helper file shared by
+several topics, such as `install-hooks-common.sh`, holds no case and so has no `cases_<topic>` function; it is sourced before the topics
 that call it. A helper used by one topic file alone stays in that file and
 starts with `_`.
 
