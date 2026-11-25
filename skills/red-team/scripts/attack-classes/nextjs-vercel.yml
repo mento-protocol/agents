@@ -1,0 +1,205 @@
+# Next.js + Vercel attack classes
+# For ui-dashboard/ and any Mento Next.js+Vercel app.
+
+runtime: nextjs-vercel
+description: |
+  Next.js 16 App Router app deployed to Vercel. Trust boundary is "anything
+  from the browser is untrusted; server actions and API routes are public
+  unless explicit auth gates apply." Server-side environment carries
+  Sentry/Upstash/Vercel-Blob tokens that must NOT leak into client bundles.
+  Bypass cookie + ignoreCommand race are platform-level footguns that have
+  already caused incidents in this repo.
+
+classes:
+  - id: server-action-auth
+    name: Server-action auth bypass / missing checks
+    description: |
+      `'use server'` actions are publicly callable by any client. Look for
+      actions that mutate state (DB write, blob put, external API call)
+      without an explicit auth.userId check at function entry. Next.js
+      route handlers in app/api/* have the same exposure. The address-book
+      editor and forensic-report submit flows are high-value targets.
+    scope_hints:
+      - src/app/**/actions.ts
+      - src/app/**/actions/*.ts
+      - src/app/api/**/route.ts
+      - src/app/api/**/route.tsx
+      - src/lib/auth/**/*.ts
+      - src/auth.ts
+      - src/middleware.ts
+    exclude:
+      # Read-only routes — no state mutation, out of scope for this class.
+      # The auth model on these is "session + domain suffix" — appropriate
+      # for read-only intel. Empirical: a ui-dashboard chunk-2
+      # hunter spent budget concluding these are out of scope; better to
+      # exclude at orchestrator time.
+      - src/app/api/intel/**
+      - src/app/api/bridge-redeem/**
+      - src/app/api/rebalance-check/**
+      - src/app/api/address-labels/export/**
+    support_files:
+      # Hunters may Read these files when tracing a finding's call graph.
+      # NOT for broad exploration — each support-file read must be tied to
+      # a specific in-scope finding.
+      - src/lib/redis.ts # Upstash client setup
+      - src/lib/redis-hash.ts # hash CRUD + Lua-EVAL scripts
+      - src/lib/csp.ts # CSP nonce + connect-src allowlist
+      - src/env.ts # env schema, clientEnv vs serverEnv split
+      - next.config.ts # security headers, Sentry tunnel route
+      - vercel.json # crons + ignoreCommand
+    severity_floor: BLOCKER
+
+  - id: data-exposure-read-only
+    name: Data exposure on read-only routes
+    description: |
+      Read-only route handlers that return data without per-user scoping,
+      shared in-memory cache key collisions across users, sensitive
+      enrichment leakage, or unbounded fan-out. Distinct from
+      server-action-auth: these routes don't mutate state, but they CAN
+      expose other users' data, leak server-only fields into responses, or
+      let an attacker poison a shared cache by controlling cache-key
+      inputs.
+
+      Specifically look for:
+      - In-memory caches keyed by URL/argument without user scoping
+        (poisonable if attacker controls the input)
+      - Routes returning data scoped only by org-membership when individual
+        user-scope is expected
+      - Outbound proxies that forward sensitive params (API keys, internal
+        service tokens) to upstream services without scrubbing
+      - Cache staleness / TTL leak (one user's data served to another)
+      - Response shapes that include server-only fields (internal IDs,
+        cursor tokens, debug info)
+      - Enrichment routes (Arkham, Dune, Hasura proxy) that leak the
+        upstream's full response when only a subset should be exposed
+    scope_hints:
+      - src/app/api/intel/**/route.ts
+      - src/app/api/bridge-redeem/**/route.ts
+      - src/app/api/rebalance-check/**/route.ts
+      - src/app/api/address-labels/export/**/route.ts
+      - src/app/api/hasura/[networkId]/route.ts
+    exclude:
+      - src/app/api/auth/**
+    support_files:
+      - src/middleware.ts # auth + domain gate
+      - src/auth.ts # session shape
+      - src/lib/redis.ts # read paths
+      - src/env.ts # what's server-only vs client-safe
+    severity_floor: WARNING
+    # Seed evidence (ui-dashboard recon + chunk-2 hunter analysis):
+    # - intel/** routes are intentionally org-shared (any @mentolabs.xyz user
+    #   sees same data); recon explicitly notes this is the trust model.
+    #   Hunter must adjudicate "intentional" — do NOT flag intel/* for
+    #   missing per-user scoping.
+    # - rebalance-check uses an in-memory FIFO cache (1024) + inFlight dedup
+    #   (64), keyed on (network, pool, strategy). Inputs are address-validated
+    #   + network-whitelisted, so unbounded poisoning isn't practical, but
+    #   verify the keys can't be controlled to collide across legitimate users.
+    # - bridge-redeem forwards txHash to api.wormholescan.io with strict
+    #   32-byte-hex regex validation. Outbound host is fixed. Look for response
+    #   passthrough that leaks Wormholescan's internal fields.
+    # - hasura/[networkId] is gated by NODE_ENV !== "production"; admin secret
+    #   in proxied header. Real concern: response passthrough leaks Hasura
+    #   internal error messages (table names, query plan hints).
+
+  - id: secret-exposure-client-bundle
+    name: Secret leakage into client bundle
+    description: |
+      Env vars without NEXT_PUBLIC_ prefix are server-only. But code paths
+      that LOG (Sentry breadcrumbs, console.error with full request body),
+      RETURN secrets in a server-action response, or accidentally use a
+      private env in a Client Component will leak. Sentry public key is
+      fine to expose; Upstash REST token, AUTH_SECRET, Vercel Blob read-
+      write token MUST NOT leak. Check: secret strings in stringified
+      response bodies, error.message that contains a token, server-action
+      return values that include internal config.
+    scope_hints:
+      - src/**/*.ts
+      - src/**/*.tsx
+      - src/lib/**/*.ts
+    severity_floor: BLOCKER
+
+  - id: xss-html-injection
+    name: XSS via unsafe-HTML escape hatch or markdown
+    description: |
+      React's escape-hatch prop for raw HTML (the `dangerously…InnerHTML`
+      attribute) fed by user-controlled text; markdown renderers without
+      sanitization; address-book labels or forensic-report bodies that
+      render unsanitized HTML; Plotly chart annotations that pass strings
+      to dangerously-rendered components. Slack-mrkdwn or Discord-mrkdwn
+      rendered in the dashboard without sanitization is also in scope.
+    scope_hints:
+      - src/**/*.tsx
+      - src/components/**/*.tsx
+      - src/lib/markdown/**/*.ts
+    severity_floor: WARNING
+
+  - id: vercel-bypass-cookie
+    name: Vercel Protection-Bypass cookie misuse
+    description: |
+      Preview deployments use a bypass secret + cookie. Risks: bypass secret
+      in client-visible code; cookie set without httpOnly / secure; bypass
+      logic that doesn't check deployment env (would leak to prod);
+      misuse of x-vercel-set-bypass-cookie=true in user-facing code.
+    scope_hints:
+      - src/middleware.ts
+      - src/lib/auth/**/*.ts
+      - src/lib/vercel/**/*.ts
+    severity_floor: WARNING
+
+  - id: csrf-write-endpoints
+    name: CSRF on write endpoints
+    description: |
+      Server actions + POST route handlers without CSRF protection. Next.js
+      provides some defaults (origin-check for server actions) but custom
+      route handlers don't. Check: state-mutating POST/PUT/DELETE handlers
+      that don't verify origin, sameSite cookie attributes, double-submit
+      token patterns.
+    scope_hints:
+      - src/app/api/**/route.ts
+      - src/middleware.ts
+    severity_floor: WARNING
+
+  - id: ignoreCommand-race
+    name: Vercel ignoreCommand race condition (regression of PR #509)
+    description: |
+      Vercel's ignoreCommand can race when the first push to a branch beats
+      `gh pr create` — VERCEL_GIT_PULL_REQUEST_ID is empty AND
+      VERCEL_GIT_PREVIOUS_SHA is empty. PR #509 patched the script; check
+      for regression in vercel-ignore-build.sh, vercel.json's ignoreCommand,
+      and any new conditional builds that don't handle empty pull-request
+      ID + empty previous-SHA together.
+    scope_hints:
+      - vercel.json
+      - scripts/vercel-*.sh
+      - scripts/vercel-ignore-build.sh
+    severity_floor: WARNING
+
+  - id: upstash-blob-token-handling
+    name: Upstash + Vercel Blob token surface
+    description: |
+      Upstash REST tokens and Vercel Blob read-write tokens are
+      load-bearing for the address-book/forensic-report flows. Check:
+      tokens never appear in client bundles, are NOT logged to Sentry
+      breadcrumbs, are not echoed in error messages, are scoped to the
+      narrowest read/write surface needed. Blob private store gotchas
+      ([[reference_vercel_blob_private]]) matter here.
+    scope_hints:
+      - src/lib/upstash/**/*.ts
+      - src/lib/blob/**/*.ts
+      - src/app/api/**/route.ts
+    severity_floor: WARNING
+
+  - id: open-redirect-and-ssrf
+    name: Open redirect / SSRF via user-controlled URL
+    description: |
+      Routes or server actions that take a URL and either redirect to it
+      or fetch from it server-side. SSRF lets internal services be probed
+      (Sentry, Vercel internal IPs, indexer internal endpoints). Open
+      redirects let attackers phish via mento-branded URLs. Address book
+      forensic reports that link out are a likely surface.
+    scope_hints:
+      - src/app/**/route.ts
+      - src/lib/redirect/**/*.ts
+      - src/components/**/Link*.tsx
+    severity_floor: WARNING
