@@ -410,7 +410,7 @@ pnpm test                        # pnpm -r test — every package's test suite
 pnpm test:scripts                # node:test cases for the scripts/ commands
 pnpm validate:skills             # node scripts/validate-skills.mjs
 pnpm check:shell                 # .sh file and function size limits
-node --test skills/*/scripts/*.test.mjs  # every skill's own suite
+pnpm test:skills                 # bash scripts/test-skills.sh — every skill's own suite
 bash scripts/test-link-skills.sh # the link-skills.sh harness, 4 cases at once
 trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
@@ -433,7 +433,9 @@ before the install-hooks topics that call it. The cases for
 `scripts/validate-skills.mjs` are `node:test` files under
 `scripts/tests/validate-skills/`, and the cases for
 `scripts/check-shell-size.mjs` are `node:test` files under
-`scripts/tests/check-shell-size/`. `pnpm test:scripts` runs both directories.
+`scripts/tests/check-shell-size/`, and the cases for `scripts/test-skills.sh`
+are `node:test` files under `scripts/tests/test-skills/`. `pnpm test:scripts`
+runs the three directories.
 
 `scripts/link-skills.sh` is an entry point as well: it sources its topic
 modules from `scripts/lib/link-skills/` by absolute path from an explicit
