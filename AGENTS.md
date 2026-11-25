@@ -41,8 +41,10 @@ every skill's own suite. The runner takes the files from git under
 `skills/`: `*.test.mjs` runs with `node --test`; `*.test.sh`, `*-test.sh` and
 `test-*.sh` run with `bash`; `test_*.py` and `*_test.py` run with `unittest`,
 each loaded by its exact path. Every runner starts in the repository root. A
-Python file with no test case fails. A kind with no files passes. The `skills` CI job runs both steps on Ubuntu and macOS on
-every pull request.
+Python file that runs no case and skips none fails. A kind with no files
+passes. A tracked test file that is not on disk makes the run incomplete
+(exit 2). The `skills` CI job runs both steps on Ubuntu and macOS on every
+pull request.
 
 ## Public readership
 

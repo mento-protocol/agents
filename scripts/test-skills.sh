@@ -18,13 +18,18 @@
 # reported and passes.
 #
 # Exit 0: every file passed, or there was none. Exit 1: a file failed.
-# Exit 2: the root is not a git work tree, git cannot list its files, or a
-# runner is not installed.
+# Exit 2: the root is not the top of a git work tree, git cannot list its
+# files, git lists a test file that is not on disk, or a runner is not
+# installed.
 
 set -uo pipefail
+# An exported CDPATH makes cd print the directory it chose, which the command
+# substitutions below would capture as part of the path.
+unset CDPATH
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 ROOT=${1:-$HERE/..}
+MISSING=()
 NODE_FILES=()
 BASH_FILES=()
 PY_FILES=()
@@ -42,13 +47,21 @@ collect_files() {
 			complete=1
 			continue
 		fi
-		[[ -f "$ROOT/$file" ]] || continue
 		base=${file##*/}
 		case "$base" in
+		*.test.mjs | *.test.sh | *-test.sh | test-*.sh | test_*.py | *_test.py) ;;
+		*) continue ;;
+		esac
+		# A tracked test that is not on disk (a sparse checkout, a local
+		# deletion) cannot run; the run is then incomplete, not a pass.
+		if [[ ! -f "$ROOT/$file" ]]; then
+			MISSING+=("$file")
+			continue
+		fi
+		case "$base" in
 		*.test.mjs) NODE_FILES+=("$file") ;;
-		*.test.sh | *-test.sh | test-*.sh) BASH_FILES+=("$file") ;;
-		test_*.py | *_test.py) PY_FILES+=("$file") ;;
-		*) ;;
+		*.sh) BASH_FILES+=("$file") ;;
+		*) PY_FILES+=("$file") ;;
 		esac
 	done < <(git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- skills/ &&
 		printf '%s\0' "--end-of-listing--")
@@ -56,6 +69,16 @@ collect_files() {
 		echo "test-skills: git cannot list the files under $ROOT/skills" >&2
 		exit 2
 	fi
+}
+
+# Stop with exit 2 when git lists a test file that is not on disk.
+require_present() {
+	local file
+	((${#MISSING[@]} == 0)) && return
+	for file in "${MISSING[@]}"; do
+		echo "test-skills: $file is tracked but not on disk" >&2
+	done
+	exit 2
 }
 
 # Stop with exit 2 when a kind has files but its runner is missing.
@@ -112,22 +135,26 @@ run_python() {
 	fi
 	for file in "${PY_FILES[@]}"; do
 		echo "== python3 $file"
-		(cd "$ROOT" && python3 "$HERE/lib/test-skills/run-unittest.py" "$file")
+		# No __pycache__ next to the test: it would dirty the work tree.
+		(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 "$HERE/lib/test-skills/run-unittest.py" "$file")
 		status=$?
 		record "$status" "python3 $file"
 	done
 }
 
 main() {
-	local entry given=$ROOT
-	# An absolute root: a relative one would resolve again inside the
-	# subshells, which already start in the root.
+	local entry top given=$ROOT
+	# An absolute root, and the top of its work tree: a relative root would
+	# resolve again inside the subshells, which already start in the root, and
+	# a subdirectory would make git look for skills/ below it.
 	if ! ROOT=$(cd "$given" 2>/dev/null && pwd -P) ||
-		! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		echo "test-skills: $given is not a git work tree" >&2
+		! top=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null) ||
+		[[ "$(cd "$top" && pwd -P)" != "$ROOT" ]]; then
+		echo "test-skills: $given is not the top of a git work tree" >&2
 		exit 2
 	fi
 	collect_files
+	require_present
 	require_runner node "${#NODE_FILES[@]}"
 	require_runner bash "${#BASH_FILES[@]}"
 	require_runner python3 "${#PY_FILES[@]}"

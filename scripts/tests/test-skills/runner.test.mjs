@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -157,6 +158,54 @@ test("a relative root resolves before the runners start", (t) => {
   const { status, out } = run(basename(root), dirname(root));
   assert.equal(status, 0, out);
   assert.match(out, /test-skills: 1 run\(s\) passed/);
+});
+
+test("a tracked test that is not on disk stops the run with exit 2", (t) => {
+  const root = makeRepo(t, { "skills/a/tests/test_ok.py": PY_OK });
+  const git = [
+    "-C",
+    root,
+    "-c",
+    "user.name=F",
+    "-c",
+    "user.email=f@example.com",
+  ];
+  execFileSync("git", [...git, "add", "."]);
+  execFileSync("git", [...git, "commit", "-q", "--no-verify", "-m", "x"]);
+  rmSync(join(root, "skills/a/tests/test_ok.py"));
+  const { status, out } = run(root);
+  assert.equal(status, 2, out);
+  assert.match(out, /skills\/a\/tests\/test_ok\.py is tracked but not on disk/);
+});
+
+test("a subdirectory of the work tree is refused as the root", (t) => {
+  const root = makeRepo(t, { ...PASSING, "docs/x.md": "x\n" });
+  const { status, out } = run(join(root, "docs"));
+  assert.equal(status, 2, out);
+  assert.match(out, /is not the top of a git work tree/);
+});
+
+test("a Python module that skips itself passes and writes no bytecode", (t) => {
+  const root = makeRepo(t, {
+    "skills/a/tests/test_skip.py":
+      "import unittest\nraise unittest.SkipTest('optional dependency missing')\n",
+    "skills/a/tests/test_skip_class.py":
+      "import unittest\nclass T(unittest.TestCase):\n    @classmethod\n    def setUpClass(cls): raise unittest.SkipTest('no')\n    def test_x(self): pass\n",
+    "skills/a/tests/test_ok.py": PY_OK,
+  });
+  const { status, out } = run(root);
+  assert.equal(status, 0, out);
+  assert.equal(existsSync(join(root, "skills/a/tests/__pycache__")), false);
+});
+
+test("an exported CDPATH does not change the resolved root", (t) => {
+  const root = makeRepo(t, { "skills/a/tests/test_ok.py": PY_OK });
+  const result = spawnSync("bash", [RUNNER, basename(root)], {
+    cwd: dirname(root),
+    encoding: "utf8",
+    env: { ...process.env, CDPATH: "." },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
 test("a test file outside skills/ does not run", (t) => {

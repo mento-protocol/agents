@@ -8,8 +8,9 @@ of the same name in a subpackage, and it skips a name that is not a valid
 module name, such as `test_multi-chain.py`. The file's directory goes first on
 sys.path, so it imports its siblings as it does when it runs as a script.
 
-Exit 0 when every case passed, 1 when a case failed or errored, and 5 when the
-file holds no case, as `python3 -m unittest` does from Python 3.12.
+Exit 0 when every case passed or was skipped, 1 when a case failed or errored,
+and 5 when the file ran no case and recorded no skip, as `python3 -m unittest`
+does from Python 3.12.
 """
 
 import importlib.util
@@ -26,10 +27,17 @@ def main(path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except unittest.SkipTest as reason:
+        # unittest discovery records a module that raises SkipTest on import
+        # as one skip, not a failure.
+        print(f"skipped {path}: {reason}")
+        return 0
     suite = unittest.defaultTestLoader.loadTestsFromModule(module)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
-    if result.testsRun == 0:
+    # A module or class that raises SkipTest runs no test but records a skip.
+    if result.testsRun == 0 and not result.skipped:
         print(f"no test cases in {path}", file=sys.stderr)
         return 5
     return 0 if result.wasSuccessful() else 1
