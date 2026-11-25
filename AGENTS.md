@@ -24,6 +24,10 @@ directory name. A skill directory may also contain:
   under `scripts/` reads.
 - One archived companion document next to `SKILL.md` when a superseded
   procedure must stay readable.
+- For a third-party skill, the upstream `LICENSE` file and the companion
+  documents upstream keeps next to `SKILL.md` (for example
+  `ADR-FORMAT.md`). Keeping upstream's layout keeps a later upstream merge
+  small.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
 and layout, and `node --test skills/*/scripts/*.test.mjs` to run every
@@ -72,7 +76,9 @@ into this repository:
 
 1. Scrub the skill for the public-readership rule above: internal
    hostnames, private repository names, personal machine paths, incident
-   notes, and personal model-routing rules.
+   notes, and personal model-routing rules. Move each rule that is a
+   repository rule or a personal preference out of the skill, as
+   [ADR 0001](docs/adr/0001-where-a-rule-lives.md) records.
 2. Run `node scripts/validate-skills.mjs` and
    `node --test skills/*/scripts/*.test.mjs`, and fix every reported problem.
 3. Verify the skill from a fresh clone: run `scripts/link-skills.sh`, then
