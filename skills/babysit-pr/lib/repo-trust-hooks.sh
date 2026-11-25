@@ -17,7 +17,7 @@ ROOT_HOOKS_PRESENT=0
 if [[ $ROOT_MATCHES_WATCHED == "1" ]] && [[ -f "$REPO_ROOT/.claude/babysit-pr.sh" || -f "$REPO_ROOT/.github/babysit-pr.sh" ]]; then
 	ROOT_HOOKS_PRESENT=1
 fi
-for hook in "${EXPLICIT_HOOKS[@]}"; do
+for hook in ${EXPLICIT_HOOKS[@]+"${EXPLICIT_HOOKS[@]}"}; do
 	[[ -f $hook ]] || {
 		echo "hook not found: $hook" >&2
 		exit 2
@@ -48,7 +48,7 @@ else
 	add_hook_if_exists "$REPO_ROOT/.claude/babysit-pr.sh"
 	add_hook_if_exists "$REPO_ROOT/.github/babysit-pr.sh"
 fi
-for hook in "${EXPLICIT_HOOKS[@]}"; do
+for hook in ${EXPLICIT_HOOKS[@]+"${EXPLICIT_HOOKS[@]}"}; do
 	if [[ -n $ROOT_HOOK_TRUST ]] && hook_in_root "$hook"; then
 		echo "repo trust preflight refused the hook $hook inside $REPO_ROOT: $ROOT_HOOK_TRUST" >&2
 		continue
@@ -60,7 +60,7 @@ done
 # the pins are verified again right after it, so one file cannot repoint
 # origin and still have the next one load. The first failure stops every
 # later checkout hook and fails the repo gate.
-for hook in "${HOOKS[@]}"; do
+for hook in ${HOOKS[@]+"${HOOKS[@]}"}; do
 	if hook_needs_pin "$hook"; then
 		if [[ -n $ROOT_HOOK_TRUST ]]; then
 			echo "repo trust preflight skipped the hook $hook: $ROOT_HOOK_TRUST" >&2

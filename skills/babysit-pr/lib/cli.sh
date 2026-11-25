@@ -31,7 +31,7 @@ add_waived_check() {
 		exit 2
 		;;
 	esac
-	for existing in "${WAIVED_CHECKS[@]}"; do
+	for existing in ${WAIVED_CHECKS[@]+"${WAIVED_CHECKS[@]}"}; do
 		[[ $existing == "$name" ]] && return 0
 	done
 	WAIVED_CHECKS+=("$name")
