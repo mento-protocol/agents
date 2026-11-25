@@ -33,6 +33,16 @@ lint:
         # Prompt templates an agent receives verbatim, not documents: they
         # start without a heading and quote code with its spaces.
         - skills/refactor/scripts/prompts/**
+        - skills/red-team/scripts/prompts/**
+    # Captured bot comment bodies and API payloads that tests compare byte
+    # for byte; a formatter would change the bytes under test.
+    - linters: [prettier, markdownlint, yamllint]
+      paths:
+        - skills/*/tests/fixtures/**
+    # Prompt templates an agent receives verbatim.
+    - linters: [prettier]
+      paths:
+        - skills/red-team/scripts/prompts/**
 
   # All enabled linters - organized by category for clarity
   enabled:

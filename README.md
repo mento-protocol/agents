@@ -59,6 +59,26 @@ on explicit invocation: `/<name>` in Claude Code, `$<name>` in Codex.
 [mattpocock/skills](https://github.com/mattpocock/skills) under the MIT
 license; each `SKILL.md` records its upstream source and revision.
 
+Pull request skills, which reference each other by relative path and so
+install together:
+
+- [ship-pr](skills/ship-pr/SKILL.md) publishes finished local work: it
+  commits the intended scope, reviews and validates it, pushes, and opens or
+  updates the PR.
+- [review](skills/review/SKILL.md) reviews a diff, branch, commit or PR for
+  defects, pairs itself with an independent second model (Codex) where that
+  is available, and writes a machine-readable review record.
+- [address-feedback](skills/address-feedback/SKILL.md) closes one review
+  round: it fixes valid findings and replies on every surface.
+- [babysit-pr](skills/babysit-pr/SKILL.md) watches open PRs until they are
+  ready. A repository adds its own readiness rules in
+  `.claude/babysit-pr.sh` or `.github/babysit-pr.sh`, which apply when the
+  watch runs from a checkout of that repository.
+- [retro](skills/retro/SKILL.md) turns a session's lessons into memory notes,
+  docs, checks or skill edits, and [red-team](skills/red-team/SKILL.md) runs a
+  whole-repository security sweep with narrow attack-class hunters and Codex
+  validators. Its bundled attack classes target Mento's TypeScript services.
+
 [ADR 0001](docs/adr/0001-where-a-rule-lives.md) records which rules belong in
 a skill here and which belong in a target repository or a user's own
 instructions.
