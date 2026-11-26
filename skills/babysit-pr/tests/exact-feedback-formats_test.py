@@ -78,6 +78,25 @@ print_review_bodies
                 if listed:
                     self.assertIn('superseded head', output)
 
+    def test_claude_review_pass(self):
+        # A real claude-code-action summary (the login replaced). The result
+        # line is appended: the real body predates the prompt that asks for it.
+        real = fixture_body('claude-review-summary')
+        clean = real + '\n\nReview result: LGTM, no findings\n'
+        bot = 'github-actions[bot]'
+        for text, author, expected in [
+                (clean, bot, 0),
+                (real, bot, 1),
+                (clean, 'claude[bot]', 1),
+                (clean + 'Restore the deleted guard.\n', bot, 1),
+                (clean.replace('### Findings roll-up', '### Findings roll-up\n\n1. [P2] Restore the guard.'), bot, 1),
+                (clean.replace('Review result: LGTM, no findings', 'Review result: LGTM, no findings yet'), bot, 1),
+                (clean.replace('**Claude finished', '**Claude encountered an error', 1), bot, 1),
+                (clean.replace('[View job](https://github.com/', '[View job](https://example.com/', 1), bot, 1),
+                ('Review result: LGTM, no findings', bot, 1)]:
+            with self.subTest(text=text[-60:], author=author, expected=expected):
+                self.assertEqual(run(text, author)[:2], [expected, expected])
+
 
 
 if __name__ == '__main__':

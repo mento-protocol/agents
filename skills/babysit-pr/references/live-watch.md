@@ -327,6 +327,10 @@ later by commenting “@codex review”.`, a fenced error block (`Unknown error`
   `@Codex` _tasks_ only. It says nothing about the PR-review service. It is not actionable feedback,
   it is not a reason to reply or re-trigger, and it is not permission to drop the gate. Never tag
   `chatgpt-codex-connector` directly, and treat `@codex` / `@Codex` as one trigger.
+- A claude-code-action review summary (`github-actions[bot]`) is not feedback only when it ends
+  with the exact line `Review result: LGTM, no findings` and carries no `[P1]`–`[P3]` tag; see
+  [exact feedback formats](exact-feedback-formats.md). Any other summary counts as top-level
+  feedback and needs a reply.
 - **Trigger `@codex review` only when no Codex review is running anywhere on the PR.** Before
   posting it, read the bot's summary comment (marker `codex-pull-request-review-summary`) and the
   PR's reactions: a 🔄 **Running** row or a 👀 reaction means in flight, and a newer head is a reason

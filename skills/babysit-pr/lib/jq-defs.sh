@@ -3,8 +3,8 @@
 # jq definitions shared by the babysit-prs.sh feedback and Codex helpers.
 # Sourced at top level after the modes are validated; it only assigns
 # variables. Writes CODEX_REVIEW_SUMMARY_JQ, CODEX_LIMIT_NOTICE_JQ,
-# CODEX_REVIEW_ISSUE_NOTICE_JQ, PASSISH_JQ, TIDY_JQ, WITHDRAWN_JQ and
-# DISPOSITION_JQ; reads nothing.
+# CODEX_REVIEW_ISSUE_NOTICE_JQ, CLAUDE_REVIEW_PASS_JQ, PASSISH_JQ, TIDY_JQ,
+# WITHDRAWN_JQ and DISPOSITION_JQ; reads nothing.
 
 # ShellCheck applies a directive that comes before a file's first command to
 # the whole file (ShellCheck wiki, "Directive"). This empty function is that
@@ -118,6 +118,28 @@ def codex_review_issue_notice:
     + "Codex can also answer questions or update the PR\\. "
     + "Try commenting \"@codex address that feedback\"\\. </details>\\z"
   ));
+'
+
+# claude-code-action posts its review summary as an issue comment by
+# github-actions[bot]. The summary is free-form model text, so no full-body
+# shape exists. Where the review prompt asks for it, a clean review ends with
+# the exact line "Review result: LGTM, no findings". The comment is
+# informational only when all of these hold: that author, the action's own
+# "Claude finished ... [View job](<run URL>)" header, that line as the last
+# line, and no [P1], [P2] or [P3] tag anywhere in the body. Any other body - a
+# summary that lists a finding, a run still in progress, an error, a missing or
+# altered last line - stays actionable feedback. Inline findings are review
+# threads, which the thread and inline counts gate separately.
+# shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
+CLAUDE_REVIEW_PASS_JQ='
+def claude_review_pass:
+  ((.user.login // "") == "github-actions[bot]")
+  and ((.body // "") | test(
+    "\\A\\*\\*Claude finished @[A-Za-z0-9][A-Za-z0-9-]*(?:\\[bot\\])?\u0027s task in [0-9hms ]+\\*\\* "
+    + "—— \\[View job\\]\\(https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+\\)\\n"
+  ))
+  and ((.body // "") | sub("[[:space:]]+\\z"; "") | test("\\nReview result: LGTM, no findings\\z"))
+  and ((.body // "") | test("\\[P[123]\\]") | not);
 '
 
 # A pass is the whole comment, not a phrase inside one. This predicate used to be

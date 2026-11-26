@@ -13,7 +13,7 @@ last_issue_comment_by_me_ts() {
 
 unreplied_issue_comment_count() {
 	local PR=$1
-	issue_comments_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" -r "$PASSISH_JQ$CODEX_REVIEW_SUMMARY_JQ$CODEX_LIMIT_NOTICE_JQ$CODEX_REVIEW_ISSUE_NOTICE_JQ"'
+	issue_comments_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" -r "$PASSISH_JQ$CODEX_REVIEW_SUMMARY_JQ$CODEX_LIMIT_NOTICE_JQ$CODEX_REVIEW_ISSUE_NOTICE_JQ$CLAUDE_REVIEW_PASS_JQ"'
     # A command echo is the whole body: the trigger, optional surrounding
     # whitespace, and any trailing punctuation. `\A`/`\z` anchor the whole
     # string under every Oniguruma syntax, so a body that merely contains the
@@ -26,6 +26,7 @@ unreplied_issue_comment_count() {
     def non_actionable_automation_comment:
       codex_limit_notice
       or codex_review_issue_notice
+      or claude_review_pass
       or codex_review_summary
       or ((.user.login // "") | test("^(vercel|argos-ci)\\[bot\\]$"))
       or (
