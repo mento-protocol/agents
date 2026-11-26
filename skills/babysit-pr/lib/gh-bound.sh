@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # A time limit on every gh call of babysit-prs.sh. Sourced at top
-# level before the first gh call; it defines functions only.
+# level before the first gh call; it defines functions only, and
+# babysit-prs.sh then calls gh_bound_install. Reads GH_TIMEOUT_SECONDS,
+# HARD_DEADLINE, FINAL_POLL and ANNOUNCED_ALL_CLEAR; writes GH_CALL_LIMIT.
 #
 # The function below is named `gh`, so it shadows the gh binary for every call
 # made inside the poller process: each module under lib/, the top-level reads in
@@ -43,12 +45,6 @@ gh_call_limit() {
 # receives a signal sent to the poller's group, so the parent passes INT, TERM
 # and HUP on to it.
 #
-# Without perl neither function is defined and gh runs unbounded, as before:
-# failing every read would stop every watch, which is worse than the hang.
-if ! command -v perl >/dev/null 2>&1; then
-	echo "babysit: perl not found; gh calls run without a time limit" >&2
-	return 0
-fi
 # bounded_run CMD [ARG...] runs CMD under the limit gh_call_limit sets.
 bounded_run() {
 	gh_call_limit
@@ -88,7 +84,24 @@ bounded_run() {
     exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
   ' "$GH_CALL_LIMIT" "$@"
 }
-gh() { bounded_run gh "$@"; }
-# Hooks load after this file. A hook that defines its own `gh`, for logging or
-# default arguments, would otherwise replace the bound with an unbounded call.
-readonly -f gh bounded_run gh_call_limit
+
+# Puts every later gh call of the poller under the limit. babysit-prs.sh calls
+# it right after sourcing this file, before the first gh call.
+#
+# Without perl neither bounded_run nor gh is defined and gh runs unbounded, as
+# before: failing every read would stop every watch, which is worse than the
+# hang. lib/repo-trust.sh tests for bounded_run to choose its own bound.
+gh_bound_install() {
+	if ! command -v perl >/dev/null 2>&1; then
+		echo "babysit: perl not found; gh calls run without a time limit" >&2
+		unset -f bounded_run
+		return 0
+	fi
+	# shellcheck disable=SC2329 # called as gh by every module and hook in the poller
+	gh() { bounded_run gh "$@"; }
+	# Hooks load after this call. A hook that defines its own `gh`, for logging
+	# or default arguments, would otherwise replace the bound with an unbounded
+	# call.
+	readonly -f gh bounded_run gh_call_limit gh_bound_install
+	return 0
+}

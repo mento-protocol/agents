@@ -424,11 +424,12 @@ puts every call under `BABYSIT_GH_TIMEOUT`; it is read-only, so a hook cannot re
 REST reads), `head-binding.sh`, `feedback-counts.sh`, `codex.sh`, `codex-limit-notice.sh` (the usage-limit notice readers),
 `gate-events.sh`, `feedback-gate.sh`, `repo-trust-gates.sh`, `bootstrap.sh`, `post-merge.sh`,
 `poll-merge.sh` (the merge tick), `poll.sh`, `gates.sh`, `gates-review.sh` (the Codex
-verdict), and `main-loop.sh`, which runs the watch and never returns. The script sources each file
-by absolute path with builtins only. `repo-trust.sh` and `repo-trust-hooks.sh` load first, as the
+verdict), and `main-loop.sh`, whose `main_loop_run` runs the watch and never returns. Each module
+only defines functions and constants when it is sourced; the entry point calls them. The script
+sources each file by absolute path with builtins only. `repo-trust.sh` and `repo-trust-hooks.sh` load first, as the
 repository-trust paragraph above describes. Of the others, every module except `cli.sh` and `gh-bound.sh` loads after
-the hooks, so a poller function still replaces a hook function of the same name. Hooks stay sourced at top level, never
-from a function. Put a new module under `lib/` and source it from `babysit-prs.sh` the same way. A
+the hooks, so a poller function still replaces a hook function of the same name. Hooks stay sourced at top level of
+`babysit-prs.sh`, never from a function; the `repo_trust_hooks_*` functions decide which hook loads. Put a new module under `lib/` and source it from `babysit-prs.sh` the same way. A
 test that copies the poller must copy all of `lib/`.
 
 `tests/*.test.sh` run the script against a stubbed `gh` with fabricated PR states. They pin the

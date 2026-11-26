@@ -160,6 +160,7 @@ fi
 readonly GH_TIMEOUT_SECONDS=$((10#$GH_TIMEOUT_SECONDS))
 # shellcheck source=lib/gh-bound.sh
 . "$SCRIPT_DIR/lib/gh-bound.sh" || exit 2
+gh_bound_install
 
 # A PR URL names its repository, so it outranks the checkout the watcher runs
 # in: outside any checkout detection would fail, and inside another
@@ -261,6 +262,23 @@ fi
 repo_trust_setup
 # shellcheck source=lib/repo-trust-hooks.sh
 . "$SCRIPT_DIR/lib/repo-trust-hooks.sh"
+repo_trust_hooks_discover
+repo_trust_hooks_pin
+repo_trust_hooks_select
+# Each hook file is sourced here, at top level and not from a function, so it
+# runs in global scope. A checkout hook loads only after its pins verify.
+for hook in ${HOOKS[@]+"${HOOKS[@]}"}; do
+	if hook_needs_pin "$hook"; then
+		repo_trust_hooks_admit "$hook" || continue
+		# shellcheck source=/dev/null
+		. "$hook"
+		repo_trust_hooks_verify_after "$hook"
+		continue
+	fi
+	# shellcheck source=/dev/null
+	. "$hook"
+done
+repo_trust_hooks_finish
 
 # This runs AFTER `babysit_repo_init`, and nothing below re-reads a hook. An
 # init is free to set `BABYSIT_FEEDBACK_CMD` or to define a gate itself, so
@@ -359,4 +377,5 @@ done
 
 # The watch loop. It exits the poller and never returns here.
 # shellcheck source=lib/main-loop.sh
-. "$SCRIPT_DIR/lib/main-loop.sh"
+. "$SCRIPT_DIR/lib/main-loop.sh" || exit 2
+main_loop_run
