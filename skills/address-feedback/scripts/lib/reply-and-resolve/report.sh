@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The closing report for reply-and-resolve.sh: the PR-wide unresolved count,
 # then one line per requested root still open in that same closing read.
 # Sets STILL_UNRESOLVED, which reply-and-resolve.sh reads for its exit code.
-# Used from reply-and-resolve.sh, which shellcheck checks on its own, hence
-# the disables.
+# Used from reply-and-resolve.sh.
 
 report_closing_state() {
 	local UNRESOLVED THREAD_INDEX_AFTER ROOT_ID ROOT_RESOLVED ROOT_THREAD
@@ -31,6 +30,7 @@ report_closing_state() {
 		[[ -n $ROOT_THREAD ]] ||
 			ROOT_THREAD=$(printf '%s' "$THREAD_INDEX" | jq -r --arg id "$ROOT_ID" '.[$id].id // empty')
 		printf 'unresolved %s thread=%s\n' "$ROOT_ID" "$ROOT_THREAD"
+		# shellcheck disable=SC2034 # read by reply-and-resolve.sh
 		STILL_UNRESOLVED="true"
 	done <<EOF
 $ROOT_IDS

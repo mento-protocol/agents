@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # jq definitions shared by the babysit-prs.sh feedback and Codex helpers.
 # Sourced at top level after the modes are validated; it only assigns
-# variables.
+# variables. Writes CODEX_REVIEW_SUMMARY_JQ, CODEX_LIMIT_NOTICE_JQ,
+# CODEX_REVIEW_ISSUE_NOTICE_JQ, PASSISH_JQ, TIDY_JQ, WITHDRAWN_JQ and
+# DISPOSITION_JQ; reads nothing.
+
+# A no-op first command. ShellCheck applies a directive that comes before a
+# file's first command to the whole file; after this line each directive below
+# covers only the assignment under it (ShellCheck wiki, "Directive").
+:
 
 # Codex can add one hidden `codex-review-state:v1` JSON line after
 # the summary marker while a review runs. It is optional, single-line, and cannot
@@ -16,6 +23,7 @@
 # state - Completed with Completed, Running with Running. Its timestamps are
 # ISO 8601 and its commit is hex; all other text is literal.
 # shellcheck disable=SC2016 # a jq program: its $names are jq variables
+# shellcheck disable=SC2034 # read by codex.sh, feedback-gate.sh and feedback-counts.sh
 CODEX_REVIEW_SUMMARY_JQ='
 def codex_review_summary:
   def table:
@@ -60,6 +68,7 @@ def codex_review_summary:
 # row. The comment is informational only on this exact shape - the one sentence
 # and the dashboard link, with trailing whitespace allowed. Any other author, or
 # one added sentence, stays actionable feedback.
+# shellcheck disable=SC2034 # read by codex-limit-notice.sh, feedback-gate.sh and feedback-counts.sh
 CODEX_LIMIT_NOTICE_JQ='
 def codex_limit_notice:
   ((.user.login // "") == "chatgpt-codex-connector[bot]")
@@ -85,6 +94,7 @@ def codex_limit_notice:
 # included. Any other author, closing phrase, error text or added sentence
 # stays actionable feedback.
 # shellcheck disable=SC2016 # a jq program: its $names are jq variables
+# shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
 CODEX_REVIEW_ISSUE_NOTICE_JQ='
 def codex_review_issue_notice:
   ((.user.login // "") == "chatgpt-codex-connector[bot]")
@@ -143,6 +153,7 @@ def codex_review_issue_notice:
 # The three classifiers below share this one definition rather than a copy each,
 # so a body the new-feedback count treats as a pass is the same body the
 # unresolved-feedback gate and the review-body count treat as a pass.
+# shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
 PASSISH_JQ='
 def passish:
   test("\\A[[:space:]]*("
@@ -167,6 +178,7 @@ def passish:
 # you, which is the settled-state rule ../../address-feedback/SKILL.md defines. A
 # maintainer's comment after it reopens the finding and this gate counts the root
 # again.
+# shellcheck disable=SC2034 # read by feedback-counts.sh
 TIDY_JQ='
 def tidy:
   (. // "")
@@ -179,6 +191,7 @@ def tidy:
 '
 
 # shellcheck disable=SC2016  # $me and $codex are jq arguments, not shell vars.
+# shellcheck disable=SC2034 # read by feedback-counts.sh
 WITHDRAWN_JQ='
 def codex_withdrawal:
   ((.body // "") | tidy | sub("^\\s+"; ""))
@@ -212,6 +225,7 @@ def codex_withdrawn_roots($me; $codex):
 # terms: it searches every reply of yours for that text, and refuses to resolve
 # on one that any other author has answered since.
 # shellcheck disable=SC2016  # the $ is a jq regex anchor, not a shell variable.
+# shellcheck disable=SC2034 # read by feedback-counts.sh
 DISPOSITION_JQ='
 def codex_disposition:
   ((.body // "") | tidy | sub("^\\s+"; ""))

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2016,SC2034,SC2154
+# shellcheck shell=bash
 # The jq snippets codex-threads.sh partitions Codex roots with. Each of
 # TIDY_JQ, WITHDRAWN_JQ, DISPOSITION_JQ and BOILERPLATE_JQ is a plain string
 # assignment, safe to source before the rest of the script runs. They are read
-# from lib/codex-threads/sections.sh, a sibling file shellcheck checks on its
-# own, hence the disables.
+# from lib/codex-threads/sections.sh.
+
+# A no-op first command. ShellCheck applies a directive that comes before a
+# file's first command to the whole file; after this line each directive below
+# covers only the assignment under it (ShellCheck wiki, "Directive").
+:
 
 # Badge markup carries the priority as an image; the reader only needs the
 # priority. The "Useful? React with" footer is Codex boilerplate, not a finding.
@@ -24,6 +28,7 @@
 # inside a sentence. Dropping every line that merely opens with the phrase turned
 # `Withdrawn.` followed by `Useful? React with 👍 / 👎. This still fails on the
 # async path.` into a one-line withdrawal, which retired a live finding.
+# shellcheck disable=SC2034 # read by sections.sh
 TIDY_JQ='
 def tidy:
   (. // "")
@@ -100,6 +105,7 @@ def tidy:
 # Both --help texts and references/github-surfaces.md state the same markers;
 # change those in the same edit.
 # shellcheck disable=SC2016  # $me and $codex are jq arguments, not shell vars.
+# shellcheck disable=SC2034 # read by sections.sh
 WITHDRAWN_JQ='
 def codex_withdrawal:
   ((.body // "") | tidy | sub("^\\s+"; ""))
@@ -162,6 +168,7 @@ def codex_withdrawn_roots($me; $codex):
 # ../../../references/github-surfaces.md and ../../../../babysit-pr/references/live-watch.md
 # state the same rule; change those in the same edit.
 # shellcheck disable=SC2016  # the $ is a jq regex anchor, not a shell variable.
+# shellcheck disable=SC2034 # read by sections.sh
 DISPOSITION_JQ='
 def codex_disposition:
   ((.body // "") | tidy | sub("^\\s+"; ""))
@@ -190,6 +197,7 @@ def codex_answered_roots($me):
 # codex_boilerplate_review_container classifier, minus its author check, which
 # the join below already applies; keep the two in step.
 # shellcheck disable=SC2016  # the backticks are Markdown in Codex's body, not a command.
+# shellcheck disable=SC2034 # read by sections.sh
 BOILERPLATE_JQ='
 def codex_boilerplate_review_container:
   (

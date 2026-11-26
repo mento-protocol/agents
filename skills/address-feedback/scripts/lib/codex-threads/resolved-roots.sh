@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Roots of resolved threads: isResolved lives only in GraphQL, so the REST join
 # below cannot see it. Sets RESOLVED_ROOTS from OWNER, REPO, PR and WORK_DIR -
-# used from lib/codex-threads/sections.sh, a sibling file shellcheck checks on
-# its own, hence the disables.
-# shellcheck disable=SC2016  # $owner and friends are GraphQL variables, not shell.
+# used from lib/codex-threads/sections.sh.
 read_resolved_roots() {
+	# shellcheck disable=SC2016 # $owner and friends are GraphQL variables, not shell.
 	api_capture "$WORK_DIR/threads.json" graphql --paginate \
 		-f owner="$OWNER" -f name="$REPO" -F number="$PR" \
 		-f query='
@@ -16,6 +15,7 @@ read_resolved_roots() {
           # graphql-truncation-ok: only the root comment of each thread is read
           nodes{ isResolved comments(first:1){nodes{databaseId}}}}}}}' ||
 		die 1 "could not list the review threads on PR $PR"
+	# shellcheck disable=SC2034 # read by lib/codex-threads/sections.sh
 	RESOLVED_ROOTS=$(jq -s '[ .[].data.repository.pullRequest.reviewThreads.nodes[]
                           | select(.isResolved)
                           | .comments.nodes[0].databaseId

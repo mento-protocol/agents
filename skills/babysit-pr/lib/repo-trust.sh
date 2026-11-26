@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Repository-trust helpers for babysit-prs.sh. Sourced by absolute
 # path before the poller's first external command; it only defines functions.
 #

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The generic feedback gate and its counts for babysit-prs.sh. Sourced at
 # top level; it only defines functions.
 

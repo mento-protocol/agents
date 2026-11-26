@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Codex usage-limit notice readers for babysit-prs.sh, split from lib/codex.sh,
 # which states the yes/no/unknown rule these follow. Sourced at top level
 # right after lib/codex.sh; it only defines functions.

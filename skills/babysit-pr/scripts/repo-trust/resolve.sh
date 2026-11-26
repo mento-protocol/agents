@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Part of scripts/repo-trust-preflight.sh: bind the checkout, base, and head repositories and the PR.
 # Sourced by the entry script only; it defines functions and sets nothing.
 

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Read-only GitHub reads for codex-threads.sh: failure helper and the one
 # capture wrapper every `gh api` call goes through. Sourced by
-# codex-threads.sh; the disables match its sibling files
-# (lib/codex-threads/jq-defs.sh, resolved-roots.sh, sections.sh), which read
-# and write variables across files that shellcheck checks one at a time.
+# codex-threads.sh. It reads and writes no globals.
 
 die() {
 	local code=$1

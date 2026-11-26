@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034
+# shellcheck shell=bash
 # INTENDED (defined below) is read only from the reply-and-resolve-*.test.sh
-# files this fixture is sourced into, which shellcheck checks on their own,
-# hence the disable.
+# files this fixture is sourced into.
 # Fixture shared by the reply-and-resolve-*.test.sh files: a stubbed gh, the
 # run(), fail() and expect_usage_error() helpers, the fixed inputs the stub
 # reads, and GOOD_JSON, the replies file most test files post. Source it, do
@@ -488,4 +487,5 @@ EOF
 # what a reply of yours already on a thread reads as once this run's fix is
 # posted. Several test files use it as GH_EXISTING_BODY to put that reply on
 # the thread before the run under test starts.
+# shellcheck disable=SC2034 # read by the resolve-state and write-verification tests
 INTENDED="Fixed in $SHA - the guard now runs before the write. SHArded keys, SHA-256 digests and a SHA-1 fallback are untouched."

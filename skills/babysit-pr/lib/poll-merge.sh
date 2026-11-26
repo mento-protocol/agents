@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The merge tick of babysit-prs.sh: the one poll that first sees a watched PR
 # merged, and the Codex verdicts it reaches. Sourced at top
 # level after the bootstrap; it only defines functions.
@@ -54,6 +54,7 @@ poll_on_merge() {
 	# A merge can flip stacked dependents to CONFLICTING: adopt them and
 	# recheck the rest of the watch set on the next immediate tick.
 	adopt_stacked_dependents "$PR"
+	# shellcheck disable=SC2034 # read by main-loop.sh
 	FORCE_TICK="true"
 }
 

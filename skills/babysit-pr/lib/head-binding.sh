@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Head binding for babysit-prs.sh: the push and committer times a
 # Codex usage-limit notice is judged against. Sourced at top level; it only
 # defines functions.

@@ -167,13 +167,12 @@ REPLIES_JSON=${4-}
 	die 2 "invalid follow-up PR number: $FOLLOW_UP_PR"
 
 # OWNER, REPO and CODEX_LOGIN are read by the lib/reply-and-resolve/*.sh files
-# this script sources, which shellcheck checks on their own; the disables
-# below name each line for that reason.
-# shellcheck disable=SC2034
+# this script sources.
+# shellcheck disable=SC2034 # read by the lib/reply-and-resolve/ modules
 OWNER="${REPO_SLUG%%/*}"
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034 # read by the lib/reply-and-resolve/ modules
 REPO="${REPO_SLUG#*/}"
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034 # read by lib/reply-and-resolve/withdrawn.sh
 CODEX_LOGIN='chatgpt-codex-connector[bot]'
 
 if [[ -n $RESOLVE_WITHDRAWN ]]; then

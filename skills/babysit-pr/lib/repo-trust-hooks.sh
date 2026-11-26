@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Hook discovery and loading for babysit-prs.sh. Sourced at top
 # level, not from a function, so each hook file is sourced in global scope as
 # before. A hook file inside $REPO_ROOT runs checkout code the moment it is
@@ -86,6 +86,7 @@ fi
 # does not stop the watch: root_hook_trust_gate lets the gate's own guard
 # re-pin on the next evaluation. Only a refusal is final.
 if [[ $ROOT_HOOKS_PRESENT == "1" && -z $ROOT_HOOK_TRUST ]]; then
+	# shellcheck disable=SC2034 # read by repo-trust.sh
 	ROOT_HOOKS_COMPLETE=1
 	trust_pin_all after || echo "repo trust preflight failed after the hooks in $REPO_ROOT loaded: $ROOT_HOOK_TRUST" >&2
 fi

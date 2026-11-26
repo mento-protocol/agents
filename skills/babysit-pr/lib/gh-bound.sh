@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # A time limit on every gh call of babysit-prs.sh. Sourced at top
 # level before the first gh call; it defines functions only.
 #
@@ -56,7 +56,7 @@ bounded_run() {
 	# rather than left as a zombie where PID 1 does not reap adopted children.
 	# PERL_BADLANG=0 keeps perl's own warning about an unavailable locale off
 	# stderr, which callers such as gates_read_checks capture with the output.
-	# shellcheck disable=SC2016
+	# shellcheck disable=SC2016 # a perl program: its $names are perl variables
 	PERL_BADLANG=0 perl -e '
     my $limit = shift @ARGV;
     my $pid = fork;

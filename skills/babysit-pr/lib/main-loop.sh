@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The watch loop of babysit-prs.sh. Sourced last, at top level, so its
 # `exit` ends the poller; it never returns.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Part of scripts/repo-trust-preflight.sh: push through the bound remote and confirm the publication.
 # Sourced by the entry script only; it defines functions and sets nothing.
 

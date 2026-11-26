@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The per-root reply loop for reply-and-resolve.sh, split into named helpers so
 # each stays under the repository's 50-line function limit. process_root_reply
 # is the whole of one loop iteration; reply-and-resolve.sh's own while loop
 # just calls it once per root. Every `continue` the original single loop body
 # used to skip to the next root becomes a `return` here - the same effect,
 # because each helper below is the last thing that loop body did before moving
-# on. Used from reply-and-resolve.sh, which shellcheck checks on its own,
-# hence the disables.
+# on. Used from reply-and-resolve.sh.
 
 # Every reply you have already posted, grouped by the root it answers. A rerun
 # after a resolve failed needs this: the reply is public, and posting it again is
@@ -166,6 +165,7 @@ resolve_matching_reply() {
 	read_followup_now "$ROOT_ID" "$EXISTING_REPLY_ID"
 	if [[ $ROOT_FOLLOWUP_NOW == "true" ]]; then
 		printf 'refused %s reason=reviewer_followed_up\n' "$ROOT_ID"
+		# shellcheck disable=SC2034 # read by reply-and-resolve.sh
 		REPLY_REFUSED="true"
 		return 0
 	fi

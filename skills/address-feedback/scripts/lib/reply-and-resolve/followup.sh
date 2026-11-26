@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Whether a reviewer answered a reply after it was posted, for
-# reply-and-resolve.sh. Used from reply-and-resolve.sh, which shellcheck
-# checks on its own, hence the disables.
+# reply-and-resolve.sh. Used from reply-and-resolve.sh, which reads
+# REPLY_REFUSED.
 
 # Whether anyone but you has posted under one root since a given reply of yours.
 # $1 is the root, $2 that reply; the answer is ROOT_FOLLOWUP_NOW, `true` or
@@ -50,4 +50,5 @@ read_followup_now() {
 # Set where a root was refused because a reviewer answered the reply this run
 # would otherwise have resolved on. The run then ends at exit 1: that root is
 # unresolved and its finding is unanswered, whatever its thread reads.
+# shellcheck disable=SC2034 # read by reply-and-resolve.sh
 REPLY_REFUSED="false"

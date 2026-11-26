@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # The readiness gate evaluation for babysit-prs.sh. Sourced at top level
 # after the bootstrap; it only defines functions.
 #
