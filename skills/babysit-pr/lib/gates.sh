@@ -176,6 +176,8 @@ gates_first_blocker() {
 		sset GATE_BLOCKER "$PR" "merge_state: BEHIND"
 	elif [[ $MERGE_STATE == "UNKNOWN" ]]; then
 		sset GATE_BLOCKER "$PR" "merge_state: UNKNOWN"
+	elif [[ $MERGE_STATE == "BLOCKED" ]]; then
+		sset GATE_BLOCKER "$PR" "merge_state: BLOCKED (a required review or check is unsatisfied)"
 	elif [[ $REPO_GATE_BUCKET != "PASS" ]]; then
 		sset GATE_BLOCKER "$PR" "repo_gate: $REPO_GATE"
 	else
@@ -192,11 +194,13 @@ gates_first_blocker() {
 # function never emits ALL_CLEAR and never sets ALL_CLEARED itself, so that
 # emit fires only on the transition into CLEAR, not on every clear tick.
 #
-# CLEAR: CI pass-or-none + MERGEABLE + a settled, not-BEHIND merge state +
+# CLEAR: CI pass-or-none + MERGEABLE + a settled, not-BEHIND, not-BLOCKED merge state +
 # feedback sweep + Codex approval + repo hook PASS. BEHIND keeps `mergeable` at
 # MERGEABLE, so without its own term a PR that GitHub will not merge until its
 # base is integrated would clear here; UNKNOWN is GitHub still computing, and
-# clearing on it would round an undetermined state up to clean. poll_pr, not
+# clearing on it would round an undetermined state up to clean. BLOCKED means a
+# required review or check is unsatisfied; the Codex verdict below does not
+# cover a required human approval, so BLOCKED never clears. poll_pr, not
 # this function, turns a CLEAR verdict into ALL_CLEAR - only on the tick that
 # transitions into it.
 evaluate_gates() {
@@ -225,7 +229,7 @@ evaluate_gates() {
 	FEEDBACK_GATE_BUCKET="${FEEDBACK_GATE%% *}"
 
 	if { [[ $CI_BUCKET == "PASS" ]] || [[ $CI_BUCKET == "NONE" ]]; } &&
-		[[ $MERGEABLE == "MERGEABLE" && $MERGE_STATE != "BEHIND" && $MERGE_STATE != "UNKNOWN" && $REPO_GATE_BUCKET == "PASS" && $FEEDBACK_GATE_BUCKET == "PASS" ]]; then
+		[[ $MERGEABLE == "MERGEABLE" && $MERGE_STATE != "BEHIND" && $MERGE_STATE != "UNKNOWN" && $MERGE_STATE != "BLOCKED" && $REPO_GATE_BUCKET == "PASS" && $FEEDBACK_GATE_BUCKET == "PASS" ]]; then
 		gates_review_verdict "$PR"
 		return
 	fi
