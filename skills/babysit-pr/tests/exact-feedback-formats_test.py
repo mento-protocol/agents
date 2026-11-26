@@ -90,6 +90,9 @@ print_review_bodies
         for text, author, expected in [
                 (clean, bot, 0),
                 (clean.replace('@maintainer', '@dev_acme', 1), bot, 0),
+                (clean.replace(' in 2m 14s', '', 1), bot, 0),
+                (clean.replace(' in 2m 14s', ' in 45s', 1), bot, 0),
+                (clean.replace(' in 2m 14s', ' in mssh', 1), bot, 1),
                 (real, bot, 1),
                 (real + '\n\n' + last + '\n', bot, 1),
                 (clean, 'claude[bot]', 1),
