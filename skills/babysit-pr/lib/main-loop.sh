@@ -53,6 +53,12 @@ while true; do
 		fi
 	done
 	[[ $PASS_CUT_SHORT == "true" ]] && continue
+	# The pass iterated the list as it was before any adoption, so a dependent
+	# adopted in it was not polled; it keeps the watch open for the next pass.
+	for PR in "${PRS[@]}"; do
+		[[ "$(sget PR_TERMINAL "$PR")" != "true" ]] && ALL_TERMINAL="false"
+		[[ "$(sget ALL_CLEARED "$PR")" != "true" ]] && ALL_CLEAR_NOW="false"
+	done
 
 	# Every PR is terminal. A merged PR with a draining exact-head review is
 	# nonterminal until that review finishes clean and its feedback sweep passes.
