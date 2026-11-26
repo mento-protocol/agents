@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-record/1",
+  "title": "Review record",
+  "description": "One machine-readable record per review run. Written by the review skill at the end of every run; read by ship-pr and by any eval that grades reviews. Holds no credential values, no diff hunks and no second-model report text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "created_at",
+    "target",
+    "guide",
+    "reviewer",
+    "sources",
+    "findings",
+    "discarded",
+    "coverage",
+    "verdict",
+    "metrics",
+    "report_path"
+  ],
+  "properties": {
+    "schema_version": { "const": "review-record/1" },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "repo",
+        "base_sha",
+        "head_sha",
+        "tree_fingerprint",
+        "files_changed",
+        "non_test_lines",
+        "scope"
+      ],
+      "properties": {
+        "mode": { "enum": ["branch", "commit", "uncommitted"] },
+        "repo": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "tree_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "files_changed": { "type": "integer", "minimum": 0 },
+        "non_test_lines": { "type": "integer", "minimum": 0 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "guide": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "path", "commit", "reason"],
+      "properties": {
+        "status": { "enum": ["used", "absent", "unavailable"] },
+        "path": { "type": "string", "minLength": 1 },
+        "commit": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "reason": { "type": ["string", "null"], "maxLength": 1000 }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "model", "effort"],
+      "properties": {
+        "runtime": { "enum": ["claude", "codex", "other"] },
+        "model": { "type": ["string", "null"], "maxLength": 100 },
+        "effort": { "type": ["string", "null"], "maxLength": 40 }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "status", "report_path", "reason"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,39}$" },
+          "kind": {
+            "enum": [
+              "self",
+              "codex-exec-review",
+              "closeout-review",
+              "claude-mirror",
+              "scanner",
+              "bounded-re-review"
+            ]
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "empty",
+              "failed",
+              "timed-out",
+              "skipped",
+              "excluded"
+            ]
+          },
+          "report_path": { "type": ["string", "null"], "maxLength": 1000 },
+          "reason": { "type": ["string", "null"], "maxLength": 1000 }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "line",
+          "file_level",
+          "severity",
+          "route",
+          "confidence",
+          "summary",
+          "consequence",
+          "causal_link",
+          "source"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^F[1-9][0-9]*$" },
+          "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "line": { "type": "integer", "minimum": 1 },
+          "file_level": { "type": "boolean" },
+          "severity": {
+            "enum": ["P1", "P2", "P3"],
+            "description": "P1 must fix before this ships; P2 worth knowing; P3 preference (review SKILL.md section 3)"
+          },
+          "route": { "enum": ["fix-before-merge", "follow-up", "handed-back"] },
+          "confidence": { "enum": ["confirmed", "suspected"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "consequence": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "causal_link": { "type": ["string", "null"], "maxLength": 1000 },
+          "source": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,39}$" },
+          "class": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+){1,6}$",
+            "description": "Optional: the finding's defect class, a kebab-case slug per review/references/finding-classes.md. Older records have none."
+          },
+          "fixed_in": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+            "description": "Optional: the full SHA of the commit, contained in target.head_sha, that fixed this finding after the reviewed state; set only after the fix was re-checked (review SKILL.md section 5). Absent: the finding remains at head_sha."
+          }
+        }
+      }
+    },
+    "discarded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "path", "line", "summary", "reason"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^D[1-9][0-9]*$" },
+          "kind": { "enum": ["cleared", "refuted", "unsettled"] },
+          "path": { "type": ["string", "null"], "maxLength": 500 },
+          "line": { "type": ["integer", "null"], "minimum": 1 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "source": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,39}$",
+            "description": "Optional: the id of the source whose finding this item discards. A refuted item without it is attributed to the only completed non-self source; with several, the projection counts it as unattributed."
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "gaps"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "gaps": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "verdict": {
+      "enum": [
+        "passes-clean",
+        "passes-with-findings",
+        "does-not-pass",
+        "incomplete"
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "ended_at",
+        "wall_s",
+        "tokens",
+        "tokens_source"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "ended_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "wall_s": { "type": "number", "minimum": 0 },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["input", "output"],
+          "properties": {
+            "input": { "type": ["integer", "null"], "minimum": 0 },
+            "output": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "tokens_source": { "enum": ["runtime", "unavailable"] }
+      }
+    },
+    "report_path": { "type": ["string", "null"], "maxLength": 1000 }
+  }
+}

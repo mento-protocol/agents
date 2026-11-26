@@ -1,0 +1,181 @@
+Usage: reply-and-resolve.sh [--follow-up-pr NUMBER] OWNER/REPO PR SHA REPLIES_JSON
+       reply-and-resolve.sh --resolve-withdrawn ID[,ID...] OWNER/REPO PR
+
+REPLIES_JSON maps review-comment ids to reply text:
+
+  { "2345678901": "Fixed in {SHA} - the guard now runs before the write.",
+    "2345678902": "Won't fix: the caller already validates that field." }
+
+The token {SHA} in each reply is replaced with the published commit given as the
+third argument. Write that form. In a reply that carries it, the bare word SHA is
+left alone, so "Fixed in {SHA} - validates the SHA before posting." publishes the
+second SHA as written.
+
+A bare SHA is the legacy form. It is substituted only in a reply that carries no
+{SHA} at all, and only where it stands as a whole word - no letter, digit, `_` or
+`-` on either side, so SHA-256 and SHArded survive. The English word is a whole
+word too, and "resolves the SHA and requires" then reads "resolves the <40 hex
+characters> and requires" in a public reply. Every such reply prints a warning on
+stderr naming its root, from the first bare use, and is posted as it stands.
+
+Post the fix first; this script never pushes. That commit must resolve in the
+repository and belong to the PR - one of its commits, or its head - or the run
+stops with exit 2 before anything is posted. A lookup GitHub answers with 404 or
+422 is that confirmed "not there". A lookup that could not be read at all leaves
+it unknown, and the run stops with exit 1 instead; rerun the same command.
+
+GitHub caps `pulls/<n>/commits` at 250 commits however it is paginated. Where
+that list holds 250 entries or more, does not carry the SHA and the SHA is not
+the head, membership is decided by two comparisons instead, and the SHA has to
+pass both. `compare/<sha>...<head>` must read `ahead` or `identical` -
+equivalently `behind_by` 0 - so that the head reaches the commit.
+`compare/<base>...<sha>`, against the PR's `base.sha`, must then read `ahead` or
+`diverged`, which means the commit carries work the base branch does not have.
+A `behind` or `identical` there is a commit the base branch already had, not one
+this PR adds, and the run stops with exit 2. A comparison that cannot be read
+stops the run with exit 1 before anything is posted.
+
+--follow-up-pr NUMBER moves that membership check to another PR, for the one flow
+where the fix cannot be a commit of the PR being answered: feedback that arrives
+after the merge, which babysit-pr reports as POST_MERGE_LATE_FEEDBACK. A merged
+branch takes no more commits, so the fix goes in a new PR while each finding is
+answered on its original thread. The SHA is then checked against that PR by the
+same list-or-compare rule, and that PR must be in this repository - its
+`base.repo.full_name` has to be OWNER/REPO - or the run stops with exit 2 before
+anything is posted. That read is routed like the commit lookup: GitHub answering
+404 for the number is the confirmed "not there" and exits 2, and a read that
+never answered - no bytes, a body that is not JSON, a transport failure - leaves
+it unknown and exits 1 instead; rerun the same command. Everything else is
+unchanged: the replies, the threads and the resolves stay on PR, the one that
+carries the findings.
+
+--resolve-withdrawn ID[,ID...] resolves threads without posting anything, and is
+the only route that does. It is for a finding the reviewer took back while its
+thread is still open - what codex-threads.sh lists as `withdrawn-open`. There is
+nothing to answer and the thread still has to be closed, so this route takes no
+SHA and no replies file: pass the repository and the PR, and the root comment ids
+as one comma-separated list.
+
+Each id is checked against the API first: the newest comment under that root by
+anyone other than you has to be by chatgpt-codex-connector[bot] and has to be the
+exact withdrawal marker, tested by the same rule codex-threads.sh prints the
+section with. That is one line and nothing else - `Withdrawn`, `Retracted`, `This
+finding no longer applies`, `Outdated` or `Outdated: this finding no longer
+applies`, each with an optional full stop, in any capitalisation. A restatement
+that opens with a marker, such as `Outdated: cache entries can bypass tenant
+scoping`, is a live finding. A maintainer's comment after the withdrawal is one
+too: it is the newer word on the thread, so the root is refused. A comment of
+your own after the withdrawal changes nothing. An id that is not a thread root,
+or whose newest comment by another author is anything else, refuses the whole run
+with exit 2 before a single thread is resolved - one mistyped id must not close a
+thread that still owes an answer.
+
+That check is the gate on the list. Each root is then checked once more on its
+own, one call before its resolve, because the reviewer can put a finding back
+while the run works and a thread closed after that retires a live finding. A root
+whose newest comment by another author is no longer the marker is refused on its
+own line, nothing is posted on it, the other roots are still resolved, and the
+run ends at exit 1.
+Each id prints one line:
+
+  resolved <root> thread=<id> reason=withdrawn_by_reviewer
+                                                        the thread was open and
+                                                        this run resolved it,
+                                                        posting nothing
+  skipped <root> thread=<id> reason=already_resolved_withdrawn
+                                                        an earlier run, or a
+                                                        reviewer, had already
+                                                        resolved it
+  refused <root> reason=withdrawal_retracted            the withdrawal did not
+                                                        hold at the re-check, so
+                                                        the thread was left open
+                                                        and the run exits 1
+
+The closing count and the per-root `unresolved` lines below are printed for this
+route too, and its exit status is read the same way.
+
+Rerunning the same file after a partial failure is safe. Each root prints one
+line saying what happened to it:
+
+  replied <root> reply_id=<id> resolved=<thread>        the reply was posted now
+  replied <root> reply_id=<id> resolved=<thread> reason=existing_reply_differs
+                                                        an earlier reply of
+                                                        yours says something
+                                                        else; this reply was
+                                                        posted next to it
+  replied <root> reply_id=<id> resolved=<thread> reason=post_ambiguous_reconciled
+                                                        the POST did not report
+                                                        a reply id, the replies
+                                                        under the root were read
+                                                        again, and a reply of
+                                                        yours carrying this
+                                                        text was there; the run
+                                                        continued with it
+  replied <root> reply_id=<id> resolved=<thread> reason=reopened_before_resolve
+                                                        the thread read resolved
+                                                        before the reply and
+                                                        unresolved after it, so
+                                                        this run resolved it
+  replied <root> reply_id=<id> thread=<id> reason=posted_on_resolved_thread
+                                                        the reply was posted and
+                                                        the thread read resolved
+                                                        when its state was read
+                                                        again, so this run
+                                                        resolved nothing
+  resolved <root> reply_id=<id> thread=<id> reason=reply_already_posted
+                                                        this exact reply was
+                                                        already posted; only the
+                                                        resolve was missing, so
+                                                        nothing was posted again
+  skipped <root> reply_id=<id> thread=<id> reason=already_resolved_and_answered
+                                                        finished by an earlier
+                                                        run: your reply is under
+                                                        the root and the thread
+                                                        reads resolved
+  refused <root> reason=reviewer_followed_up            this exact reply was
+                                                        already posted and a
+                                                        reviewer has answered it
+                                                        since, so nothing was
+                                                        posted or resolved and
+                                                        the run exits 1
+
+Where more than one reason applies to a line, they print as one comma-separated
+`reason=` field, in the order above.
+
+A reply of yours answers a finding only while it is the last word on the thread.
+Before this script resolves a thread on a reply an earlier run posted, it re-reads
+that thread: where any other author has commented under the root since that
+reply - the reviewer saying the fix misses a path, a maintainer asking something
+- the finding is open again. The root is then refused, nothing is posted on it,
+its thread is left as it stands, and the remaining roots are handled as usual.
+The text in the file is already on that thread, so reposting it would answer
+nothing; read the follow-up and rerun with a reply that answers it. A later
+comment of your own is not a follow-up: the reply that carries the text still
+answers the finding, whatever you posted after it.
+
+Every read must come back with a body. A `gh api` response of zero bytes, or one
+that is not JSON, is an unread response even where `gh` exited 0 - GitHub writes
+an empty collection as `[]` - so the run stops with exit 1 and names the read,
+before anything is posted or resolved. Reading a comment feed as an empty list
+would post a reply a rerun cannot take back.
+
+Where the POST of a reply fails, or returns no reply id, the replies under that
+root are read again. A reply of yours whose text is the text this run was about
+to post is that reply: the run continues with it and prints
+`post_ambiguous_reconciled`. Where no such reply is there, the run stops with
+exit 1, names the root, and says the write outcome is unknown - a connection
+that drops after GitHub created the reply looks the same from here as one that
+drops before. Rerun the same file: the rerun matches by text before it posts.
+
+The run ends with the number of unresolved threads on the PR, then one line per
+requested root that still reads unresolved in that same closing read:
+
+  unresolved_threads=<count>
+  unresolved <root> thread=<id>                         the thread was open in
+                                                        the closing read - a
+                                                        reviewer reopened it
+                                                        after the resolve
+                                                        returned
+
+Exit 0 means every root in the file reads resolved. Any `unresolved` or `refused`
+line exits 1.

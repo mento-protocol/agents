@@ -1,0 +1,175 @@
+# Envio HyperIndex attack classes
+# Each entry: a narrow class of vuln/footgun. Hunters get one of these at a time.
+# The orchestrator expands scope_hints into a concrete file list before spawning the hunter.
+
+runtime: envio-indexer
+description: |
+  Envio HyperIndex (TypeScript) event indexer. Processes on-chain events into a
+  Postgres-backed schema served via Hasura. BigInt math is pervasive; trust
+  boundary is "any on-chain event from a registered contract is implicitly
+  trusted, with RPC-fetched data treated similarly." Common footguns:
+  signed/unsigned BigInt confusion, RPC response trust, replay handling around
+  reorgs, event-decoder type confusion when ABIs evolve, heal-flow assumptions
+  when a getter is missing.
+
+classes:
+  - id: bigint-overflow
+    name: BigInt overflow + signed/unsigned confusion
+    description: |
+      BigInt math at boundaries with Postgres numeric(78,0), JS Number, or
+      signed two's-complement on-chain values. Includes precision loss when
+      casting BigInt to Number, accumulators that never reset across epochs,
+      sign-loss when serializing negative values to wei strings, off-by-one in
+      BigInt loops, and Boolean coercion of BigInt (-1n is truthy).
+    # Narrowed from a 50-file scope to actually-BigInt-heavy files.
+    # The dropped files (aggregators, healthScore, breakers, oracleJump,
+    # priceDifference, deviationBreach, usd, performance, feeToken,
+    # sortedOracles, biPoolManager handlers) do minimal arithmetic; they're
+    # entity writers / curated lookups / threshold comparators. If you want
+    # full coverage, add an `--attack-classes envio-indexer --include-low-yield`
+    # flag later.
+    scope_hints:
+      - src/tradingLimits.ts
+      - src/swap.ts
+      - src/leaderboardSnapshots.ts
+      - src/leaderboardWindowSnapshot.ts
+      - src/leaderboardWindowFlush.ts
+      - src/protocolFeeSnapshot.ts
+      - src/handlers/fpmm.ts
+      - src/handlers/fpmm/**/*.ts
+      - src/handlers/broker.ts
+      - src/handlers/virtualPool.ts
+      - src/handlers/liquity/**/*.ts
+    exclude:
+      # liquity/keys.ts is just ID/key builders, no math
+      - src/handlers/liquity/keys.ts
+      - src/handlers/liquity/config.ts
+      - src/handlers/liquity/bootstrap.ts
+      - src/handlers/liquity/bootstrapHandler.ts
+    support_files:
+      # Hunters may Read these files when tracing a finding's call graph
+      # (e.g. signature of an imported helper). NOT for broad exploration —
+      # each support-file read must be tied to a specific in-scope finding.
+      - src/handlers/liquity/math.ts # negativeToPositive, BigInt sign helpers
+      - src/rpc/client.ts # sanitizeErrorMessage, RPC trust boundary
+      - src/helpers.ts # cross-handler helpers (lowercaseAddress, etc.)
+      - src/constants.ts # PRESSURE_SCALE, D18, BPS, sentinels
+      - schema.graphql # entity types backing BigInt[] arrays
+    severity_floor: WARNING
+    # Seed evidence from the first validation runs:
+    # - tradingLimits.ts:145-146 Number(scaled) precision loss in computeLimitPressure
+    # - tradingLimits.ts:49-59 resetTradingLimitState doesn't reset netflow accumulators
+    # - broker.ts swapCount accumulator pattern (Int32, day-bucketed so safe; pattern fragile)
+    # - liquity/troves.ts:323-324 spHeadroom -1n sentinel collision (validator DISPROVED — guard upstream)
+    # - liquity/troves.ts:296-297 InterestRateBracket clamp precision loss (validator DISPROVED — internal-state only)
+    # - liquity/math.ts:22 icrBps Number→Int32 overflow at 21M% ratio (NIT — theoretical)
+
+  - id: rpc-trust
+    name: RPC response trust + heal-flow assumptions
+    description: |
+      The indexer makes ad-hoc RPC calls for state the event stream doesn't
+      carry (getter shims, missing-getter healing, contract metadata). RPC
+      responses are treated as authoritative — a malicious or buggy node could
+      poison entity rows. Heal flow assumes "if getter missing, fall back to
+      X" without validating X is real. Check: error handling on RPC failure,
+      retry logic (replay attacks), trust of decoded return values, what
+      happens when a chain returns -2 / -1 / undefined sentinels.
+    scope_hints:
+      - src/rpc.ts
+      - src/rpc/**/*.ts
+      - src/startupChecks.ts
+      - src/handlers/**/*.ts
+    severity_floor: WARNING
+
+  - id: event-decoder-type-confusion
+    name: Event-decoder type confusion across ABI evolution
+    description: |
+      ABIs evolve. New event versions add/remove indexed fields, reorder
+      params, change types (e.g. uint256 → int256, address → bytes32).
+      Envio's generated TS types catch most but not all (e.g. a contract
+      redeploy that changes a field's semantics without changing its name).
+      Look for: handler reads field X with assumption Y but ABI now emits
+      Z; conditional handling missing for older event versions; trust of
+      .indexed fields when an upgrade made them non-indexed.
+    scope_hints:
+      - src/EventHandlers.ts
+      - src/EventHandlersBridgeOnly.ts
+      - src/handlers/**/*.ts
+      - abis/*.json
+    severity_floor: WARNING
+
+  - id: replay-and-reorg
+    name: Reorg + duplicate-event handling
+    description: |
+      Envio handles reorgs by reprocessing; handlers must be idempotent.
+      Look for: handlers that increment counters without a unique-event
+      guard, accumulators that double-count on replay, side-effects (RPC
+      writes, external HTTP calls) without idempotency keys, derived
+      entities that don't gracefully handle "this row already exists."
+      Mento v3 CDPs have known reorg sensitivity around redemptions.
+    scope_hints:
+      - src/handlers/**/*.ts
+      - src/EventHandlers.ts
+      - src/EventHandlersBridgeOnly.ts
+      - src/leaderboardSnapshots.ts
+      - src/leaderboardWindowSnapshot.ts
+      - src/protocolFeeSnapshot.ts
+    severity_floor: WARNING
+
+  - id: wormhole-bridge-trust
+    name: Wormhole NTT bridge-message trust
+    description: |
+      Bridge handlers process Wormhole NTT messages where the source-chain
+      identity is encoded in the payload, not the calling contract.
+      Trust-but-verify failures here are bridge-pool drains. Check: chain ID
+      validation, transceiver address verification, NTT serialization version
+      handling, signed-payload integrity checks before crediting destination.
+      Celo + Monad share identical transceiver addresses (deterministic
+      deploy) so chain-ID disambiguation matters.
+    scope_hints:
+      - src/wormhole/**/*.ts
+      - src/bridge.ts
+    severity_floor: BLOCKER
+
+  - id: schema-injection-via-id
+    name: Composite-ID injection into Postgres rows
+    description: |
+      Entity IDs are often composite strings (lowercase address + chainId +
+      hex tx hash). If a handler builds an ID from raw event input without
+      normalization (lowercasing, hex validation), an attacker could craft
+      collisions or insert rows that shadow legitimate IDs. The schema
+      treats IDs as primary keys with no further validation. Look for:
+      uppercased addresses (case-sensitive collision risk), non-hex bytes
+      from a payload field, ID built from a user-controlled bytes32
+      without bounds checking.
+    scope_hints:
+      - src/handlers/**/*.ts
+      - src/helpers.ts
+    severity_floor: WARNING
+
+  - id: hasura-index-leakage
+    name: Hasura schema permissions / over-indexing
+    description: |
+      Hasura exposes entities via GraphQL. A field marked sensitive
+      (operator EOA, internal accumulator) must have role-level permissions.
+      Look for: schema entities holding internal/private data with no
+      permission guard, indexed fields that leak via getByX queries,
+      _aggregate queries that should be denied by role (perf + leakage).
+    scope_hints:
+      - schema.graphql
+      - config.yaml
+    severity_floor: WARNING
+
+  - id: getter-shim-untrusted-defaults
+    name: Getter-shim untrusted defaults / sentinel values
+    description: |
+      Missing-getter heal flow uses sentinel values (-1, -2, undefined) to
+      indicate "not available." If these sentinels leak into arithmetic
+      downstream they produce garbage or silently underflow. The CDP
+      rebalanceReward field uses -2 to stop self-heal retries; similar
+      patterns elsewhere need review for arithmetic safety.
+    scope_hints:
+      - src/handlers/**/*.ts
+      - src/rpc.ts
+      - src/rpc/**/*.ts
+    severity_floor: NIT

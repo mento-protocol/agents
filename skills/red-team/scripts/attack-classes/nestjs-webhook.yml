@@ -1,0 +1,123 @@
+# NestJS + webhook attack classes
+# For aegis/ and metrics-bridge/ (NestJS App Engine services + Slack/Discord webhook
+# templates + Grafana alert-rule Terraform).
+
+runtime: nestjs-webhook
+description: |
+  NestJS service on Google App Engine. Talks to Grafana, Slack, Discord, and
+  internal monitoring infra. Trust boundary is "alert webhooks are
+  authenticated by URL secret; alert-rule changes go through Terraform plan;
+  alert templates are server-rendered." The most realistic risks are webhook
+  URL exposure (Slack/Discord secrets in logs or Git history), Slack-mrkdwn
+  template injection from user-controlled fields (address labels rendered in
+  alerts), and alert-rule poisoning via Grafana API misuse.
+
+classes:
+  - id: webhook-url-exposure
+    name: Slack/Discord/Telegram webhook URL leakage
+    description: |
+      Webhook URLs are bearer tokens — anyone with the URL can post to the
+      channel. Check: URLs in logs, in error traces, in returned response
+      bodies, in cached values written to disk, in env vars that are echoed
+      somewhere, in Terraform state that gets pushed to a public repo.
+      Aegis Slack/Discord/VictorOps templates AND the alert dispatcher
+      Terraform locals are in scope.
+    scope_hints:
+      - aegis/src/**/*.ts
+      - aegis/terraform/**/*.tf
+      - aegis/terraform/**/*.tfvars
+      - metrics-bridge/src/**/*.ts
+      - scripts/**/*.sh
+    severity_floor: BLOCKER
+
+  - id: slack-mrkdwn-injection
+    name: Slack/Discord mrkdwn template injection
+    description: |
+      Slack mrkdwn is a templating dialect. User-controlled fields (address
+      labels, forensic-report names, custom alert annotations) interpolated
+      into mrkdwn templates without escaping can break formatting (e.g. a
+      label containing `*BLOCKER*` faking criticality), inject @channel /
+      @here mentions, or smuggle malicious URLs. Same for Discord and
+      VictorOps templates. The dispatcher in [[reference_aegis_template_dispatcher]]
+      drives this.
+    scope_hints:
+      - aegis/src/**/*.ts
+      - aegis/terraform/**/*.tf
+      - aegis/templates/**
+    severity_floor: WARNING
+
+  - id: grafana-alert-rule-poisoning
+    name: Grafana alert-rule poisoning via API
+    description: |
+      Aegis manages Grafana alert rules via the Grafana API. Risk: a
+      rule mutation that's not gated by env, a Terraform apply that
+      silently disables a critical alert, an API call that takes
+      attacker-controlled JSON and serializes it into a rule, a rule
+      with `for: 0s` that fires continuously. Check write paths to
+      Grafana API for input validation and idempotency.
+    scope_hints:
+      - aegis/src/**/grafana*.ts
+      - aegis/src/**/alerts*.ts
+      - aegis/terraform/grafana-alerts/**/*.tf
+      - metrics-bridge/src/**/*.ts
+    severity_floor: WARNING
+
+  - id: env-var-leakage-logs
+    name: Env var leakage via logs / error messages
+    description: |
+      NestJS Logger + Sentry breadcrumbs + stdout in App Engine. Check
+      whether secrets (Grafana API key, Slack webhook URL, Discord bot
+      token, Upstash REST token, gcloud service-account JSON) end up in
+      stack traces, error.message strings, ConfigService.get() return
+      values that get logged, or environment-printing endpoints used for
+      debugging.
+    scope_hints:
+      - aegis/src/**/*.ts
+      - aegis/src/**/logger*.ts
+      - metrics-bridge/src/**/*.ts
+    severity_floor: BLOCKER
+
+  - id: alert-template-html-injection
+    name: HTML / Markdown injection in alert payloads
+    description: |
+      Discord embeds + Slack blocks accept HTML-ish formatting in some
+      fields. User-controlled values (address book labels, forensic
+      report titles, manual annotation notes) interpolated into embed
+      fields without escaping can inject formatting, mentions, or links.
+      Less critical than mrkdwn-injection (it's not arbitrary code) but
+      still a phishing vector when Mento-branded.
+    scope_hints:
+      - aegis/src/**/*.ts
+      - aegis/templates/**
+    severity_floor: NIT
+
+  - id: terraform-plugin-trust
+    name: Terraform plugin / provider trust
+    description: |
+      Terraform providers run with full local credentials and can
+      exfiltrate to anywhere on plan/apply. Check: providers pinned to a
+      specific version (not "latest"), checksum validation enabled,
+      providers from non-canonical sources flagged. Grafana provider in
+      particular has had supply-chain incidents.
+    scope_hints:
+      - aegis/terraform/**/*.tf
+      - aegis/terraform/**/providers.tf
+      - aegis/terraform/**/versions.tf
+      - terraform/**/*.tf
+    severity_floor: WARNING
+
+  - id: gae-deploy-secret-handling
+    name: "App Engine deploy: secrets in app.yaml / deployment manifest"
+    description: |
+      app.yaml and Cloud Build manifests sometimes embed env vars or
+      service-account references directly. Check: no secrets in
+      app.yaml, no `env_variables:` blocks with sensitive values, no
+      service-account JSON committed to repo, no plain-text secrets in
+      cloudbuild.yaml.
+    scope_hints:
+      - aegis/app.yaml
+      - aegis/cloudbuild.yaml
+      - metrics-bridge/app.yaml
+      - metrics-bridge/cloudbuild.yaml
+      - cloudbuild.yaml
+    severity_floor: BLOCKER

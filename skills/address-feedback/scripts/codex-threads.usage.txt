@@ -1,0 +1,144 @@
+Usage: codex-threads.sh OWNER/REPO PR [SINCE_COMMENT_ID]
+
+SINCE_COMMENT_ID limits the inline findings to comment ids greater than it,
+which is how you read only what arrived after the last round.
+
+Inline findings print as:
+
+  === <comment id> <path>:<line> ===
+  <body>
+
+Feed those comment ids to reply-and-resolve.sh.
+
+A root that carries a reply of yours while its thread still reads unresolved
+prints as:
+
+  === <comment id> <path>:<line> answered-unresolved ===
+  <the finding, tidied as above>
+  --- your reply <reply id> ---
+  <that reply, tidied the same way>
+  <one line saying to check the reply before resolving>
+
+The newest reply of yours under the root is the one shown - the answer a reader
+reaches last. Read it: a reply is not a disposition because it exists, and an
+earlier "Can you clarify?" leaves the finding unanswered. Where the text you hand
+reply-and-resolve.sh matches any reply of yours under that root, it posts nothing
+and resolves the thread; any other text is posted as a new reply before the
+resolve.
+
+SINCE_COMMENT_ID never hides these: the reply that needs resolving was posted in
+an earlier round, so its id is below any cutoff you would pass.
+
+A root the reviewer took back while its thread is still open prints as:
+
+  === <comment id> <path>:<line> withdrawn-open ===
+  <the finding, tidied as above>
+  <one line saying to resolve it without answering>
+
+Whether a thread reads resolved and whether the reviewer withdrew the finding are
+two different questions, so the withdrawal is read the same way here as on a
+resolved thread: the newest comment under the root by anyone but you, by the
+shape below.
+Such a root owes no answer - the reviewer took the finding back - and it does owe
+the resolve that closes the thread. Give its comment id to reply-and-resolve.sh
+with `--resolve-withdrawn`, which checks the withdrawal again through the API and
+resolves the thread without posting anything. No SINCE_COMMENT_ID filter: the
+withdrawal came in a later round than the finding.
+
+Review bodies print as:
+
+  === top-level-response review <review id> <state> <sha7> (<head>) ===
+  <body>
+
+A review body has no thread and no comment id: answer it with a top-level PR
+comment. reply-and-resolve.sh takes review-thread roots only and refuses a
+review id. Bodies on a superseded head are listed too - a superseded anchor does
+not retire a finding - and the list is not narrowed by round, so check your own
+earlier top-level responses before answering one again. Codex's boilerplate
+"Codex Review" container is the one body left out; it carries no finding. Every
+other body is listed with its review state, so an APPROVED sign-off is
+distinguishable from a COMMENTED finding without dropping either.
+
+Two substitutions run on each body, and nothing else changes: a priority badge
+image is reduced to [P1]/[P2]/[P3], and Codex's footer line is dropped. A badge
+is an image whose alt text starts with the priority, or one served from
+img.shields.io; any other image, including a screenshot a reviewer attached, is
+left as it stands. The footer is the exact line `Useful? React with 👍 / 👎.`,
+with or without the full stop and with any blanks around it, and only a line that
+carries the footer and nothing else is dropped. A line that opens with that
+phrase and carries on, and a sentence that mentions it mid-line, are finding text
+and stay whole.
+
+A root whose thread reads resolved while no reply of yours is under it prints as:
+
+  === <comment id> <path>:<line> resolved-unanswered ===
+  <the finding, tidied as above>
+  <one line saying the thread is closed and the finding is not>
+
+Resolved is not answered. Somebody - a maintainer, an automation - closed the
+thread without your disposition, and the finding still owes one. Give its comment
+id to reply-and-resolve.sh with the answer: that script posts onto a resolved
+thread and leaves it resolved. SINCE_COMMENT_ID never hides these either: the
+resolve happened in a later round than the finding.
+
+A root whose thread reads resolved while a reply of yours is under it prints as:
+
+  === <comment id> <path>:<line> resolved-replied ===
+  <the finding, tidied as above>
+  --- your reply <reply id> ---
+  <the newest reply of yours under that root, tidied the same way>
+  --- <author> replied again <comment id> ---          (only where there is one)
+  <that comment, tidied the same way>
+  <one line saying to check that reply before treating the root as done>
+
+A closed thread does not turn a reply into a disposition, so this section is the
+root no reply of yours answers. The disposition format is the skill's own, in
+../SKILL.md: a reply that starts with `Fixed in ` and a commit id of 7 to 40 hex
+characters, or with `Won't fix:`, both case-sensitive and both read after the two
+substitutions above and with leading whitespace removed. A root carrying no such
+reply - an earlier "Can you clarify?", a note to yourself, a reply that says a fix
+is coming - prints here: read it against the finding, and where it is not the
+answer give the root's comment id to reply-and-resolve.sh, which posts onto the
+resolved thread and leaves it resolved.
+
+A disposition answers the finding only while it is the last word on the thread.
+Where anyone but you posted under that root after your newest disposition - the
+bot saying the fix misses a path, a maintainer saying the finding still stands -
+that comment is newer, the finding is open again, and the root prints here with
+the comment and its author shown under your reply. Answer it with a new
+disposition. A root whose newest disposition has nothing from another author
+after it is finished work and prints in no section, whatever else you posted
+after it. No SINCE_COMMENT_ID filter here either.
+
+The one root no section asks you to answer is one the reviewer withdrew.
+That is the newest comment under the root by anyone but you, provided it is by
+the same bot and its whole body, after
+the two substitutions above and with leading and trailing whitespace removed, is
+one line carrying the withdrawal and nothing else: `Withdrawn`, `Retracted`,
+`This finding no longer applies`, `Outdated` or `Outdated: this finding no longer
+applies`, each with an optional full stop, all in any capitalisation. `Withdrawn.`
+and `Outdated: this finding no longer applies.` are withdrawals. Any other
+wording keeps the root listed: a sentence that opens with a marker and carries
+on, such as `Withdrawn funds can bypass the balance guard.` or `Outdated: cache
+entries can bypass tenant scoping`, a marker inside a longer sentence, a body
+that runs to a second line, and a negation such as `This finding has not been
+withdrawn; it still applies.`
+
+Only that newest comment decides. Where a withdrawal is followed by anything else
+from anyone but you - the bot saying the finding still applies, a maintainer
+saying it still fails on the async path, another reviewer restating it - the root
+is not withdrawn and prints as any other root does. A comment of your own after
+the withdrawal changes nothing, so your "ok" under it leaves the root withdrawn.
+A root listed in error costs a reply nobody needed; a root dropped in error is a
+finding that disappears.
+
+A withdrawn root that reads resolved is finished and prints in no section. A
+withdrawn root whose thread is still open prints in the `withdrawn-open` section
+above, which is the one thing left to do with it.
+
+Every read must come back with a body. A `gh api` response of zero bytes, or one
+that is not JSON, is an unread response even where `gh` exited 0 - GitHub writes
+an empty collection as `[]` - so the run exits 1 and names the read. An empty
+inventory therefore means nothing needs an answer; it never means a feed went
+unread. Both feeds are read before anything prints, so a failed read leaves no
+partial inventory behind.

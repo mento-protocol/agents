@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:red-team:findings-v2",
+  "title": "red-team findings report",
+  "type": "object",
+  "required": ["sweep_id", "repo", "date", "packages", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "sweep_id": {
+      "type": "string",
+      "description": "ISO-timestamp identifier, e.g. 2026-05-22T15-50Z"
+    },
+    "repo": {
+      "type": "string",
+      "description": "Absolute repo path the sweep ran against"
+    },
+    "date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the sweep completed"
+    },
+    "packages": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Package names included in this sweep"
+    },
+    "attack_classes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Attack class IDs invoked"
+    },
+    "hunters_spawned": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "validators_spawned": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "static_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "osv_vulnerability_count": { "type": "integer", "minimum": 0 },
+        "semgrep_finding_count": { "type": "integer", "minimum": 0 },
+        "osv_skipped": { "type": "boolean" },
+        "semgrep_skipped": { "type": "boolean" }
+      }
+    },
+    "verdict_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "blocker": { "type": "integer", "minimum": 0 },
+        "warning": { "type": "integer", "minimum": 0 },
+        "nit": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "location",
+          "attack_class",
+          "description",
+          "evidence_status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^f-[0-9]{3}$",
+            "description": "Stable per-sweep ID, e.g. f-001"
+          },
+          "severity": {
+            "enum": ["BLOCKER", "WARNING", "NIT"]
+          },
+          "location": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/[\\]-]+:[0-9]+$",
+            "description": "file:line, path relative to repo root"
+          },
+          "attack_class": {
+            "type": "string",
+            "description": "Class id from the YAML, e.g. bigint-overflow"
+          },
+          "hunter_id": {
+            "type": "string",
+            "description": "e.g. h-indexer-envio-bigint-overflow-1of3"
+          },
+          "validator_verdict": {
+            "enum": ["CONFIRMED", "DISPROVED", "UNCERTAIN", "SKIPPED"],
+            "description": "SKIPPED means severity-gated (NIT), --no-validate flag, or a failed validator probe"
+          },
+          "validator_reasoning": {
+            "type": "string",
+            "description": "One paragraph from codex-validate.sh output"
+          },
+          "validator_reproduction": {
+            "type": "string",
+            "description": "Concrete repro steps if CONFIRMED, empty otherwise"
+          },
+          "evidence_status": {
+            "enum": ["confirmed", "suspected", "disproved"],
+            "description": "Evidence disposition verified by the parent; separate from severity."
+          },
+          "confidence": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Optional legacy score. Does not establish evidence or control surfacing."
+          },
+          "surfaced": {
+            "type": "boolean",
+            "description": "True only for confirmed findings in the main report."
+          },
+          "description": { "type": "string" },
+          "exploit_scenario": { "type": "string" },
+          "corroborated_by_static_analysis": {
+            "type": "string",
+            "description": "rule-id (e.g. ghsa-xxxx or semgrep rule id) if static analysis flagged the same code"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "surfaced": { "const": true } },
+              "required": ["surfaced"]
+            },
+            "then": {
+              "properties": { "evidence_status": { "const": "confirmed" } }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
