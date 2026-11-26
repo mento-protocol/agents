@@ -389,6 +389,28 @@ is draft, run `gh pr ready <N>` immediately and report that automatic review may
 have been skipped. Change a pre-existing draft state only when the task or
 repository workflow authorizes that transition.
 
+**A failed create may have created the PR.** `gh pr create` can return HTTP 502 or a
+GraphQL error after GitHub created the PR, and it can also fail without creating one.
+After every failed create attempt, look the branch up through REST, which does not use
+GraphQL: `gh api -X GET repos/<BASE_REPO>/pulls -f head=<head owner>:<head branch> -f base=<base> -f state=open --jq '.[].html_url'`
+(`-X GET` makes the `-f` values query parameters, and `gh` encodes them, so a branch
+name with `#` still matches). When it lists exactly one PR, bind it
+(`published --state <file> --pr <N>`) and continue; a blind retry fails with "already
+exists". `published`, the `isDraft` check and the `closingIssuesReferences` check read
+through GraphQL: retry each once, then report the PR URL with publication unconfirmed.
+Retry `gh pr create` once only after a lookup that succeeded and listed none; when the
+lookup fails twice, report publication as unconfirmed and create nothing more.
+If the retry also fails and a second lookup that succeeded still lists none, create the
+PR with
+`gh api -X POST repos/<BASE_REPO>/pulls -f base=<base> -f head=<head owner>:<head branch> -f title=<title> -F body=@<body file>`,
+with the full final body in that one call. If that call fails, look up again; when that
+lookup succeeds and lists none, retry the POST once, then stop and report the create as
+failed. Never post a placeholder body to replace later: a REST create and any later
+`gh api -X PATCH` body edit skip a local guard that watches `gh pr create` and `gh pr edit`,
+so check the body against `references/publish.md` yourself, including its
+`closingIssuesReferences` check under "Issue references". The never-draft check above
+still applies after a REST create.
+
 For the body, deferral issues, bot-review coordination, and the visual-evidence protocol
 for UI changes, read `references/publish.md` before writing the body. For every PR
 that adds or changes UI on any platform, embed labeled Before and After screenshots
