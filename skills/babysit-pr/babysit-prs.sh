@@ -161,6 +161,18 @@ readonly GH_TIMEOUT_SECONDS=$((10#$GH_TIMEOUT_SECONDS))
 # shellcheck source=lib/gh-bound.sh
 . "$SCRIPT_DIR/lib/gh-bound.sh" || exit 2
 
+# A PR URL names its repository, so it outranks the checkout the watcher runs
+# in: outside any checkout detection would fail, and inside another
+# repository's checkout the detected slug would reject the URL as mixed.
+if [[ -z $REPO_SLUG ]]; then
+	for raw_pr in "${RAW_PRS[@]}"; do
+		raw_pr="${raw_pr//[[:space:]]/}"
+		if [[ $raw_pr =~ ^https://github.com/([^/]+)/([^/]+)/pull/[0-9]+ ]]; then
+			REPO_SLUG=$(normalize_repo_slug "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}")
+			break
+		fi
+	done
+fi
 if [[ -z $REPO_SLUG ]]; then
 	REPO_SLUG=$(detect_repo_slug) || {
 		echo "could not detect repo; pass --repo OWNER/REPO or set BABYSIT_REPO" >&2
