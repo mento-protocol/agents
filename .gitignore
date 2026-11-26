@@ -17,3 +17,9 @@ coverage
 # `pnpm test` runs `test/*.test.mjs`, so these never run and nothing keeps them
 # compiling; ignoring them stops the next round's debris reaching a commit.
 packages/*/test/tmp-*
+
+# Python bytecode that a local skill test run writes, and a local virtual
+# environment for the skill suites.
+__pycache__/
+*.pyc
+.venv/

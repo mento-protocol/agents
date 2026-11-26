@@ -1,0 +1,3 @@
+interface:
+  display_name: Claim Issue
+  short_description: Claim, check and release issues across sessions

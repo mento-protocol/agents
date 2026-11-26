@@ -1,0 +1,17 @@
+{
+  "id": "2",
+  "verdict": "update",
+  "confidence": "medium",
+  "summary": "Ask for a repro.",
+  "comment": "Thanks @alice and @carol; still planned.",
+  "labels": {
+    "add": ["triage"]
+  },
+  "evidence": [
+    {
+      "kind": "comment",
+      "ref": "#2",
+      "note": "see this"
+    }
+  ]
+}

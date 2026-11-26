@@ -28,6 +28,11 @@ directory name. A skill directory may also contain:
   scripts in `scripts/`.
 - `fixtures/`: recorded inputs and byte vectors the skill's own test suite
   reads.
+- `examples/`: runnable examples and fictional sample data that the skill's
+  references point to.
+- `requirements.txt`: the Python packages, pinned by version and hash, that
+  the skill's scripts or tests need. The `skills` CI job installs each such
+  file before it runs the skill suites.
 - One archived companion document next to `SKILL.md` when a superseded
   procedure must stay readable.
 - For a third-party skill, the upstream `LICENSE` file and the companion
@@ -44,7 +49,9 @@ each loaded by its exact path. Every runner starts in the repository root. A
 Python file that runs no case and skips none fails. A kind with no files
 passes. A tracked test file that is not on disk makes the run incomplete
 (exit 2). The `skills` CI job runs both steps on Ubuntu and macOS on every
-pull request.
+pull request. Before a local run, install each skill's `requirements.txt`
+into the `python3` that `PATH` finds first, for example in a virtual
+environment.
 
 ## Public readership
 

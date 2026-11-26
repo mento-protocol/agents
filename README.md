@@ -416,6 +416,16 @@ trunk check --all                # lint (or: pnpm lint)
 trunk fmt                        # format (or: pnpm format)
 ```
 
+Some skill suites need Python packages, which each skill pins in its own
+`requirements.txt`. Install them into a virtual environment and put it first
+on `PATH` before `pnpm test:skills`:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --require-hashes -r skills/eval-creator/requirements.txt
+PATH="$PWD/.venv/bin:$PATH" pnpm test:skills
+```
+
 CI runs `shellcheck`, `pnpm validate:skills`, `pnpm test:scripts`, the skill
 suites and the harness on Ubuntu and macOS, and the package tests,
 `pnpm check:shell` and trunk on Ubuntu. On macOS also run

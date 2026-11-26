@@ -1,0 +1,5 @@
+interface:
+  display_name: Maintain Verification Skill
+  short_description: Re-prove a verify skill's feature map and fix drift
+policy:
+  allow_implicit_invocation: false

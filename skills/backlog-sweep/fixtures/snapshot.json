@@ -1,0 +1,376 @@
+{
+  "schema": 1,
+  "tracker": "github",
+  "repo": "acme/widgets",
+  "takenAt": "2026-11-16T00:00:00.000Z",
+  "viewer": "sweeper",
+  "defaultBranch": "main",
+  "defaultBranchSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "config": {
+    "ownAuthors": ["maint"],
+    "claimLabels": ["claimed"],
+    "protectLabels": ["wayfinder:*"],
+    "humanGateLabels": ["needs-owner"],
+    "parkedLabels": ["parked"],
+    "staleClaimDays": 14
+  },
+  "repoLabels": [
+    "bug",
+    "claimed",
+    "enhancement",
+    "needs-owner",
+    "parked",
+    "triage",
+    "wayfinder:map"
+  ],
+  "counts": {
+    "trackerOpen": 8,
+    "fetched": 8,
+    "complete": true
+  },
+  "issues": [
+    {
+      "id": "1",
+      "number": 1,
+      "nodeId": "I_1",
+      "url": "https://github.com/acme/widgets/issues/1",
+      "title": "Crash on start",
+      "body": "Body of issue 1.",
+      "state": "OPEN",
+      "author": {
+        "login": "sweeper",
+        "kind": "viewer"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": ["bug"],
+      "assignees": [],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [
+          {
+            "number": 10,
+            "url": "https://github.com/acme/widgets/pull/10",
+            "state": "MERGED",
+            "merged": true,
+            "isDraft": false,
+            "baseRefName": "main",
+            "headRefName": "fix-10",
+            "author": "maint"
+          }
+        ],
+        "crossRefs": [
+          {
+            "kind": "pr",
+            "repo": "acme/widgets",
+            "number": 11,
+            "url": "https://github.com/acme/widgets/pull/11",
+            "state": "CLOSED",
+            "merged": false,
+            "title": "ref 11",
+            "baseRefName": "main"
+          }
+        ]
+      },
+      "protection": [],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "bcea3ec9efd8174c40a03f53edbdfb000a69879d36d2338a9fb958aa4963e571"
+    },
+    {
+      "id": "2",
+      "number": 2,
+      "nodeId": "I_2",
+      "url": "https://github.com/acme/widgets/issues/2",
+      "title": "Add `dark` | mode\nplease",
+      "body": "Body of issue 2.",
+      "state": "OPEN",
+      "author": {
+        "login": "alice",
+        "kind": "other"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": ["enhancement"],
+      "assignees": [],
+      "comments": [
+        {
+          "id": "IC_21",
+          "author": "alice",
+          "authorKind": "other",
+          "createdAt": "2026-02-01T00:00:00Z",
+          "updatedAt": "2026-02-01T00:00:00Z",
+          "body": "ping"
+        },
+        {
+          "id": "IC_22",
+          "author": "maint",
+          "authorKind": "own",
+          "createdAt": "2026-02-02T00:00:00Z",
+          "updatedAt": "2026-02-02T00:00:00Z",
+          "body": "ack"
+        },
+        {
+          "id": "IC_23",
+          "author": "carol",
+          "authorKind": "other",
+          "createdAt": "2026-03-01T00:00:00Z",
+          "updatedAt": "2026-03-01T00:00:00Z",
+          "body": "me too"
+        }
+      ],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "dc2a2c39ef9e95e5137ab675d27bcdfecf7cd7c48d7925e635202fb54735d4e9"
+    },
+    {
+      "id": "3",
+      "number": 3,
+      "nodeId": "I_3",
+      "url": "https://github.com/acme/widgets/issues/3",
+      "title": "Issue 3",
+      "body": "Body of issue 3.",
+      "state": "OPEN",
+      "author": {
+        "login": "maint",
+        "kind": "own"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-10-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": ["claimed"],
+      "assignees": [],
+      "comments": [
+        {
+          "id": "IC_31",
+          "author": "maint",
+          "authorKind": "own",
+          "createdAt": "2026-09-30T00:00:00Z",
+          "updatedAt": "2026-09-30T00:00:00Z",
+          "body": "I'll take this"
+        }
+      ],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [
+        {
+          "reason": "claim-label",
+          "detail": "claimed"
+        }
+      ],
+      "claim": {
+        "labelled": true,
+        "openPr": false,
+        "lastActivityAt": "2026-10-01T00:00:00Z",
+        "stale": true
+      },
+      "digest": "5957c4ffcc3f494debb840399ab8daef749bd71f99d76d4502a6c0da4a65fd62"
+    },
+    {
+      "id": "4",
+      "number": 4,
+      "nodeId": "I_4",
+      "url": "https://github.com/acme/widgets/issues/4",
+      "title": "Issue 4",
+      "body": "Body of issue 4.",
+      "state": "OPEN",
+      "author": {
+        "login": "dependabot",
+        "kind": "bot"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": [],
+      "assignees": ["bob"],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [
+        {
+          "reason": "assignee",
+          "detail": "bob"
+        }
+      ],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "c36a291c3c930103f381f845c34c9efbe0341bfdf02727a9bc64136e72d0e7a6"
+    },
+    {
+      "id": "5",
+      "number": 5,
+      "nodeId": "I_5",
+      "url": "https://github.com/acme/widgets/issues/5",
+      "title": "Issue 5",
+      "body": "Body of issue 5.",
+      "state": "OPEN",
+      "author": {
+        "login": "alice",
+        "kind": "other"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": ["wayfinder:map"],
+      "assignees": [],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [
+        {
+          "reason": "protected-label",
+          "detail": "wayfinder:map"
+        }
+      ],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "21c72f67d16d5ccae564e496e73422ad6374630549e4b92748b3a5220804410b"
+    },
+    {
+      "id": "6",
+      "number": 6,
+      "nodeId": "I_6",
+      "url": "https://github.com/acme/widgets/issues/6",
+      "title": "Widget dup",
+      "body": "Body of issue 6.",
+      "state": "OPEN",
+      "author": {
+        "login": "maint",
+        "kind": "own"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": [],
+      "assignees": [],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "271dd2f68e0089d548ab0d1dfbf82c157f20eb14f2df34256a8a2a38346d8087"
+    },
+    {
+      "id": "7",
+      "number": 7,
+      "nodeId": "I_7",
+      "url": "https://github.com/acme/widgets/issues/7",
+      "title": "Widget original",
+      "body": "Body of issue 7.",
+      "state": "OPEN",
+      "author": {
+        "login": "maint",
+        "kind": "own"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": [],
+      "assignees": [],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "83d8a3d56f4ae4d6a7a8ef743b03f993f4f9dd20b72587c9611a9f3a8e5259ef"
+    },
+    {
+      "id": "8",
+      "number": 8,
+      "nodeId": "I_8",
+      "url": "https://github.com/acme/widgets/issues/8",
+      "title": "Rewrite me",
+      "body": "Old text with </details> and -->",
+      "state": "OPEN",
+      "author": {
+        "login": "maint",
+        "kind": "own"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-11-01T00:00:00Z",
+      "locked": false,
+      "milestone": null,
+      "lifecycleEvents": 0,
+      "labels": [],
+      "assignees": [],
+      "comments": [],
+      "commentsComplete": true,
+      "links": {
+        "closingPrs": [],
+        "crossRefs": []
+      },
+      "protection": [],
+      "claim": {
+        "labelled": false,
+        "openPr": false,
+        "lastActivityAt": "2026-11-01T00:00:00Z",
+        "stale": false
+      },
+      "digest": "73cd0a0e6cd56973718bd6e9816463107bc88b572b1f27ddf444ff6983cd525c"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "1",
+  "verdict": "close",
+  "closeReason": "done",
+  "confidence": "high",
+  "summary": "Fixed by #10.",
+  "comment": "Fixed by #10.",
+  "evidence": [
+    {
+      "kind": "pr",
+      "ref": "#10",
+      "note": "see this"
+    }
+  ]
+}

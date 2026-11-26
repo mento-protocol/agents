@@ -1,0 +1,16 @@
+{
+  "id": "6",
+  "verdict": "close",
+  "closeReason": "duplicate",
+  "duplicateOf": "7",
+  "confidence": "high",
+  "summary": "Same as #7.",
+  "comment": "Duplicate of #7.",
+  "evidence": [
+    {
+      "kind": "issue",
+      "ref": "#7",
+      "note": "see this"
+    }
+  ]
+}
