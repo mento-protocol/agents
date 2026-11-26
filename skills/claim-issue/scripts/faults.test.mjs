@@ -379,6 +379,21 @@ test("a claim not visible on the re-read is exit 1 with the post reported", asyn
   assert.equal(JSON.parse(out.stdout).posted.length, 1);
 });
 
+test("an issue closed while the claim was written is exit 2 with the post reported", async () => {
+  const fake = new FakeGitHub({ issues: { 1: { labels: ["claimed"] } } });
+  fake.hooks.ClaimIssueAddComment = (f) => {
+    f.issues.get(1).state = "CLOSED";
+  };
+  const out = await cli(
+    ["claim", "1", "--repo", "o/r", "--session", "me:abc", "--run", "#7"],
+    fake,
+  );
+  assert.equal(out.code, 2);
+  const body = JSON.parse(out.stdout);
+  assert.equal(body.posted.length, 1);
+  assert.match(body.error, /closed while the claim was written/);
+});
+
 test("repair: no label in the repository and no live claim is no mutation", async () => {
   const fake = new FakeGitHub({ issues: { 1: {} }, labelExists: false });
   assert.equal((await repair(ctxOf(fake), { number: 1 })).result.change, null);

@@ -199,6 +199,15 @@ export async function claim(
     readIssue(ctx, number, { requireOpen: false }),
   );
   const winner = after.state.winner;
+  // An issue closed while the claim was written has nothing left to work on.
+  if (after.issue.state !== "OPEN") {
+    throw Object.assign(
+      new Refused(
+        `#${number} was closed while the claim was written; run release`,
+      ),
+      { posted },
+    );
+  }
   if (!after.state.live.some((c) => c.session === session)) {
     throw Object.assign(
       new GhFailed(`#${number}: the claim is not live on re-read; run check`),
