@@ -79,24 +79,32 @@ print_review_bodies
                     self.assertIn('superseded head', output)
 
     def test_claude_review_pass(self):
-        # A real claude-code-action summary (the login replaced). The result
-        # line is appended: the real body predates the prompt that asks for it.
+        # A real claude-code-action summary (the login replaced). The clean
+        # shape keeps its header, rule and checklist and ends with the result
+        # line: the real body predates the prompt that asks for that shape.
         real = fixture_body('claude-review-summary')
-        clean = real + '\n\nReview result: LGTM, no findings\n'
+        lines = real.split('\n')
+        kept = lines[:3] + [line for line in lines if line.startswith('- [')]
+        clean = '\n'.join(kept) + '\n\nReview result: LGTM, no findings\n'
+        last = 'Review result: LGTM, no findings'
         bot = 'github-actions[bot]'
         for text, author, expected in [
                 (clean, bot, 0),
+                (clean.replace('@maintainer', '@dev_acme', 1), bot, 0),
                 (real, bot, 1),
+                (real + '\n\n' + last + '\n', bot, 1),
                 (clean, 'claude[bot]', 1),
+                (clean.replace(last, '1. Restore the deleted guard.\n' + last), bot, 1),
+                (clean.replace(last, '### Verdict: needs-discussion\n' + last), bot, 1),
+                (clean.replace('---\n', '---\n### Review complete\n', 1), bot, 1),
+                (clean.replace('- [x] Post findings', '- [x] Post findings [P2]'), bot, 1),
                 (clean + 'Restore the deleted guard.\n', bot, 1),
-                (clean.replace('### Findings roll-up', '### Findings roll-up\n\n1. [P2] Restore the guard.'), bot, 1),
-                (clean.replace('Review result: LGTM, no findings', 'Review result: LGTM, no findings yet'), bot, 1),
+                (clean.replace(last, last + ' yet'), bot, 1),
                 (clean.replace('**Claude finished', '**Claude encountered an error', 1), bot, 1),
                 (clean.replace('[View job](https://github.com/', '[View job](https://example.com/', 1), bot, 1),
-                ('Review result: LGTM, no findings', bot, 1)]:
+                (last, bot, 1)]:
             with self.subTest(text=text[-60:], author=author, expected=expected):
                 self.assertEqual(run(text, author)[:2], [expected, expected])
-
 
 
 if __name__ == '__main__':

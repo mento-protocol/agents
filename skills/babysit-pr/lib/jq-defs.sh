@@ -121,24 +121,29 @@ def codex_review_issue_notice:
 '
 
 # claude-code-action posts its review summary as an issue comment by
-# github-actions[bot]. The summary is free-form model text, so no full-body
-# shape exists. Where the review prompt asks for it, a clean review ends with
-# the exact line "Review result: LGTM, no findings". The comment is
-# informational only when all of these hold: that author, the action's own
-# "Claude finished ... [View job](<run URL>)" header, that line as the last
-# line, and no [P1], [P2] or [P3] tag anywhere in the body. Any other body - a
-# summary that lists a finding, a run still in progress, an error, a missing or
-# altered last line - stays actionable feedback. Inline findings are review
-# threads, which the thread and inline counts gate separately.
+# github-actions[bot]. A summary with findings is free-form model text, so it
+# has no full-body shape and always stays actionable. Where the review prompt
+# asks for it, a clean review has a fixed shape instead: the action's own
+# "**Claude finished @<login>'s task in <time>** —— [View job](<run URL>)"
+# header and "---" rule, then only blank lines and progress-checklist items
+# ("- [x] ..."), then the exact last line "Review result: LGTM, no findings".
+# Only that whole body from that author, with no [P1], [P2] or [P3] tag, is
+# informational. Analysis prose, a verdict heading, a roll-up, a run still in
+# progress or an error stays actionable feedback, so a summary-only finding
+# cannot hide above the last line. A login may carry the "_shortcode" of a
+# managed user. Inline findings are review threads, which the thread and
+# inline counts gate separately.
 # shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
 CLAUDE_REVIEW_PASS_JQ='
 def claude_review_pass:
   ((.user.login // "") == "github-actions[bot]")
   and ((.body // "") | test(
-    "\\A\\*\\*Claude finished @[A-Za-z0-9][A-Za-z0-9-]*(?:\\[bot\\])?\u0027s task in [0-9hms ]+\\*\\* "
+    "\\A\\*\\*Claude finished @[A-Za-z0-9][A-Za-z0-9_-]*(?:\\[bot\\])?\u0027s task in [0-9hms ]+\\*\\* "
     + "—— \\[View job\\]\\(https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+\\)\\n"
+    + "\\n---\\n"
+    + "(?:[ \\t]*(?:- \\[[ x]\\] [^\\n]*)?\\n)*"
+    + "Review result: LGTM, no findings[[:space:]]*\\z"
   ))
-  and ((.body // "") | sub("[[:space:]]+\\z"; "") | test("\\nReview result: LGTM, no findings\\z"))
   and ((.body // "") | test("\\[P[123]\\]") | not);
 '
 

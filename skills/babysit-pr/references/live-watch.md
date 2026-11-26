@@ -327,10 +327,6 @@ later by commenting “@codex review”.`, a fenced error block (`Unknown error`
   `@Codex` _tasks_ only. It says nothing about the PR-review service. It is not actionable feedback,
   it is not a reason to reply or re-trigger, and it is not permission to drop the gate. Never tag
   `chatgpt-codex-connector` directly, and treat `@codex` / `@Codex` as one trigger.
-- A claude-code-action review summary (`github-actions[bot]`) is not feedback only when it ends
-  with the exact line `Review result: LGTM, no findings` and carries no `[P1]`–`[P3]` tag; see
-  [exact feedback formats](exact-feedback-formats.md). Any other summary counts as top-level
-  feedback and needs a reply.
 - **Trigger `@codex review` only when no Codex review is running anywhere on the PR.** Before
   posting it, read the bot's summary comment (marker `codex-pull-request-review-summary`) and the
   PR's reactions: a 🔄 **Running** row or a 👀 reaction means in flight, and a newer head is a reason
@@ -348,11 +344,16 @@ later by commenting “@codex review”.`, a fenced error block (`Unknown error`
   sentence, stays actionable. The poller binds the notice to a head and emits
   `CODEX_REVIEW_NOT_RUN` for it, which never clears; what the operator does with that verdict is the
   usage-limit rule under "Sign-offs" in [`../SKILL.md`](../SKILL.md).
-- **The Claude auto-review summary stays actionable until you answer it.** In a repository whose
+- **A Claude auto-review summary stays actionable until you answer it, unless it is the clean
+  shape.** The clean shape is the action's header, then only blank lines and progress-checklist
+  items, then the exact last line `Review result: LGTM, no findings`, with no `[P1]`–`[P3]` tag
+  (see [exact feedback formats](exact-feedback-formats.md)). The poller drops that shape and
+  counts every other summary, including every summary from a prompt that does not ask for the
+  line. The rest of this bullet covers the counted summaries. In a repository whose
   Claude review workflow (and its on-demand `@claude review` workflow) posts as
   `github-actions[bot]`, the review posts a progress
   checklist that it later edits into a verdict and a numbered findings roll-up. The text is model
-  prose with no fixed shape, so the poller has no exclusion for it. It counts the comment in
+  prose with no fixed shape. The poller counts the comment in
   `top_level` until any comment of yours, a review trigger included, is created after it. Until
   then `FEEDBACK_GATE_PENDING` persists and no `ALL_CLEAR` arrives, even when the roll-up lists
   no findings. The poller compares creation times, so a comment of yours posted while the review

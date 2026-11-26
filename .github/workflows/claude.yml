@@ -107,7 +107,7 @@ jobs:
               - Overall verdict (LGTM / needs-changes / needs-discussion)
               - Cross-cutting concerns (architecture, test strategy, missing scenarios)
               - A NUMBERED roll-up of EVERY finding (inline + summary-only) so downstream tooling can enumerate them
-              - The babysit-pr watcher recognizes a clean review only by its last line. Only when the verdict is LGTM and the roll-up is empty, make the last line of the comment, as plain text with no formatting, exactly: Review result: LGTM, no findings
+              - A clean review has a fixed shape, because the babysit-pr watcher recognizes it only by that shape. Only when the verdict is LGTM and there is no finding and no concern at all: after the progress checklist, write no analysis, verdict, heading or roll-up, and make the last line of the comment, as plain text with no formatting, exactly: Review result: LGTM, no findings
 
             SEVERITY tag every finding: [P1] correctness/security/breaking, [P2] quality/perf/maintainability, [P3] suggestion/style.
 
@@ -163,7 +163,7 @@ jobs:
               - Overall verdict (LGTM / needs-changes / needs-discussion)
               - Cross-cutting concerns (architecture, test strategy, missing scenarios)
               - A NUMBERED roll-up of EVERY finding (inline + summary-only) so downstream tooling can enumerate them
-              - The babysit-pr watcher recognizes a clean review only by its last line. Only when the verdict is LGTM and the roll-up is empty, make the last line of the comment, as plain text with no formatting, exactly: Review result: LGTM, no findings
+              - A clean review has a fixed shape, because the babysit-pr watcher recognizes it only by that shape. Only when the verdict is LGTM and there is no finding and no concern at all: after the progress checklist, write no analysis, verdict, heading or roll-up, and make the last line of the comment, as plain text with no formatting, exactly: Review result: LGTM, no findings
 
             SEVERITY tag every finding: [P1] correctness/security/breaking, [P2] quality/perf/maintainability, [P3] suggestion/style.
 
