@@ -58,9 +58,19 @@ bounded_run() {
     my $pid = fork;
     defined $pid or exit 125;
     if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+    # A member that is forking when the group is killed can leave a child the
+    # signal misses: bash 3.2 forks the last command of a background list
+    # where bash 5 execs it. Kill again while the group still has members,
+    # at most three rounds, so a group of unreaped zombies costs only 40 ms.
+    sub kill_group {
+      for my $round (1 .. 3) {
+        kill("KILL", -$_[0]) or last;
+        select(undef, undef, undef, 0.02) if $round < 3;
+      }
+    }
     for my $sig (qw(INT TERM HUP)) {
       $SIG{$sig} = sub {
-        kill "KILL", -$pid;
+        kill_group($pid);
         waitpid $pid, 0;
         exit 128 + ($sig eq "INT" ? 2 : $sig eq "TERM" ? 15 : 1);
       };
@@ -68,7 +78,7 @@ bounded_run() {
     $SIG{ALRM} = sub {
       kill "TERM", -$pid;
       select(undef, undef, undef, 0.2);
-      kill "KILL", -$pid;
+      kill_group($pid);
       waitpid $pid, 0;
       my $name = $ARGV[0] =~ s{.*/}{}r;
       print STDERR "$name: no response within ${limit}s; treated as a failed read\n";
@@ -80,7 +90,7 @@ bounded_run() {
     my $status = $?;
     # A descendant the command left behind could still hold the `$(...)` pipe open
     # with nothing left to bound it; end what remains of the group.
-    kill "KILL", -$pid;
+    kill_group($pid);
     exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
   ' "$GH_CALL_LIMIT" "$@"
 }
