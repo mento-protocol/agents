@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034  # the GH_* reset assignments are read by run(), in lib/reply-and-resolve-fixture.sh, which shellcheck checks on its own.
 
 set -euo pipefail
 

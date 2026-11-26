@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2016,SC2154
+# shellcheck shell=bash
 # Six functions, called in order from codex-threads.sh once it has read the
 # PR: each prints one section of the inventory. They read ME, CODEX_LOGIN,
-# SINCE, RESOLVED_ROOTS, HEAD_SHA, WORK_DIR and the jq snippets from sibling
-# files shellcheck checks on its own, hence the disables.
+# SINCE, RESOLVED_ROOTS, HEAD_SHA, WORK_DIR and the jq snippets that sibling
+# files set.
 #
 # The joins below partition the Codex roots on this PR. Three tests decide which
 # section a root prints in - whether the reviewer withdrew the finding, whether

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Package gates for babysit-prs.sh: `pnpm pr:ready-state` and
 # `pnpm pr:feedback-state` in $REPO_ROOT, each inside the repository-trust
 # guard. Sourced where these functions used to be defined; it only

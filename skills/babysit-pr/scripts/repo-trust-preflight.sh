@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034 # globals set here are read by the modules in repo-trust/
 # Repository-trust preflight shared by the `babysit-pr` and `ship-pr`
 # skills. A repo-local adapter — a `$REPO_ROOT/.claude/babysit-pr.sh`
 # gate, an operator hook gate, `pnpm pr:ready-state`, `pnpm pr:feedback-state`,
@@ -102,7 +101,10 @@ SET_UPSTREAM=0
 # tests; any other value keeps the default.
 PUBLISHED_REREAD_SECONDS=5
 case "${REPO_TRUST_REREAD_SECONDS-}" in
-[0-9] | [1-5][0-9] | 60) PUBLISHED_REREAD_SECONDS=$REPO_TRUST_REREAD_SECONDS ;;
+[0-9] | [1-5][0-9] | 60)
+	# shellcheck disable=SC2034 # read by repo-trust/publish.sh
+	PUBLISHED_REREAD_SECONDS=$REPO_TRUST_REREAD_SECONDS
+	;;
 esac
 
 # ------------------------------------------------------------------- main ----
@@ -128,20 +130,24 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--pr)
 		[[ $# -ge 2 ]] || usage_error "--pr needs a value"
+		# shellcheck disable=SC2034 # read by repo-trust/resolve.sh
 		PR=$2
 		shift 2
 		;;
 	--base-repo)
 		[[ $# -ge 2 ]] || usage_error "--base-repo needs a value"
+		# shellcheck disable=SC2034 # read by repo-trust/resolve.sh
 		BASE_REPO_ARG=$2
 		shift 2
 		;;
 	--base)
 		[[ $# -ge 2 ]] || usage_error "--base needs a value"
+		# shellcheck disable=SC2034 # read by repo-trust/resolve.sh
 		BASE_ARG=$2
 		shift 2
 		;;
 	--set-upstream)
+		# shellcheck disable=SC2034 # read by repo-trust/publish.sh
 		SET_UPSTREAM=1
 		shift
 		;;

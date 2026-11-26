@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Commit-membership checks for reply-and-resolve.sh: which commit a reply
 # may cite, and which PR it must belong to. Split from one long top-level
 # flow into named functions to keep each under the 50-line limit; the
 # sequence of gh reads and die messages is unchanged. Used from
-# reply-and-resolve.sh, which shellcheck checks on its own, hence the
-# disables.
+# reply-and-resolve.sh.
 
 # The SHA is published in every reply that carries the token, so it is checked
 # against the repository before anything is posted. `deadbee` is well-formed and

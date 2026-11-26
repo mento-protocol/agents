@@ -44,7 +44,7 @@ grep -q '^=== 113 src/done.ts:3 resolved-unanswered ===$' "$TMP_DIR/since.out" |
 # shellcheck disable=SC2034  # read by run(), in lib/codex-threads-fixture.sh, which shellcheck checks on its own.
 GH_EMPTY_COMMENTS=1
 status=$(run empty_comments acme/widgets 7)
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034 # read by run(), in lib/codex-threads-fixture.sh
 GH_EMPTY_COMMENTS=0
 [[ $status != "0" ]] || fail "empty_comments: an unread comment feed printed an empty inventory at exit 0" "$TMP_DIR/empty_comments.out"
 [[ $status == "1" ]] || fail "empty_comments: expected exit 1, got $status" "$TMP_DIR/empty_comments.err"

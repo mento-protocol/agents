@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Read-only GitHub reads for reply-and-resolve.sh: failure helper, body
 # normalisation and the one capture wrapper every `gh api` call goes
-# through. Used by the sibling files this script also sources; shellcheck
-# checks each tracked file on its own, hence the disables.
+# through. Used by the sibling files this script also sources.
 
 die() {
 	local code=$1
@@ -32,6 +31,7 @@ normalise_body() {
 # on the thread carries the text this run would post: the index built before the
 # loop, and the reconcile after a POST that reported no id. One definition, so
 # the pre-post check and the reconcile cannot disagree about the same reply.
+# shellcheck disable=SC2034 # read by lib/reply-and-resolve/reply-loop.sh
 NORMALISE_JQ='
 def normalised: (. // "") | gsub("\r\n"; "\n") | sub("\\s+$"; "");
 '

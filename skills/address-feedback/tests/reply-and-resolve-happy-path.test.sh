@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034  # SHARED_RESOLVED and SHARED_REPLY_STATE are read by run(), in lib/reply-and-resolve-fixture.sh, which shellcheck checks on its own.
 
 set -euo pipefail
 

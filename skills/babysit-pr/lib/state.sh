@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Event output, the retry pause, per-PR state accessors, and the REST
 # feed readers for babysit-prs.sh. Sourced at top level; it only defines
 # functions.
@@ -8,6 +8,7 @@ emit() {
 	printf '[#%s] %s\n' "$1" "$2"
 	# Any emitted line restarts the heartbeat interval: the heartbeat exists only
 	# to prove the watch is alive through a stretch with no other output.
+	# shellcheck disable=SC2034 # read by main-loop.sh
 	LAST_OUTPUT_TS=$(date +%s)
 }
 elapsed_min() { echo $((($(date +%s) - START) / 60)); }
@@ -32,7 +33,7 @@ sget() {
 	printf '%s' "${!var-}"
 }
 sset() {
-	# shellcheck disable=SC2140
+	# shellcheck disable=SC2140 # the escaped quotes are part of the eval text
 	eval "${1}_${2}=\"\$3\""
 }
 

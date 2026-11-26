@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2016,SC2034,SC2154
+# shellcheck shell=bash
 # The --resolve-withdrawn route for reply-and-resolve.sh: the withdrawal jq
 # rule, the per-root re-check, and the two-pass resolve. Used from
-# reply-and-resolve.sh, which shellcheck checks on its own, hence the
-# disables.
+# reply-and-resolve.sh, which reads WITHDRAWN_REFUSED.
 
 # The two definitions below are byte-identical copies of TIDY_JQ and
 # WITHDRAWN_JQ in codex-threads.sh, which is where they are explained;
@@ -128,6 +127,7 @@ EOF
 		read_withdrawn_now "$ROOT_ID"
 		if [[ $ROOT_WITHDRAWN_NOW != "true" ]]; then
 			printf 'refused %s reason=withdrawal_retracted\n' "$ROOT_ID"
+			# shellcheck disable=SC2034 # read by reply-and-resolve.sh
 			WITHDRAWN_REFUSED="true"
 			continue
 		fi

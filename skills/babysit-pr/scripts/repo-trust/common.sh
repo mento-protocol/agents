@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Part of scripts/repo-trust-preflight.sh: verdicts, text helpers, PATH hardening, URL and remote identity, state files, GitHub branch reads, and the transport-config check.
 # Sourced by the entry script only; it defines functions and sets nothing.
 
@@ -224,6 +224,7 @@ api_branch() {
 # values of those keys. An empty value runs nothing (checked on Git 2.55 and
 # Apple Git 2.54). Callers add core.hooksPath=/dev/null for the pin fetch only;
 # a push runs the user's hooks.
+# shellcheck disable=SC2034 # read by publish.sh
 GIT_TRANSPORT_OVERRIDES=(-c core.alternateRefsCommand= -c core.alternateRefsPrefixes=
 	-c core.fsmonitor= -c protocol.file.allow=never -c protocol.ext.allow=never)
 

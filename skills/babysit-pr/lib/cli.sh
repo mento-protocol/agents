@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Command-line helpers for babysit-prs.sh: usage text, --waive-check
 # validation, and repository slug parsing and detection. Sourced at top
 # level before the options are parsed; it only defines functions.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Review-thread, inline-comment, top-level-comment and review-container
 # counts for babysit-prs.sh. Sourced at top level; it only defines
 # functions.

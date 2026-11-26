@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2016,SC2034,SC2154
+# shellcheck shell=bash
 # Review-thread reads and the resolve mutation for reply-and-resolve.sh.
-# Used from reply-and-resolve.sh and its sibling lib files; each is checked
-# on its own, hence the disables.
-
-# shellcheck disable=SC2016  # $owner and friends are GraphQL variables, not shell.
-THREADS_QUERY='
-  query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
-    repository(owner:$owner,name:$name){ pullRequest(number:$number){
-      reviewThreads(first:100, after:$endCursor){
-        pageInfo{hasNextPage endCursor}
-        nodes{ id isResolved
-               # graphql-truncation-ok: only the root comment of each thread is read
-               comments(first:1){nodes{databaseId}}}}}}}'
+# Used from reply-and-resolve.sh and its sibling lib files.
 
 # Writes the paginated thread listing to $1. Each page is one JSON document, and
 # `thread_index` slurps them, so a listing that came back with no bytes would
@@ -22,6 +11,18 @@ review_threads() {
 		-f owner="$OWNER" -f name="$REPO" -F number="$PR" \
 		-f query="$THREADS_QUERY"
 }
+
+# The query review_threads sends. It follows the function on purpose: ShellCheck
+# applies a directive that comes before a file's first command to the whole file.
+# shellcheck disable=SC2016 # $owner and friends are GraphQL variables, not shell.
+THREADS_QUERY='
+  query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
+    repository(owner:$owner,name:$name){ pullRequest(number:$number){
+      reviewThreads(first:100, after:$endCursor){
+        pageInfo{hasNextPage endCursor}
+        nodes{ id isResolved
+               # graphql-truncation-ok: only the root comment of each thread is read
+               comments(first:1){nodes{databaseId}}}}}}}'
 
 # thread id keyed by the database id of the thread's first comment - the root
 # the replies file names.
@@ -57,6 +58,7 @@ RERUN_FINISHES="a rerun finds that reply by its matching text and resolves the t
 # points at the rerun: it re-reads the replies under that root and posts only
 # where none of them carries this text, which is the same match this run just
 # tried and the reason rerunning the file is safe.
+# shellcheck disable=SC2034 # read by lib/reply-and-resolve/reply-loop.sh
 RERUN_RECONCILES="a rerun re-reads the replies under that root and posts again only where no reply of yours carries this text"
 
 # The one place a thread's resolved state is decided. It re-reads the threads

@@ -22,7 +22,6 @@
 # The caller sets TMP_DIR before sourcing. Global and system git config are
 # replaced so a developer's own insteadOf rules cannot change the result.
 
-# shellcheck disable=SC2034 # the variables below are read by the sourcing tests
 FX="$TMP_DIR/fx"
 WORK="$TMP_DIR/work"
 TRUST_BIN="$TMP_DIR/trust-bin"
@@ -176,6 +175,7 @@ trust_repo_init() {
 	"$REAL_GIT" -C "$WORK" checkout -q -b feature
 	printf 'two\n' >>"$WORK/file"
 	"$REAL_GIT" -C "$WORK" commit -qam two
+	# shellcheck disable=SC2034 # read by the tests that source this harness
 	C2=$("$REAL_GIT" -C "$WORK" rev-parse HEAD)
 	"$REAL_GIT" -C "$WORK" remote add origin git@github.com:acme/widgets.git
 	printf '%s\n' "$C1" >"$FX/served/main"

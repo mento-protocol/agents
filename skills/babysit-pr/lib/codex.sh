@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Codex gate helpers for babysit-prs.sh: requirement detection, the
 # exact-head review summary, and the Codex events (the usage-limit notice
 # readers are in lib/codex-limit-notice.sh).

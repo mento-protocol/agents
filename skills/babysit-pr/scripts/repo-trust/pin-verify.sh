@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash disable=SC2034,SC2154
+# shellcheck shell=bash
 # Part of scripts/repo-trust-preflight.sh: fetch and pin the base and default-branch OIDs, and verify the pin.
 # Sourced by the entry script only; it defines functions and sets nothing.
 
@@ -30,6 +30,7 @@ pin() {
 			api=$(api_branch "$DEFAULT_BRANCH") || unknown "cannot read $BASE_REPO branch $DEFAULT_BRANCH from GitHub"
 			split_tsv "$api" sha protected
 			if [[ $sha == "$DEFAULT_OID" ]]; then
+				# shellcheck disable=SC2034 # read by repo-trust-preflight.sh
 				DEFAULT_PROTECTED=$protected
 				return 0
 			fi
