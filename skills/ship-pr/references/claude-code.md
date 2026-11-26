@@ -21,6 +21,16 @@ Do not create a second task list, review chain, or cleanup phase here.
   and the brief in `../../review/references/tooling.md` ("The bounded
   re-review"). Review §7 decides whether it runs, how many runs start, its
   operating point and reuse.
+- A subagent without the Agent tool (for example, an agent that a workflow
+  script started) cannot run the bounded re-review. When review §7 calls for
+  it, the subagent reports it on its own `Not run:` line. The parent or
+  workflow that started the subagent then runs the re-review on the final
+  head, as review §7 and the brief in `../../review/references/tooling.md`
+  prescribe. It verifies each returned finding against the code, and
+  confirmed findings block readiness like any review finding. This is the
+  required re-review, not an extra verifier. (Observed 2026-11-26: that stage
+  found two defects that the shipping agent's own review and the second-model
+  pass had missed.)
 - Only for scans selected by the main skill, use
   `../../review/references/security-scanners.md`: the Claude Security agent
   with an explicit model, the newest available Opus (or the existing helper), or the pinned Codex
