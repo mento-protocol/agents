@@ -78,6 +78,35 @@ print_review_bodies
                 if listed:
                     self.assertIn('superseded head', output)
 
+    def test_claude_review_pass(self):
+        # A real claude-code-action summary (the login replaced). The clean
+        # shape keeps only its header and rule and adds the result line: the
+        # real body predates the prompt that asks for that shape.
+        real = fixture_body('claude-review-summary')
+        head = '\n'.join(real.split('\n')[:3]) + '\n'
+        last = 'Review result: LGTM, no findings'
+        clean = head + last + '\n'
+        bot = 'github-actions[bot]'
+        for text, author, expected in [
+                (clean, bot, 0),
+                (clean.replace('@maintainer', '@dev_acme', 1), bot, 0),
+                (clean.replace(' in 2m 14s', '', 1), bot, 0),
+                (clean.replace(' in 2m 14s', ' in 45s', 1), bot, 0),
+                (clean.replace(' in 2m 14s', ' in mssh', 1), bot, 1),
+                (real, bot, 1),
+                (real + '\n\n' + last + '\n', bot, 1),
+                (clean, 'claude[bot]', 1),
+                (head + '- [x] Post findings\n\n' + last + '\n', bot, 1),
+                (head + '- [ ] Restore the deleted guard before merge.\n' + last + '\n', bot, 1),
+                (head + '### Review complete\n' + last + '\n', bot, 1),
+                (head + '1. Restore the deleted guard.\n' + last + '\n', bot, 1),
+                (clean + 'Restore the deleted guard.\n', bot, 1),
+                (head + last + ' yet\n', bot, 1),
+                (clean.replace('**Claude finished', '**Claude encountered an error', 1), bot, 1),
+                (clean.replace('[View job](https://github.com/', '[View job](https://example.com/', 1), bot, 1),
+                (last, bot, 1)]:
+            with self.subTest(text=text[-60:], author=author, expected=expected):
+                self.assertEqual(run(text, author)[:2], [expected, expected])
 
 
 if __name__ == '__main__':

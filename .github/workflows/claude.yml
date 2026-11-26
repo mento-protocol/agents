@@ -107,6 +107,7 @@ jobs:
               - Overall verdict (LGTM / needs-changes / needs-discussion)
               - Cross-cutting concerns (architecture, test strategy, missing scenarios)
               - A NUMBERED roll-up of EVERY finding (inline + summary-only) so downstream tooling can enumerate them
+              - A clean review has one fixed shape, because the babysit-pr watcher recognizes it only by that shape. Only when the verdict is LGTM and there is no finding and no concern at all: in your final update, replace the whole tracking comment with exactly this one line, as plain text, and nothing else (no checklist, heading, analysis or roll-up): Review result: LGTM, no findings
 
             SEVERITY tag every finding: [P1] correctness/security/breaking, [P2] quality/perf/maintainability, [P3] suggestion/style.
 
@@ -162,6 +163,7 @@ jobs:
               - Overall verdict (LGTM / needs-changes / needs-discussion)
               - Cross-cutting concerns (architecture, test strategy, missing scenarios)
               - A NUMBERED roll-up of EVERY finding (inline + summary-only) so downstream tooling can enumerate them
+              - A clean review has one fixed shape, because the babysit-pr watcher recognizes it only by that shape. Only when the verdict is LGTM and there is no finding and no concern at all: in your final update, replace the whole tracking comment with exactly this one line, as plain text, and nothing else (no checklist, heading, analysis or roll-up): Review result: LGTM, no findings
 
             SEVERITY tag every finding: [P1] correctness/security/breaking, [P2] quality/perf/maintainability, [P3] suggestion/style.
 

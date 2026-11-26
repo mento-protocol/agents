@@ -344,11 +344,16 @@ later by commenting “@codex review”.`, a fenced error block (`Unknown error`
   sentence, stays actionable. The poller binds the notice to a head and emits
   `CODEX_REVIEW_NOT_RUN` for it, which never clears; what the operator does with that verdict is the
   usage-limit rule under "Sign-offs" in [`../SKILL.md`](../SKILL.md).
-- **The Claude auto-review summary stays actionable until you answer it.** In a repository whose
+- **A Claude auto-review summary stays actionable until you answer it, unless it is the clean
+  shape.** The clean shape is the action's header and `---` rule, then the one line
+  `Review result: LGTM, no findings` and nothing else (see
+  [exact feedback formats](exact-feedback-formats.md)). The poller drops that shape and
+  counts every other summary, including every summary from a prompt that does not ask for the
+  line. The rest of this bullet covers the counted summaries. In a repository whose
   Claude review workflow (and its on-demand `@claude review` workflow) posts as
   `github-actions[bot]`, the review posts a progress
   checklist that it later edits into a verdict and a numbered findings roll-up. The text is model
-  prose with no fixed shape, so the poller has no exclusion for it. It counts the comment in
+  prose with no fixed shape. The poller counts the comment in
   `top_level` until any comment of yours, a review trigger included, is created after it. Until
   then `FEEDBACK_GATE_PENDING` persists and no `ALL_CLEAR` arrives, even when the roll-up lists
   no findings. The poller compares creation times, so a comment of yours posted while the review

@@ -3,8 +3,8 @@
 # jq definitions shared by the babysit-prs.sh feedback and Codex helpers.
 # Sourced at top level after the modes are validated; it only assigns
 # variables. Writes CODEX_REVIEW_SUMMARY_JQ, CODEX_LIMIT_NOTICE_JQ,
-# CODEX_REVIEW_ISSUE_NOTICE_JQ, PASSISH_JQ, TIDY_JQ, WITHDRAWN_JQ and
-# DISPOSITION_JQ; reads nothing.
+# CODEX_REVIEW_ISSUE_NOTICE_JQ, CLAUDE_REVIEW_PASS_JQ, PASSISH_JQ, TIDY_JQ,
+# WITHDRAWN_JQ and DISPOSITION_JQ; reads nothing.
 
 # ShellCheck applies a directive that comes before a file's first command to
 # the whole file (ShellCheck wiki, "Directive"). This empty function is that
@@ -117,6 +117,31 @@ def codex_review_issue_notice:
     + "If Codex has suggestions, it will comment; otherwise it will react with 👍\\. "
     + "Codex can also answer questions or update the PR\\. "
     + "Try commenting \"@codex address that feedback\"\\. </details>\\z"
+  ));
+'
+
+# claude-code-action posts its review summary as an issue comment by
+# github-actions[bot]. A summary with findings is free-form model text, so it
+# has no full-body shape and always stays actionable. Where the review prompt
+# asks for it, a clean review has a fixed shape instead: the action's own
+# "**Claude finished @<login>'s task in <time>** —— [View job](<run URL>)"
+# header and "---" rule, then the one line "Review result: LGTM, no
+# findings" and nothing else. Only that whole body from that author is
+# informational. A checklist, a heading, analysis prose, a roll-up, a run
+# still in progress or an error stays actionable feedback, so a summary-only
+# finding has no text to hide in. A login may carry the "_shortcode" of a
+# managed user, and the action leaves out " in <time>" when it has no timing.
+# Inline findings are review threads, which the thread and
+# inline counts gate separately.
+# shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
+CLAUDE_REVIEW_PASS_JQ='
+def claude_review_pass:
+  ((.user.login // "") == "github-actions[bot]")
+  and ((.body // "") | test(
+    "\\A\\*\\*Claude finished @[A-Za-z0-9][A-Za-z0-9_-]*(?:\\[bot\\])?\u0027s task(?: in (?:[0-9]+m )?[0-9]+s)?\\*\\* "
+    + "—— \\[View job\\]\\(https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+\\)\\n"
+    + "\\n---[[:space:]]*\\n"
+    + "Review result: LGTM, no findings[[:space:]]*\\z"
   ));
 '
 
