@@ -178,8 +178,10 @@ for raw_pr in "${RAW_PRS[@]}"; do
 	raw_pr="${raw_pr//[[:space:]]/}"
 	[[ -n $raw_pr ]] || continue
 	if [[ $raw_pr =~ ^https://github.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+		# set_repo_slug runs its own match, which overwrites BASH_REMATCH.
+		url_pr="${BASH_REMATCH[3]}"
 		set_repo_slug "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-		PRS+=("${BASH_REMATCH[3]}")
+		PRS+=("$url_pr")
 	elif [[ $raw_pr =~ ^[0-9]+$ ]]; then
 		PRS+=("$raw_pr")
 	else
