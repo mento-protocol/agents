@@ -10,7 +10,7 @@ The predicates recognize complete informational bodies, not review outcomes:
 - A claude-code-action review summary is free-form model text, so it has no
   full-body shape. It is informational only when it comes from
   `github-actions[bot]`, starts with the action's `**Claude finished @<login>'s
-  task in <time>** —— [View job](<run URL>)` header and a `---` rule, followed
+task in <time>** —— [View job](<run URL>)` header and a `---` rule, followed
   by the one line `Review result: LGTM, no findings` and nothing else. A
   checklist, a heading, analysis prose or a roll-up keeps it actionable. The repository's review prompt asks for that line on a clean review only;
   a repository whose prompt does not ask for it keeps every summary actionable.
