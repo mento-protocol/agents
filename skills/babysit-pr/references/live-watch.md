@@ -345,9 +345,9 @@ later by commenting “@codex review”.`, a fenced error block (`Unknown error`
   `CODEX_REVIEW_NOT_RUN` for it, which never clears; what the operator does with that verdict is the
   usage-limit rule under "Sign-offs" in [`../SKILL.md`](../SKILL.md).
 - **A Claude auto-review summary stays actionable until you answer it, unless it is the clean
-  shape.** The clean shape is the action's header, then only blank lines and progress-checklist
-  items, then the exact last line `Review result: LGTM, no findings`, with no `[P1]`–`[P3]` tag
-  (see [exact feedback formats](exact-feedback-formats.md)). The poller drops that shape and
+  shape.** The clean shape is the action's header and `---` rule, then the one line
+  `Review result: LGTM, no findings` and nothing else (see
+  [exact feedback formats](exact-feedback-formats.md)). The poller drops that shape and
   counts every other summary, including every summary from a prompt that does not ask for the
   line. The rest of this bullet covers the counted summaries. In a repository whose
   Claude review workflow (and its on-demand `@claude review` workflow) posts as

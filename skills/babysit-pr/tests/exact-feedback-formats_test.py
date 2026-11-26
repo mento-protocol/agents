@@ -80,13 +80,12 @@ print_review_bodies
 
     def test_claude_review_pass(self):
         # A real claude-code-action summary (the login replaced). The clean
-        # shape keeps its header, rule and checklist and ends with the result
-        # line: the real body predates the prompt that asks for that shape.
+        # shape keeps only its header and rule and adds the result line: the
+        # real body predates the prompt that asks for that shape.
         real = fixture_body('claude-review-summary')
-        lines = real.split('\n')
-        kept = lines[:3] + [line for line in lines if line.startswith('- [')]
-        clean = '\n'.join(kept) + '\n\nReview result: LGTM, no findings\n'
+        head = '\n'.join(real.split('\n')[:3]) + '\n'
         last = 'Review result: LGTM, no findings'
+        clean = head + last + '\n'
         bot = 'github-actions[bot]'
         for text, author, expected in [
                 (clean, bot, 0),
@@ -94,12 +93,12 @@ print_review_bodies
                 (real, bot, 1),
                 (real + '\n\n' + last + '\n', bot, 1),
                 (clean, 'claude[bot]', 1),
-                (clean.replace(last, '1. Restore the deleted guard.\n' + last), bot, 1),
-                (clean.replace(last, '### Verdict: needs-discussion\n' + last), bot, 1),
-                (clean.replace('---\n', '---\n### Review complete\n', 1), bot, 1),
-                (clean.replace('- [x] Post findings', '- [x] Post findings [P2]'), bot, 1),
+                (head + '- [x] Post findings\n\n' + last + '\n', bot, 1),
+                (head + '- [ ] Restore the deleted guard before merge.\n' + last + '\n', bot, 1),
+                (head + '### Review complete\n' + last + '\n', bot, 1),
+                (head + '1. Restore the deleted guard.\n' + last + '\n', bot, 1),
                 (clean + 'Restore the deleted guard.\n', bot, 1),
-                (clean.replace(last, last + ' yet'), bot, 1),
+                (head + last + ' yet\n', bot, 1),
                 (clean.replace('**Claude finished', '**Claude encountered an error', 1), bot, 1),
                 (clean.replace('[View job](https://github.com/', '[View job](https://example.com/', 1), bot, 1),
                 (last, bot, 1)]:

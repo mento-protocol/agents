@@ -125,12 +125,11 @@ def codex_review_issue_notice:
 # has no full-body shape and always stays actionable. Where the review prompt
 # asks for it, a clean review has a fixed shape instead: the action's own
 # "**Claude finished @<login>'s task in <time>** —— [View job](<run URL>)"
-# header and "---" rule, then only blank lines and progress-checklist items
-# ("- [x] ..."), then the exact last line "Review result: LGTM, no findings".
-# Only that whole body from that author, with no [P1], [P2] or [P3] tag, is
-# informational. Analysis prose, a verdict heading, a roll-up, a run still in
-# progress or an error stays actionable feedback, so a summary-only finding
-# cannot hide above the last line. A login may carry the "_shortcode" of a
+# header and "---" rule, then the one line "Review result: LGTM, no
+# findings" and nothing else. Only that whole body from that author is
+# informational. A checklist, a heading, analysis prose, a roll-up, a run
+# still in progress or an error stays actionable feedback, so a summary-only
+# finding has no text to hide in. A login may carry the "_shortcode" of a
 # managed user. Inline findings are review threads, which the thread and
 # inline counts gate separately.
 # shellcheck disable=SC2034 # read by feedback-gate.sh and feedback-counts.sh
@@ -140,11 +139,9 @@ def claude_review_pass:
   and ((.body // "") | test(
     "\\A\\*\\*Claude finished @[A-Za-z0-9][A-Za-z0-9_-]*(?:\\[bot\\])?\u0027s task in [0-9hms ]+\\*\\* "
     + "—— \\[View job\\]\\(https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+\\)\\n"
-    + "\\n---\\n"
-    + "(?:[ \\t]*(?:- \\[[ x]\\] [^\\n]*)?\\n)*"
+    + "\\n---[[:space:]]*\\n"
     + "Review result: LGTM, no findings[[:space:]]*\\z"
-  ))
-  and ((.body // "") | test("\\[P[123]\\]") | not);
+  ));
 '
 
 # A pass is the whole comment, not a phrase inside one. This predicate used to be
