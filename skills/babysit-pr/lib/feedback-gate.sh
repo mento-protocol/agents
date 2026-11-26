@@ -5,7 +5,7 @@
 
 last_issue_comment_by_me_ts() {
 	local PR=$1
-	issue_comments_json "$PR" | jq --slurp --arg me "$ME" -r '
+	issue_comments_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" -r '
     (add // [])
     | [ .[] | select(.user.login == $me) | (.created_at | fromdateiso8601) ]
     | max // 0' 2>/dev/null
@@ -13,7 +13,7 @@ last_issue_comment_by_me_ts() {
 
 unreplied_issue_comment_count() {
 	local PR=$1
-	issue_comments_json "$PR" | jq --slurp --arg me "$ME" -r "$PASSISH_JQ$CODEX_REVIEW_SUMMARY_JQ$CODEX_LIMIT_NOTICE_JQ$CODEX_REVIEW_ISSUE_NOTICE_JQ"'
+	issue_comments_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" -r "$PASSISH_JQ$CODEX_REVIEW_SUMMARY_JQ$CODEX_LIMIT_NOTICE_JQ$CODEX_REVIEW_ISSUE_NOTICE_JQ"'
     # A command echo is the whole body: the trigger, optional surrounding
     # whitespace, and any trailing punctuation. `\A`/`\z` anchor the whole
     # string under every Oniguruma syntax, so a body that merely contains the
@@ -53,7 +53,7 @@ untriaged_review_body_count() {
 	local PR=$1
 	local LAST_ME_TS
 	LAST_ME_TS=$(last_issue_comment_by_me_ts "$PR") || return 1
-	pull_reviews_json "$PR" | jq --slurp --arg me "$ME" --argjson last_me "$LAST_ME_TS" -r "$PASSISH_JQ"'
+	pull_reviews_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" --argjson last_me "$LAST_ME_TS" -r "$PASSISH_JQ"'
     # address-feedback/scripts/codex-threads.sh carries the same body test to
     # keep this container out of its review-body listing; keep the two in step.
     def codex_boilerplate_review_container:
@@ -93,8 +93,11 @@ untriaged_review_body_count() {
 
 unresolved_review_thread_count() {
 	local PR=$1
-	review_threads_json "$PR" | jq --slurp -r '
-    [ .[].data.repository.pullRequest.reviewThreads.nodes[]?
+	# A page without a thread list is an unread page, not zero threads.
+	review_threads_json "$PR" | feedback_require_body | jq --slurp -r '
+    if any(.[]; (.data.repository.pullRequest.reviewThreads.nodes | type) != "array")
+    then error("a review-thread page carries no thread list") else . end
+    | [ .[].data.repository.pullRequest.reviewThreads.nodes[]
       | select((.isResolved | not) and (.isOutdated | not))
     ]
     | length' 2>/dev/null

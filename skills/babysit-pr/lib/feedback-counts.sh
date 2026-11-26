@@ -4,6 +4,16 @@
 # counts for babysit-prs.sh. Sourced at top level; it only defines
 # functions.
 
+# feedback_require_body: copy stdin to stdout, or return 1 when it holds no
+# non-blank byte. `jq --slurp` reads an empty response as an empty list, so
+# without this a read that returned nothing counts as zero feedback.
+feedback_require_body() {
+	local body
+	body=$(cat)
+	[[ -n ${body//[[:space:]]/} ]] || return 1
+	printf '%s\n' "$body"
+}
+
 review_threads_json() {
 	local PR=$1
 	# shellcheck disable=SC2016 # a GraphQL query: its $names are GraphQL variables
@@ -100,7 +110,7 @@ unreplied_inline_count() {
 	local RESOLVED
 	RESOLVED=$(resolved_thread_roots "$PR") || RESOLVED=""
 	[[ $RESOLVED == \[*\] ]] || RESOLVED='[]'
-	pull_comments_json "$PR" | jq --slurp --arg me "$ME" \
+	pull_comments_json "$PR" | feedback_require_body | jq --slurp --arg me "$ME" \
 		--arg codex 'chatgpt-codex-connector[bot]' --argjson resolved "$RESOLVED" \
 		-r "$TIDY_JQ$WITHDRAWN_JQ$DISPOSITION_JQ"'
     (add // []) as $raw
