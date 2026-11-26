@@ -18,10 +18,16 @@ directory name. A skill directory may also contain:
 - `agents/openai.yaml`: an adapter for a runtime that needs skill metadata
   in a different format.
 - `scripts/`: helper scripts the skill runs.
+- `lib/`: shell modules the skill's scripts source. A module defines
+  functions and runs nothing at load.
+- `hooks/`: extension points a target repository fills in to adapt the
+  skill to that repository.
 - `references/`: supporting documents the skill reads on demand.
 - `assets/`: files the skill's output is built from or copies.
+- `tests/`: the skill's own test suite, when it does not sit next to the
+  scripts in `scripts/`.
 - `fixtures/`: recorded inputs and byte vectors the skill's own test suite
-  under `scripts/` reads.
+  reads.
 - One archived companion document next to `SKILL.md` when a superseded
   procedure must stay readable.
 - For a third-party skill, the upstream `LICENSE` file and the companion
@@ -30,8 +36,15 @@ directory name. A skill directory may also contain:
   small.
 
 Run `node scripts/validate-skills.mjs` to check every skill's frontmatter
-and layout, and `node --test skills/*/scripts/*.test.mjs` to run every
-skill's own suite. CI runs both on every pull request.
+and layout, and `bash scripts/test-skills.sh` (or `pnpm test:skills`) to run
+every skill's own suite. The runner takes the files from git under
+`skills/`: `*.test.mjs` runs with `node --test`; `*.test.sh`, `*-test.sh` and
+`test-*.sh` run with `bash`; `test_*.py` and `*_test.py` run with `unittest`,
+each loaded by its exact path. Every runner starts in the repository root. A
+Python file that runs no case and skips none fails. A kind with no files
+passes. A tracked test file that is not on disk makes the run incomplete
+(exit 2). The `skills` CI job runs both steps on Ubuntu and macOS on every
+pull request.
 
 ## Public readership
 
@@ -79,8 +92,8 @@ into this repository:
    notes, and personal model-routing rules. Move each rule that is a
    repository rule or a personal preference out of the skill, as
    [ADR 0001](docs/adr/0001-where-a-rule-lives.md) records.
-2. Run `node scripts/validate-skills.mjs` and
-   `node --test skills/*/scripts/*.test.mjs`, and fix every reported problem.
+2. Run `node scripts/validate-skills.mjs` and `bash scripts/test-skills.sh`,
+   and fix every reported problem.
 3. Verify the skill from a fresh clone: run `scripts/link-skills.sh`, then
    `scripts/link-skills.sh check`, and confirm the skill links with no
    drift.
@@ -203,14 +216,16 @@ The tests for `scripts/validate-skills.mjs` live under
 `limits.test.mjs`, `baseline-rows.test.mjs`, `ratchet.test.mjs` and
 `no-verdict.test.mjs`, plus a
 `helpers/` directory whose fixture builds a throwaway git repository for each
-case and runs the checker in it as a command. Run both directories with
-`pnpm test:scripts`. The cases of `scripts/test-link-skills.sh` live under
-`scripts/tests/link-skills/`, one file per topic, sourced from an explicit
-ordered list the way the modules are; the runner itself holds no case. Each
-topic file ends with a `cases_<topic>` function that calls `case_run` for its
-cases in order, and the runner's `main` calls those functions in order. A
-helper file shared by several topics, such as `install-hooks-common.sh`, holds
-no case and so has no `cases_<topic>` function; it is sourced before the topics
+case and runs the checker in it as a command. The tests for
+`scripts/test-skills.sh` live under `scripts/tests/test-skills/`; each case
+builds a throwaway git repository and runs the runner over it. Run the three
+directories with `pnpm test:scripts`. The cases of
+`scripts/test-link-skills.sh` live under `scripts/tests/link-skills/`, one
+file per topic, sourced from an explicit ordered list the way the modules
+are; the runner itself holds no case. Each topic file ends with a
+`cases_<topic>` function that calls `case_run` for its cases in order, and the
+runner's `main` calls those functions in order. A helper file shared by
+several topics, such as `install-hooks-common.sh`, holds no case and so has no `cases_<topic>` function; it is sourced before the topics
 that call it. A helper used by one topic file alone stays in that file and
 starts with `_`.
 

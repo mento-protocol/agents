@@ -97,8 +97,14 @@ jobs:
       - name: Test the validator
         run: node --test scripts/tests/validate-skills/*.test.mjs
 
-      - name: Test the skill scripts
-        run: node --test skills/*/scripts/*.test.mjs
+      - name: Test the skill test runner
+        run: node --test scripts/tests/test-skills/*.test.mjs
+
+      # Every skill's own suite: *.test.mjs with node --test, *.test.sh,
+      # *-test.sh and test-*.sh with bash, test_*.py and *_test.py with
+      # unittest, one file at a time. A kind with no files passes.
+      - name: Test the skills
+        run: bash scripts/test-skills.sh
 
       - name: Test link-skills.sh
         run: bash scripts/test-link-skills.sh

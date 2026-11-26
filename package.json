@@ -7,7 +7,8 @@
     "format": "trunk fmt",
     "lint": "trunk check --all",
     "test": "pnpm -r test",
-    "test:scripts": "node --test scripts/tests/check-shell-size/*.test.mjs scripts/tests/validate-skills/*.test.mjs",
+    "test:scripts": "node --test scripts/tests/check-shell-size/*.test.mjs scripts/tests/validate-skills/*.test.mjs scripts/tests/test-skills/*.test.mjs",
+    "test:skills": "bash scripts/test-skills.sh",
     "validate:skills": "node scripts/validate-skills.mjs"
   },
   "devDependencies": {
