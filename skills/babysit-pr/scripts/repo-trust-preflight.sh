@@ -100,9 +100,11 @@ SET_UPSTREAM=0
 # local HEAD. REPO_TRUST_REREAD_SECONDS overrides it with 0 to 60, for the
 # tests; any other value keeps the default.
 PUBLISHED_REREAD_SECONDS=5
-# shellcheck disable=SC2034 # read by repo-trust/publish.sh
 case "${REPO_TRUST_REREAD_SECONDS-}" in
-[0-9] | [1-5][0-9] | 60) PUBLISHED_REREAD_SECONDS=$REPO_TRUST_REREAD_SECONDS ;;
+[0-9] | [1-5][0-9] | 60)
+	# shellcheck disable=SC2034 # read by repo-trust/publish.sh
+	PUBLISHED_REREAD_SECONDS=$REPO_TRUST_REREAD_SECONDS
+	;;
 esac
 
 # ------------------------------------------------------------------- main ----
