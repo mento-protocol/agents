@@ -6,10 +6,11 @@
 # CODEX_REVIEW_ISSUE_NOTICE_JQ, PASSISH_JQ, TIDY_JQ, WITHDRAWN_JQ and
 # DISPOSITION_JQ; reads nothing.
 
-# A no-op first command. ShellCheck applies a directive that comes before a
-# file's first command to the whole file; after this line each directive below
-# covers only the assignment under it (ShellCheck wiki, "Directive").
-:
+# ShellCheck applies a directive that comes before a file's first command to
+# the whole file (ShellCheck wiki, "Directive"). This empty function is that
+# first command, so each directive below covers only the assignment under it.
+# Defining it runs nothing; nothing calls it.
+_jq_defs_directive_scope() { return 0; }
 
 # Codex can add one hidden `codex-review-state:v1` JSON line after
 # the summary marker while a review runs. It is optional, single-line, and cannot

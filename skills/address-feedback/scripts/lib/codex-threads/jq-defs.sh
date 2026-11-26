@@ -5,10 +5,11 @@
 # assignment, safe to source before the rest of the script runs. They are read
 # from lib/codex-threads/sections.sh.
 
-# A no-op first command. ShellCheck applies a directive that comes before a
-# file's first command to the whole file; after this line each directive below
-# covers only the assignment under it (ShellCheck wiki, "Directive").
-:
+# ShellCheck applies a directive that comes before a file's first command to
+# the whole file (ShellCheck wiki, "Directive"). This empty function is that
+# first command, so each directive below covers only the assignment under it.
+# Defining it runs nothing; nothing calls it.
+_codex_threads_jq_directive_scope() { return 0; }
 
 # Badge markup carries the priority as an image; the reader only needs the
 # priority. The "Useful? React with" footer is Codex boilerplate, not a finding.

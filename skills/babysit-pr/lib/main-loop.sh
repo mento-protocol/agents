@@ -22,7 +22,10 @@ main_loop_run() {
 
 	while true; do
 		main_loop_deadline_gate
-		main_loop_poll_pass || continue
+		# Called on its own line, not on the left of `||`, so a hook's `set -e`
+		# still applies inside the pass, as it did when the loop ran at top level.
+		main_loop_poll_pass
+		[[ $PASS_CUT_SHORT == "true" ]] && continue
 		main_loop_recount_adopted
 		main_loop_exit_if_terminal
 		main_loop_deadline_after_pass
@@ -56,7 +59,7 @@ main_loop_deadline_gate() {
 }
 
 # Polls every watched PR once and folds its state into the pass totals.
-# Returns 1 when the deadline cut the pass short.
+# Sets PASS_CUT_SHORT when the deadline cut the pass short.
 main_loop_poll_pass() {
 	ALL_CLEAR_NOW="true"
 	ALL_TERMINAL="true"
@@ -88,7 +91,6 @@ main_loop_poll_pass() {
 			ANY_CHECKS_WAIVED_NOW="true"
 		fi
 	done
-	[[ $PASS_CUT_SHORT == "true" ]] && return 1
 	return 0
 }
 

@@ -272,7 +272,8 @@ for hook in ${HOOKS[@]+"${HOOKS[@]}"}; do
 		repo_trust_hooks_admit "$hook" || continue
 		# shellcheck source=/dev/null
 		. "$hook"
-		repo_trust_hooks_verify_after "$hook"
+		# `${hook-}`: a hook that unsets `hook` must not stop the verify under set -u.
+		repo_trust_hooks_verify_after "${hook-}"
 		continue
 	fi
 	# shellcheck source=/dev/null
