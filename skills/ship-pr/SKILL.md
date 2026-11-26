@@ -389,6 +389,27 @@ is draft, run `gh pr ready <N>` immediately and report that automatic review may
 have been skipped. Change a pre-existing draft state only when the task or
 repository workflow authorizes that transition.
 
+**A failed create may have created the PR.** `gh pr create` can return HTTP 502 or a
+GraphQL error after GitHub created the PR, and it can also fail without creating one. A
+local guard that rejects the body is no GitHub failure: fix the body and rerun the guarded
+command. After every other failed create, look the branch up through REST, which does not
+use GraphQL: `gh api -X GET repos/<BASE_REPO>/pulls -f head=<head owner>:<head branch> -f base=<base> -f state=open --jq '.[] | select(.head.repo.full_name == "<HEAD_REPO>") | .html_url'`
+(`-X GET` makes the `-f` values query parameters, so a branch name with `#` still
+matches; the `select` drops a same-owner fork's PR). When it lists exactly one PR, bind it
+(`published --state <file> --pr <N>`) and continue; a blind retry fails with "already
+exists". `published`, the `isDraft` check and the `closingIssuesReferences` check read
+through GraphQL: retry each once, then report the PR URL with publication unconfirmed.
+Retry `gh pr create` once only after a lookup that succeeded and listed none; when a
+lookup fails twice, report publication as unconfirmed and create nothing more. If the
+retry also fails and a second lookup still lists none, create the PR with
+`gh api -X POST repos/<BASE_REPO>/pulls -f base=<base> -f head=<head owner>:<head branch> -f title=<title> -F body=@<body file>`,
+with the full final body in that one call. Look up after each failed POST; retry the POST
+once only after a lookup that lists none, and after a second failed POST, bind what the
+lookup finds or report the create as failed. Never post a placeholder body: a REST create
+and any `gh api -X PATCH` body edit skip a guard on `gh pr create` and `gh pr edit`, so
+check the body against `references/publish.md` yourself, including "Issue references".
+The never-draft check above still applies after a REST create.
+
 For the body, deferral issues, bot-review coordination, and the visual-evidence protocol
 for UI changes, read `references/publish.md` before writing the body. For every PR
 that adds or changes UI on any platform, embed labeled Before and After screenshots
