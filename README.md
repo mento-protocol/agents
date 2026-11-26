@@ -31,6 +31,38 @@ Use [test-audit](skills/test-audit/SKILL.md) to assess test value, strengthen
 regression proof, or remove redundant coverage while preserving distinct
 contracts. It includes a focused workflow and an optional subsystem audit guide.
 
+Planning and design skills:
+
+- [wayfinder](skills/wayfinder/SKILL.md) charts work too large for one session
+  as a map of decision tickets on the issue tracker and resolves them one at a
+  time. It falls back to a bundled local-Markdown tracker under `.scratch/`.
+- [to-spec](skills/to-spec/SKILL.md) turns the current conversation into a spec
+  on the issue tracker, and [to-tickets](skills/to-tickets/SKILL.md) splits a
+  spec or plan into tracer-bullet tickets with blocking edges.
+- [grill-with-docs](skills/grill-with-docs/SKILL.md) runs `grilling` together
+  with [domain-modeling](skills/domain-modeling/SKILL.md), which keeps a
+  project's `CONTEXT.md` glossary and `docs/adr/` decisions current.
+- [prototype](skills/prototype/SKILL.md) builds throwaway code to answer one
+  logic or UI question, and [research](skills/research/SKILL.md) delegates a
+  question to a background agent that cites primary sources.
+- [plan-review](skills/plan-review/SKILL.md) critiques a plan or proposal, and
+  [double-check](skills/double-check/SKILL.md) audits a finished change before
+  it ships.
+- [handoff](skills/handoff/SKILL.md) writes a summary for the next agent
+  session, and [incident-response](skills/incident-response/SKILL.md)
+  diagnoses a forwarded alert or production error.
+
+`wayfinder`, `to-spec`, `to-tickets`, `grill-with-docs` and `handoff` run only
+on explicit invocation: `/<name>` in Claude Code, `$<name>` in Codex.
+`wayfinder`, `to-spec`, `to-tickets`, `prototype`, `research`, `handoff`,
+`domain-modeling` and `grill-with-docs` derive from
+[mattpocock/skills](https://github.com/mattpocock/skills) under the MIT
+license; each `SKILL.md` records its upstream source and revision.
+
+[ADR 0001](docs/adr/0001-where-a-rule-lives.md) records which rules belong in
+a skill here and which belong in a target repository or a user's own
+instructions.
+
 ### Install
 
 Clone this repository anywhere, then run the link script:
